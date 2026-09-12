@@ -274,7 +274,7 @@ scheme), but an actual Sumsub/Doja account's credentials were not
 available in this sandbox, so the live vendor API calls themselves are
 unverified beyond matching their documented contract.
 
-### 4.5 Fiat payments & activation — **planned**
+### 4.5 Fiat payments & activation — **DONE**
 
 Original: Flutterwave webhook-driven activation (dispenses gas + reward
 token from a faucet wallet) and asset-purchase (two-phase: pre-sign the
@@ -289,7 +289,65 @@ unchanged) plus the channel-account-free activation design from §2 — the
 ERC-20 transfer (reward token) from a faucet-role derived key, instead of
 a Stellar payment from a hardcoded faucet secret key. `internal/fiat`
 already defines the `Processor` interface this plugs into; this phase adds
-a real `FlutterwaveProcessor` implementation.
+a real `FlutterwaveProcessor` implementation (`internal/fiat/flutterwave`).
+
+Implemented as a new `internal/components/fiat` component. The faucet key
+is `cryptoutil.DeriveKey`-derived from `FAUCET_KEY_SALT` (same pattern as
+the shared-access group keys and the recovery-authority key) rather than a
+live Stellar secret key stored in a `FaucetConfig` database row — an
+operator funds this one derived address with ETH and the reward token
+ahead of time, the same operational step as before, just with no private
+key at rest anywhere. `User.Activated` (from the original's on-chain
+existence check) is the idempotency guard against a duplicate webhook
+delivery ever double-dispensing. The fiat-to-token conversion uses the
+already-existing `rates.Provider` (currency/ETH and currency/reward-token
+rates) in place of the original's live DEX order-book lookup — the same
+role, a simpler and already-established abstraction; if no rate is
+configured for the reward token, activation still succeeds with gas only,
+degrading gracefully rather than blocking on an operator's missing config.
+
+Two scope trims, each because a dependency doesn't exist in this port yet
+(both documented as extension points, not silent drops):
+
+1. **A single global `ActivationConfig`, not the original's per-country
+   matrix.** The original priced activation per user country
+   (`CountryConfig.FiatActivationAmount`/`TrovTokenActivationPercent`,
+   defaulting to a hardcoded "NG" row); this port has no country/geo-IP
+   subsystem yet (that's Phase 13's reference-data work) and never captured
+   a user's country anywhere. `ActivationConfig` is a single seeded row an
+   operator edits directly; adding a per-country lookup later is a column
+   and a query change, not a redesign.
+2. **The asset-purchase leg is a generic, payment-type-agnostic
+   `SettlePendingInvoice`, not a Tokenization-specific handler.** The
+   original's "ASSET PURCHASE" webhook branch looked up a
+   `TokenizedAssetSubscription` row that doesn't exist until Phase 9.
+   `SettlePendingInvoice` submits whatever pre-signed transaction a
+   PENDING `FiatPaymentInvoice` carries and marks it COMPLETED, regardless
+   of what the payment is for — Phase 9 will create its invoices through
+   the same `CreateInvoice`/webhook path already built here, unchanged.
+
+Also fixed while porting: the original compared its Flutterwave webhook's
+`verif-hash` header with Go's plain `==` operator against the configured
+secret - a non-constant-time comparison of a secret value against
+attacker-controlled input. `flutterwave.VerifySignature` uses
+`crypto/subtle.ConstantTimeCompare` instead.
+
+Verification: `go build`/`vet`/`gofmt` clean; 13 unit tests in
+`internal/components/fiat/services` covering the activation quote,
+gas-only and gas+reward dispensing, the never-double-dispense idempotency
+guard, graceful reward-token skip without a configured rate, a hard
+failure without a gas rate, invoice-reference collision handling, and the
+generic pending-invoice settlement path (success, missing invoice, and
+no-signed-transaction, all as soft no-ops where the original was
+similarly tolerant of a duplicate/late webhook delivery). No real
+Flutterwave account was available in this sandbox, so
+`Processor.InitiateCharge`/`VerifyWebhook` are verified against
+Flutterwave's documented contract rather than a live call - and per this
+port's actual flow, neither is on the path activation and asset-purchase
+webhooks take (the client charges directly via Flutterwave's own SDK;
+this backend only records the invoice and reacts to the webhook), so
+their real-world exercise is deferred to whichever phase first needs a
+server-initiated charge.
 
 ### 4.6 Stablerail (NGN/cNGN rail) — **planned**
 
@@ -610,7 +668,7 @@ needs, not strictly by the order features appear above.
 | 1 | Shared/multi-party wallet access (§4.2) | Phase 0 | **DONE** |
 | 2 | Account security & recovery (§4.3) | Phase 0 | **DONE** |
 | 3 | KYC — Sumsub + Doja (§4.4) | Phase 0 | **DONE** |
-| 4 | Fiat payments & activation — Flutterwave (§4.5) | Phase 0, benefits from Phase 3 (activation often gated on KYC) |
+| 4 | Fiat payments & activation — Flutterwave (§4.5) | Phase 0, benefits from Phase 3 (activation often gated on KYC) | **DONE** |
 | 5 | Stablerail (§4.6) | Phase 3 (BVN/KYC-triggered onboarding) |
 | 6 | Crypto deposit/withdrawal — OneLiquidity (§4.7) | §5's contract-deployment infra (for the mint side) |
 | 7 | Market making (§4.8) | §11's design decision |

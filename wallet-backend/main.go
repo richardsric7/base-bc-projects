@@ -19,6 +19,7 @@ import (
 	"wallet-backend/internal/cache"
 	announcementsModels "wallet-backend/internal/components/announcements/models"
 	assetsModels "wallet-backend/internal/components/assets/models"
+	fiatModels "wallet-backend/internal/components/fiat/models"
 	kycModels "wallet-backend/internal/components/kyc/models"
 	paymentsModels "wallet-backend/internal/components/payments/models"
 	usersModels "wallet-backend/internal/components/users/models"
@@ -27,6 +28,7 @@ import (
 	assetsControllers "wallet-backend/internal/components/assets/controllers"
 	authControllers "wallet-backend/internal/components/auth/controllers"
 	callbacksControllers "wallet-backend/internal/components/callbacks/controllers"
+	fiatControllers "wallet-backend/internal/components/fiat/controllers"
 	kycControllers "wallet-backend/internal/components/kyc/controllers"
 	paymentsControllers "wallet-backend/internal/components/payments/controllers"
 	ratesControllers "wallet-backend/internal/components/rates/controllers"
@@ -37,6 +39,8 @@ import (
 	usersControllers "wallet-backend/internal/components/users/controllers"
 
 	"wallet-backend/internal/db"
+	"wallet-backend/internal/fiat"
+	"wallet-backend/internal/fiat/flutterwave"
 	"wallet-backend/internal/kyc"
 	"wallet-backend/internal/middleware"
 	"wallet-backend/internal/network"
@@ -56,6 +60,7 @@ func allModels() []interface{} {
 	models = append(models, announcementsModels.Models...)
 	models = append(models, sharedaccessModels.Models...)
 	models = append(models, kycModels.Models...)
+	models = append(models, fiatModels.Models...)
 	return models
 }
 
@@ -82,6 +87,7 @@ func main() {
 	seedSecurityQuestions(gormDB)
 	seedReservedNames(gormDB)
 	seedSumsubLevels(gormDB)
+	seedActivationConfig(gormDB)
 
 	appCache := cache.NewNoopCache()
 	if env.CacheEnabled {
@@ -119,6 +125,14 @@ func main() {
 		alerts = alerting.NewDiscordWebhookNotifier(env.DiscordWebhookURL)
 	}
 
+	var fiatProcessor fiat.Processor
+	if env.FlutterwaveSecretKey != "" {
+		fiatProcessor = flutterwave.New(env.FlutterwaveSecretKey, env.FlutterwaveSecretHash)
+		log.Println("fiat: Flutterwave processor configured")
+	} else {
+		log.Println("fiat: no processor configured (set FLUTTERWAVE_SECRET_KEY to enable Flutterwave)")
+	}
+
 	ratesProvider := rates.NewStaticProvider(map[string]decimal.Decimal{
 		// Example fixtures - replace with a live provider or DB-backed
 		// table for production use.
@@ -137,7 +151,7 @@ func main() {
 		Push:    notify.NewConsolePushProvider(),
 		Storage: blobStorage,
 		KYC:     kyc.NewManualKYCProvider(),
-		Fiat:    nil, // no default fiat processor; wire one in per internal/fiat's doc comment.
+		Fiat:    fiatProcessor,
 		Rates:   ratesProvider,
 		Alerts:  alerts,
 
@@ -154,6 +168,10 @@ func main() {
 		SumsubToken:     env.SumsubToken,
 		SumsubSecretKey: env.SumsubSecretKey,
 		DojaSecretKey:   env.DojaSecretKey,
+
+		FaucetKeySalt:               env.FaucetKeySalt,
+		ActivationRewardTokenSymbol: env.ActivationRewardTokenSymbol,
+		FlutterwaveSecretHash:       env.FlutterwaveSecretHash,
 	}
 
 	router := gin.Default()
@@ -171,6 +189,7 @@ func main() {
 	announcementsControllers.Init(router, gc)
 	callbacksControllers.Init(router, gc)
 	kycControllers.Init(router, gc)
+	fiatControllers.Init(router, gc)
 
 	log.Printf("%s listening on :%s", env.Organisation, env.Port)
 	if err := router.Run(":" + env.Port); err != nil {
@@ -245,5 +264,21 @@ func seedSumsubLevels(gormDB *gorm.DB) {
 	}
 	if err := gormDB.Create(&defaults).Error; err != nil {
 		log.Printf("warning: failed to seed default Sumsub levels: %v", err)
+	}
+}
+
+// seedActivationConfig inserts the single default activation-price row on
+// first boot, so /v1/fiat/activate has something to quote out of the box.
+// An operator tunes the live price by editing this one row directly (see
+// fiatModels.ActivationConfig's doc comment for why there's no admin UI or
+// per-country matrix here yet).
+func seedActivationConfig(gormDB *gorm.DB) {
+	var count int64
+	gormDB.Model(&fiatModels.ActivationConfig{}).Count(&count)
+	if count > 0 {
+		return
+	}
+	if err := gormDB.Create(&fiatModels.ActivationConfig{}).Error; err != nil {
+		log.Printf("warning: failed to seed default activation config: %v", err)
 	}
 }

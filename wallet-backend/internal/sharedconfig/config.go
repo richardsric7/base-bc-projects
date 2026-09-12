@@ -64,6 +64,19 @@ type GlobalConfig struct {
 	SumsubToken     string
 	SumsubSecretKey string
 	DojaSecretKey   string
+
+	// FaucetKeySalt seeds the activation-faucet key derivation (see
+	// internal/components/fiat) - same rotation caution as GroupKeySalt.
+	// ActivationRewardTokenSymbol is the CuratedToken symbol activation
+	// dispenses alongside starter gas; empty disables the reward-token half
+	// (only gas is sent).
+	FaucetKeySalt               string
+	ActivationRewardTokenSymbol string
+
+	// FlutterwaveSecretHash is the shared secret Flutterwave echoes back in
+	// its webhook's "verif-hash" header (its dashboard's "Secret Hash"
+	// setting, not a payment key) - see internal/fiat/flutterwave.
+	FlutterwaveSecretHash string
 }
 
 // Env holds every raw environment-derived setting. Load it once in main and
@@ -108,6 +121,12 @@ type Env struct {
 	SumsubToken     string
 	SumsubSecretKey string
 	DojaSecretKey   string
+
+	FaucetKeySalt               string
+	ActivationRewardTokenSymbol string
+
+	FlutterwaveSecretKey  string
+	FlutterwaveSecretHash string
 
 	Organisation string
 }
@@ -158,6 +177,12 @@ func LoadEnv() Env {
 		SumsubToken:     getEnv("SUMSUB_TOKEN", ""),
 		SumsubSecretKey: getEnv("SUMSUB_SECRET_KEY", ""),
 		DojaSecretKey:   getEnv("DOJA_SECRET_KEY", ""),
+
+		FaucetKeySalt:               getEnv("FAUCET_KEY_SALT", "dev-only-change-me"),
+		ActivationRewardTokenSymbol: getEnv("ACTIVATION_REWARD_TOKEN_SYMBOL", ""),
+
+		FlutterwaveSecretKey:  getEnv("FLUTTERWAVE_SECRET_KEY", ""),
+		FlutterwaveSecretHash: getEnv("FLUTTERWAVE_SECRET_HASH", ""),
 
 		Organisation: getEnv("ORGANISATION", "wallet-backend"),
 	}

@@ -213,6 +213,34 @@ phase gating a feature on KYC (fiat activation limits, tokenization
 purchase limits) should read this field regardless of which vendor a given
 user verified through.
 
+## Fiat payments & activation
+
+A one-time paid "activation" flow that dispenses starter ETH gas and a
+reward ERC-20 token once a new user pays a configured fiat amount, plus a
+generic decoupled invoice pattern any future on-chain-settling fiat
+payment (e.g. a Phase 9 asset purchase) can reuse unchanged; see
+`PLAN.md` §4.5 for the full design and its two scope trims (a single
+global activation price rather than per-country, and a payment-type-
+agnostic settlement path rather than a Tokenization-specific one).
+
+- `GET /v1/fiat/activate` (authed) returns the current price:
+  `{"alreadyActivated", "fiatAmount", "fiatCurrency", "rewardTokenPercent", "gasPercent"}`.
+- The client pays directly via Flutterwave's own checkout SDK, using a
+  client-chosen idempotency reference as Flutterwave's `tx_ref`.
+- Flutterwave confirms the charge to
+  `POST /v1/callbacks/fiat/flutterwave/webhook` (verified via the
+  `verif-hash` header against `FLUTTERWAVE_SECRET_HASH`, constant-time
+  compared). For `meta_data.product == "activation"`, this derives the
+  starter-gas/reward-token split from `ActivationConfig`, converts each
+  half from fiat to on-chain amounts via the existing `rates.Provider`,
+  and dispenses both from a `FAUCET_KEY_SALT`-derived key - guarded by
+  `User.Activated` so a duplicate webhook delivery can never double-pay.
+  Any other product settles through the generic
+  `POST /v1/fiat/flutterwave/invoices` → webhook → submit-signed-tx path
+  (`SettlePendingInvoice`), which doesn't care what the payment is for.
+- `GET /v1/fiat/payments` (authed) lists the caller's completed payments
+  and invoices.
+
 ## Adding a real integration
 
 The `notify`, `storage`, `kyc`, `fiat`, `rates`, and `alerting` packages are

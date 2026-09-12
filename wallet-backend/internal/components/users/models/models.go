@@ -18,10 +18,16 @@ type User struct {
 	// means unverified. Ported from the original's User.KYCVerified; other
 	// phases (fiat activation limits, tokenization purchase limits) gate on
 	// this field, exactly as they did upstream.
-	KYCVerifiedLevel       int       `gorm:"default:0" json:"kycVerifiedLevel"`
-	AccountRecoveryEnabled bool      `gorm:"default:false" json:"accountRecoveryEnabled"`
-	CreatedAt              time.Time `json:"createdAt"`
-	UpdatedAt              time.Time `json:"updatedAt"`
+	KYCVerifiedLevel       int  `gorm:"default:0" json:"kycVerifiedLevel"`
+	AccountRecoveryEnabled bool `gorm:"default:false" json:"accountRecoveryEnabled"`
+	// Activated records whether this user has completed the one-time paid
+	// activation flow (see internal/components/fiat) that dispenses
+	// starter gas and a reward token - checked so the payout can never be
+	// claimed twice, even if the provider's webhook is delivered more than
+	// once for the same successful charge.
+	Activated bool      `gorm:"default:false" json:"activated"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // UserWallet lets a user register additional EVM addresses they control
