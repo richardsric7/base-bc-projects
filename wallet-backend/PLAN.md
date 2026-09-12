@@ -814,24 +814,61 @@ Implementation notes (what actually shipped, beyond the design above):
   gating (sale status, private-offering membership, the fiat-invoice hook
   wiring), and the early-exit penalty-payout formula.
 
-### 4.10 Patron/membership — **planned**
+### 4.10 Patron/membership — **DONE**
 
 Original: `PatronPackage`/`PatronTier`/`PatronMembershipGrade` (pricing
 matrix), `UserPatronMembership` (active membership),
 `UserPatronSubscriptionLog` (history, supports future-dated effective
 changes), `PatronSubscriptionPaymentAsset`. Subscribe via a standard
-payment to a dedicated `PATRON_FEE_WALLET`.
+payment to a dedicated `PATRON_FEE_WALLET`, with the upgrade/downgrade
+qualification rules and effective-date scheduling (instant vs. deferred to
+the day after an existing lower-tier membership expires) hardcoded around
+three fixed packages (GOLD/PLATINUM/DIAMOND) and three fixed tiers
+(MONTHLY/ANNUAL/LIFETIME).
 
-Base design: fully chain-agnostic business logic — the only change is the
-payment leg (native/ERC-20 transfer via the existing payments Build/Submit,
-to a `PATRON_FEE_WALLET` config value instead of a Stellar address). **Fix
-included, not just ported**: the audit found the original's activation
-worker (`UpdateUserPatronMemberships`, which promotes future-dated pending
-subscriptions) runs **once at boot only**, not on a recurring schedule —
-a subscription that becomes effective while the process keeps running past
-that point is never promoted until the next restart. The Base port makes
-this a proper recurring worker (matching the cadence of the tokenization
-sales-activation workers) rather than reproducing the bug.
+Base design: fully chain-agnostic business logic, ported field-for-field —
+`internal/components/patron`. The only real change is the payment leg: a
+plain native/ERC-20 transfer (via `network.Client.BuildNativeTransferTx`/
+`BuildERC20TransferTx`) to a `cryptoutil.DeriveKey`-derived fee wallet
+(`PATRON_FEE_WALLET_SALT`, matching every other derived fee-collection
+address in this port) rather than a configured raw Stellar address, and no
+DEX-routing-through-TROV to convert an arbitrary payment asset (Base has
+no protocol DEX to route through — the buyer pays directly in one of a
+configured allow-list of currencies, `PatronSubscriptionPaymentAsset`
+wrapping a `CuratedToken` symbol, at its live USD rate via the existing
+`rates.Provider`). The upstream two-call build-XDR-then-resubmit-with-
+rollback-if-unsigned flow (an artifact of Stellar's signing model, not a
+deliberate design) is replaced with a cleaner Build → Confirm split
+matching the rest of this port: `BuildSubscription` validates and quotes
+without persisting anything, `ConfirmSubscription` re-validates, records
+the subscription log, and — only if the upgrade takes effect immediately —
+the active membership row, once the buyer's self-submitted payment
+confirms.
+
+**Two bugs found while porting the activation worker, both fixed rather
+than reproduced** (not just the one originally flagged):
+
+1. Upstream's `UpdateUserPatronMemberships` runs once at process boot
+   only — a subscription that becomes effective while the process keeps
+   running past that point is never promoted until the next restart. This
+   port calls `PromotePendingMemberships` from a proper recurring worker
+   (main.go, 30s poll, matching the tokenization sales-activation cadence).
+2. Upstream's own "find pending subscriptions to promote" query selects
+   `effective_date >= now()` — backwards from what a "promote what's now
+   due" sweep needs. As written, it promotes **future-dated** upgrades
+   immediately (defeating the deferred-upgrade feature entirely) and stops
+   selecting a log the moment its effective date has actually passed,
+   meaning a genuinely-due promotion past its first sweep would never
+   apply. This port selects `effective_date <= now()`, the correct
+   direction, verified by `TestPromotePendingMemberships_PromotesDueLogsOnly`.
+
+Verification: `go build`/`vet`/`gofmt` clean; 15 unit tests in
+`internal/components/patron/services` covering the package/tier
+upgrade-qualification matrix, the instant-vs-deferred effective-date
+scheduling (new member, upgrade from a still-valid lower tier, an expired
+membership renewing instantly, an existing lifetime membership always
+activating instantly), pending-subscription rejection, and the activation
+worker's due-vs-future selection.
 
 ### 4.11 Servicelinks partner API — **planned**
 
@@ -1047,7 +1084,7 @@ needs, not strictly by the order features appear above.
 | 7 | Market making (§4.8) | §11's design decision | **DONE** |
 | 8 | On-chain infra: Solidity contracts + deployment helper, price reading, log polling (§5) | Needed before Phase 9 | **DONE** |
 | 9 | Tokenization (§4.9) | Phase 8, Phase 1 (closed-group reuse), Phase 4 (fiat purchase flow) | **DONE** (partner-API passthrough deferred to Phase 11 — see §4.9) |
-| 10 | Patron/membership (§4.10) | Phase 0 | |
+| 10 | Patron/membership (§4.10) | Phase 0 | **DONE** |
 | 11 | Servicelinks partner API (§4.11), including the API-key auth middleware (§5) | Nearly everything above, since it's a passthrough layer | |
 | 12 | Admin surface (§4.12) | Whatever subsystems exist by then | |
 | 13 | Reference data, shortlinks, geo-IP, Discord alerting parity (§4.13) | Can run in parallel with any phase | |

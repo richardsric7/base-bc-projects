@@ -117,6 +117,12 @@ type GlobalConfig struct {
 	TokenizationIssuerKeySalt       string
 	TokenizationDistributionKeySalt string
 	TokenizationTokenLimit          decimal.Decimal
+
+	// PatronFeeWalletSalt seeds the patron-subscription fee wallet key
+	// derivation (see internal/components/patron) - same rotation
+	// caution as every other derived fee-collection address in this port.
+	PatronFeeWalletSalt string
+	PatronVATPercent    float64
 }
 
 // Env holds every raw environment-derived setting. Load it once in main and
@@ -183,6 +189,9 @@ type Env struct {
 	TokenizationIssuerKeySalt       string
 	TokenizationDistributionKeySalt string
 	TokenizationTokenLimit          string
+
+	PatronFeeWalletSalt string
+	PatronVATPercent    float64
 
 	Organisation string
 }
@@ -255,6 +264,9 @@ func LoadEnv() Env {
 		TokenizationIssuerKeySalt:       getEnv("TOKENIZATION_ISSUER_KEY_SALT", "dev-only-change-me"),
 		TokenizationDistributionKeySalt: getEnv("TOKENIZATION_DISTRIBUTION_KEY_SALT", "dev-only-change-me"),
 		TokenizationTokenLimit:          getEnv("TOKENIZATION_TOKEN_LIMIT", "0"),
+
+		PatronFeeWalletSalt: getEnv("PATRON_FEE_WALLET_SALT", "dev-only-change-me"),
+		PatronVATPercent:    getEnvFloat64("PATRON_VAT_PERCENT", 0),
 
 		Organisation: getEnv("ORGANISATION", "wallet-backend"),
 	}

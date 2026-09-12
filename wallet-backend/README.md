@@ -472,6 +472,31 @@ schema only, never wired to a route or worker, matching its actual
 middleware, since the `servicelinks` component it belongs to doesn't exist
 yet.
 
+## Patron/membership
+
+A subscription tier system — three fixed packages (`GOLD` < `PLATINUM` <
+`DIAMOND`) each sellable at three fixed cadences (`MONTHLY` < `ANNUAL` <
+`LIFETIME`), seeded on boot. See `PLAN.md` §4.10 for the full design,
+including two activation-worker bugs found upstream and fixed rather than
+reproduced.
+
+- `GET /v1/patron/reference` (public) lists packages, tiers, membership
+  grades (package+tier → USD price), and accepted payment currencies.
+- `GET /v1/patron` (authed) returns the caller's current membership, if any.
+- `GET /v1/patron/history` (authed) lists their subscription history,
+  including any not-yet-effective queued upgrade.
+- `POST /v1/patron/subscribe` (authed) with
+  `{"membershipGradeId", "paymentAssetSymbol"}` validates the upgrade is
+  actually allowed (you can't move to a grade at or below a still-valid
+  higher one) and returns an unsigned payment transaction plus a quote
+  (price, VAT, and whether it takes effect immediately or is queued to
+  start the day after your current membership expires).
+  `POST /v1/patron/subscribe/confirm` (authed) with the same body plus
+  `txHash` re-validates, records the subscription, and — only if it takes
+  effect immediately — updates the active membership.
+- A background worker (main.go, 30s poll) promotes queued upgrades once
+  their effective date arrives.
+
 ## Adding a real integration
 
 The `notify`, `storage`, `kyc`, `fiat`, `rates`, and `alerting` packages are

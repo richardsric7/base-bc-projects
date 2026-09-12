@@ -23,6 +23,7 @@ import (
 	fiatModels "wallet-backend/internal/components/fiat/models"
 	kycModels "wallet-backend/internal/components/kyc/models"
 	marketModels "wallet-backend/internal/components/market/models"
+	patronModels "wallet-backend/internal/components/patron/models"
 	paymentsModels "wallet-backend/internal/components/payments/models"
 	tokenizationModels "wallet-backend/internal/components/tokenization/models"
 	usersModels "wallet-backend/internal/components/users/models"
@@ -35,6 +36,7 @@ import (
 	fiatControllers "wallet-backend/internal/components/fiat/controllers"
 	kycControllers "wallet-backend/internal/components/kyc/controllers"
 	marketControllers "wallet-backend/internal/components/market/controllers"
+	patronControllers "wallet-backend/internal/components/patron/controllers"
 	paymentsControllers "wallet-backend/internal/components/payments/controllers"
 	ratesControllers "wallet-backend/internal/components/rates/controllers"
 	rootControllers "wallet-backend/internal/components/root/controllers"
@@ -73,6 +75,7 @@ func allModels() []interface{} {
 	models = append(models, cryptoModels.Models...)
 	models = append(models, marketModels.Models...)
 	models = append(models, tokenizationModels.Models...)
+	models = append(models, patronModels.Models...)
 	return models
 }
 
@@ -100,6 +103,7 @@ func main() {
 	seedReservedNames(gormDB)
 	seedSumsubLevels(gormDB)
 	seedActivationConfig(gormDB)
+	seedPatronCatalog(gormDB)
 
 	appCache := cache.NewNoopCache()
 	if env.CacheEnabled {
@@ -203,6 +207,9 @@ func main() {
 		TokenizationIssuerKeySalt:       env.TokenizationIssuerKeySalt,
 		TokenizationDistributionKeySalt: env.TokenizationDistributionKeySalt,
 		TokenizationTokenLimit:          parseDecimalOrZero(env.TokenizationTokenLimit),
+
+		PatronFeeWalletSalt: env.PatronFeeWalletSalt,
+		PatronVATPercent:    env.PatronVATPercent,
 	}
 
 	router := gin.Default()
@@ -225,6 +232,7 @@ func main() {
 	cryptoSvc := cryptoControllers.Init(router, gc)
 	marketControllers.Init(router, gc)
 	tokenizationSvc := tokenizationControllers.Init(router, gc)
+	patronSvc := patronControllers.Init(router, gc)
 
 	// Wire the KYC component's Doja BVN-completion hook to Stablerail
 	// onboarding - see kyc/services.Service.OnBVNVerified's doc comment
@@ -276,6 +284,17 @@ func main() {
 		for {
 			tokenizationSvc.ActivatePrimarySales()
 			tokenizationSvc.ActivateSecondarySales(context.Background())
+			time.Sleep(30 * time.Second)
+		}
+	}()
+
+	// A proper recurring worker - upstream's equivalent runs once at boot
+	// only, so a subscription that becomes effective while the process
+	// keeps running past that point is never promoted until the next
+	// restart (PLAN.md §4.10, fixed rather than reproduced).
+	go func() {
+		for {
+			patronSvc.PromotePendingMemberships()
 			time.Sleep(30 * time.Second)
 		}
 	}()
@@ -391,5 +410,38 @@ func seedActivationConfig(gormDB *gorm.DB) {
 	}
 	if err := gormDB.Create(&fiatModels.ActivationConfig{}).Error; err != nil {
 		log.Printf("warning: failed to seed default activation config: %v", err)
+	}
+}
+
+// seedPatronCatalog inserts the fixed GOLD/PLATINUM/DIAMOND package and
+// MONTHLY/ANNUAL/LIFETIME tier catalog upstream hardcodes into its own
+// upgrade/downgrade comparisons (see patron/services.validateUpgrade) -
+// these IDs are load-bearing, not just labels, so they're seeded once
+// rather than left for an operator to configure differently.
+func seedPatronCatalog(gormDB *gorm.DB) {
+	var packageCount int64
+	gormDB.Model(&patronModels.PatronPackage{}).Count(&packageCount)
+	if packageCount == 0 {
+		packages := []patronModels.PatronPackage{
+			{ID: "GOLD", Description: "Gold membership", PriorityOrder: 3},
+			{ID: "PLATINUM", Description: "Platinum membership", PriorityOrder: 2},
+			{ID: "DIAMOND", Description: "Diamond membership", PriorityOrder: 1},
+		}
+		if err := gormDB.Create(&packages).Error; err != nil {
+			log.Printf("warning: failed to seed default patron packages: %v", err)
+		}
+	}
+
+	var tierCount int64
+	gormDB.Model(&patronModels.PatronTier{}).Count(&tierCount)
+	if tierCount == 0 {
+		tiers := []patronModels.PatronTier{
+			{ID: "MONTHLY", CanExpire: true, PriorityOrder: 3},
+			{ID: "ANNUAL", CanExpire: true, PriorityOrder: 2},
+			{ID: "LIFETIME", CanExpire: false, PriorityOrder: 1},
+		}
+		if err := gormDB.Create(&tiers).Error; err != nil {
+			log.Printf("warning: failed to seed default patron tiers: %v", err)
+		}
 	}
 }
