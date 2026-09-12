@@ -8,13 +8,14 @@ import "time"
 // internal/components/auth) - the server never sees, let alone stores, the
 // matching private key.
 type User struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Username  string    `gorm:"uniqueIndex;size:32;not null" json:"username"`
-	Email     string    `gorm:"uniqueIndex;size:255;not null" json:"email"`
-	Address   string    `gorm:"uniqueIndex;size:42;not null" json:"address"`
-	KYCStatus string    `gorm:"size:32;default:pending" json:"kycStatus"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID                     uint      `gorm:"primaryKey" json:"id"`
+	Username               string    `gorm:"uniqueIndex;size:32;not null" json:"username"`
+	Email                  string    `gorm:"uniqueIndex;size:255;not null" json:"email"`
+	Address                string    `gorm:"uniqueIndex;size:42;not null" json:"address"`
+	KYCStatus              string    `gorm:"size:32;default:pending" json:"kycStatus"`
+	AccountRecoveryEnabled bool      `gorm:"default:false" json:"accountRecoveryEnabled"`
+	CreatedAt              time.Time `json:"createdAt"`
+	UpdatedAt              time.Time `json:"updatedAt"`
 }
 
 // UserWallet lets a user register additional EVM addresses they control
@@ -44,6 +45,44 @@ type UserSecurityAnswer struct {
 	AnswerHash         string `gorm:"size:255;not null" json:"-"`
 }
 
+// AccountRecoveryEmailVerification stores a one-time recovery OTP sent to a
+// user's registered email. Recovery is deliberately public/unauthenticated
+// (see services/recovery.go) since its entire purpose is helping someone
+// who can no longer sign in - this record plus a correct set of security
+// answers are the two factors that stand in for a signature.
+type AccountRecoveryEmailVerification struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	UserID    uint      `gorm:"index;not null" json:"userId"`
+	Code      string    `gorm:"size:16;not null" json:"-"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// AccountRecoveryLog is a permanent audit record of every completed
+// recovery. AuthoritySignature is an EIP-191 signature over a description
+// of this exact recovery, produced by a recovery-authority key derived via
+// cryptoutil.DeriveKey (see services/recovery.go) - a tamper-evident
+// attestation that this specific recovery was authorized by the server,
+// standing in for the on-chain co-signature the original's native
+// Stellar multi-sig recovery flow used (there's nothing to co-sign
+// on-chain here, since re-pointing which address controls a username is a
+// purely application-level change, not a chain operation - see PLAN.md §4.3).
+type AccountRecoveryLog struct {
+	ID                 uint      `gorm:"primaryKey" json:"id"`
+	Username           string    `gorm:"index;size:32;not null" json:"username"`
+	OldAddress         string    `gorm:"size:42;not null" json:"oldAddress"`
+	NewAddress         string    `gorm:"size:42;not null" json:"newAddress"`
+	AuthoritySignature string    `gorm:"size:132;not null" json:"authoritySignature"`
+	CreatedAt          time.Time `json:"createdAt"`
+}
+
+// ReservedName is a username no one may register (staff handles, brand
+// names, obviously-impersonation-prone strings). Checked at registration.
+type ReservedName struct {
+	ID   uint   `gorm:"primaryKey" json:"id"`
+	Name string `gorm:"uniqueIndex;size:32;not null" json:"name"`
+}
+
 // Models is every GORM model this component owns, for the central
 // migration list assembled in main.go.
 var Models = []interface{}{
@@ -51,4 +90,7 @@ var Models = []interface{}{
 	&UserWallet{},
 	&SecurityQuestion{},
 	&UserSecurityAnswer{},
+	&AccountRecoveryEmailVerification{},
+	&AccountRecoveryLog{},
+	&ReservedName{},
 }

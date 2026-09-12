@@ -77,6 +77,7 @@ func main() {
 	}
 
 	seedSecurityQuestions(gormDB)
+	seedReservedNames(gormDB)
 
 	appCache := cache.NewNoopCache()
 	if env.CacheEnabled {
@@ -141,6 +142,9 @@ func main() {
 		SIWEDomain:   env.SIWEDomain,
 		GroupKeySalt: env.GroupKeySalt,
 		Organisation: env.Organisation,
+
+		RecoveryAuthoritySalt: env.RecoveryAuthoritySalt,
+		RecoveryOTPTTL:        durationFromMinutes(env.RecoveryOTPTTLMinutes),
 	}
 
 	router := gin.Default()
@@ -183,5 +187,31 @@ func seedSecurityQuestions(gormDB *gorm.DB) {
 	}
 	if err := gormDB.Create(&defaults).Error; err != nil {
 		log.Printf("warning: failed to seed default security questions: %v", err)
+	}
+}
+
+// seedReservedNames inserts a small default blocklist on first boot so
+// obviously staff/brand/impersonation-prone usernames are never available,
+// even before an operator has customized the list.
+func seedReservedNames(gormDB *gorm.DB) {
+	var count int64
+	gormDB.Model(&usersModels.ReservedName{}).Count(&count)
+	if count > 0 {
+		return
+	}
+	defaults := []usersModels.ReservedName{
+		{Name: "admin"},
+		{Name: "administrator"},
+		{Name: "root"},
+		{Name: "support"},
+		{Name: "wallet-backend"},
+		{Name: "trovo"},
+		{Name: "system"},
+		{Name: "moderator"},
+		{Name: "help"},
+		{Name: "security"},
+	}
+	if err := gormDB.Create(&defaults).Error; err != nil {
+		log.Printf("warning: failed to seed default reserved names: %v", err)
 	}
 }

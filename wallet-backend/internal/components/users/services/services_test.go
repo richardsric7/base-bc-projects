@@ -2,6 +2,7 @@ package services
 
 import (
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/glebarez/sqlite"
@@ -9,6 +10,7 @@ import (
 
 	"wallet-backend/internal/apperrors"
 	"wallet-backend/internal/components/users/models"
+	"wallet-backend/internal/notify"
 )
 
 func newTestDB(t *testing.T) *gorm.DB {
@@ -23,6 +25,14 @@ func newTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
+// newTestService builds a Service backed by a fresh in-memory DB and a
+// console mailer, for tests that don't care about the recovery salt/TTL
+// specifically (those use their own setup in recovery_test.go).
+func newTestService(t *testing.T) *Service {
+	t.Helper()
+	return New(newTestDB(t), notify.NewConsoleMailer(), "test-recovery-salt", 15*time.Minute)
+}
+
 // randomAddress generates a fresh, syntactically valid EVM address for tests
 // that just need "some address," not a specific one.
 func randomAddress(t *testing.T) string {
@@ -35,7 +45,7 @@ func randomAddress(t *testing.T) string {
 }
 
 func TestRegister_Success(t *testing.T) {
-	svc := New(newTestDB(t))
+	svc := newTestService(t)
 	address := randomAddress(t)
 
 	user, err := svc.Register(RegisterInput{Username: "alice", Email: "alice@example.com", Address: address})
@@ -56,7 +66,7 @@ func TestRegister_Success(t *testing.T) {
 }
 
 func TestRegister_InvalidAddress(t *testing.T) {
-	svc := New(newTestDB(t))
+	svc := newTestService(t)
 	_, err := svc.Register(RegisterInput{Username: "alice", Email: "alice@example.com", Address: "not-an-address"})
 	if err == nil {
 		t.Fatal("expected an error for an invalid address")
@@ -68,7 +78,7 @@ func TestRegister_InvalidAddress(t *testing.T) {
 }
 
 func TestRegister_DuplicateUsername(t *testing.T) {
-	svc := New(newTestDB(t))
+	svc := newTestService(t)
 	if _, err := svc.Register(RegisterInput{Username: "alice", Email: "alice@example.com", Address: randomAddress(t)}); err != nil {
 		t.Fatalf("first Register returned error: %v", err)
 	}
@@ -84,7 +94,7 @@ func TestRegister_DuplicateUsername(t *testing.T) {
 }
 
 func TestGetByAddress(t *testing.T) {
-	svc := New(newTestDB(t))
+	svc := newTestService(t)
 	address := randomAddress(t)
 	if _, err := svc.Register(RegisterInput{Username: "carol", Email: "carol@example.com", Address: address}); err != nil {
 		t.Fatalf("Register returned error: %v", err)
@@ -104,7 +114,7 @@ func TestGetByAddress(t *testing.T) {
 }
 
 func TestSecurityAnswer_SetAndVerify(t *testing.T) {
-	svc := New(newTestDB(t))
+	svc := newTestService(t)
 	user, err := svc.Register(RegisterInput{Username: "bob", Email: "bob@example.com", Address: randomAddress(t)})
 	if err != nil {
 		t.Fatalf("Register returned error: %v", err)

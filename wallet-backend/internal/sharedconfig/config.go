@@ -48,6 +48,12 @@ type GlobalConfig struct {
 	// group's controlling address changes with it, so treat it like a
 	// secret and never rotate it casually once groups exist in production.
 	GroupKeySalt string
+
+	// RecoveryAuthoritySalt seeds the account-recovery attestation key (see
+	// internal/components/users/services/recovery.go) - same rotation
+	// caution as GroupKeySalt.
+	RecoveryAuthoritySalt string
+	RecoveryOTPTTL        time.Duration
 }
 
 // Env holds every raw environment-derived setting. Load it once in main and
@@ -84,6 +90,9 @@ type Env struct {
 	SIWEDomain       string
 
 	GroupKeySalt string
+
+	RecoveryAuthoritySalt string
+	RecoveryOTPTTLMinutes int
 
 	Organisation string
 }
@@ -126,6 +135,9 @@ func LoadEnv() Env {
 		SIWEDomain:       getEnv("SIWE_DOMAIN", "localhost"),
 
 		GroupKeySalt: getEnv("GROUP_KEY_SALT", "dev-only-change-me"),
+
+		RecoveryAuthoritySalt: getEnv("RECOVERY_AUTHORITY_SALT", "dev-only-change-me"),
+		RecoveryOTPTTLMinutes: getEnvInt("RECOVERY_OTP_TTL_MINUTES", 15),
 
 		Organisation: getEnv("ORGANISATION", "wallet-backend"),
 	}

@@ -132,6 +132,49 @@ for the full design and its tradeoffs versus a smart-contract wallet.
 groups; `GET /v1/shared-access/balance/:groupId` (optional `?token=`)
 checks the group wallet's balance.
 
+## Account recovery
+
+There is no way to "re-key" a lost EVM address the way Stellar's native
+multi-sig recovery re-keys an account - on Base an address *is* its key. So
+recovery here means re-pointing a username to a new, caller-supplied
+address once two factors prove the caller is who they claim to be: every
+configured security answer, plus a one-time code emailed to the account's
+registered address. See `PLAN.md` §4.3 for the full design.
+
+1. A logged-in user opts in once: `POST /v1/users/account-recovery` (and
+   `DELETE /v1/users/account-recovery` to opt back out) - both require a
+   wallet-session JWT, and require security answers to already be set via
+   `POST /v1/users/security-answers`.
+2. Recovery itself is deliberately **unauthenticated** - its entire point is
+   helping someone who can no longer produce a SIWE signature at all:
+   `POST /v1/account-recovery/:username/request-otp` always responds `204`
+   regardless of whether the username exists or has recovery enabled, so it
+   can't be used to enumerate accounts.
+3. `POST /v1/account-recovery/:username/recover` with
+   `{"newAddress", "newAddressSignature", "otp", "answers": [{"securityQuestionId", "answer"}]}`
+   (every configured question must be answered, not a subset).
+   `newAddressSignature` is a `personal_sign` signature, produced by
+   `newAddress`'s own key, over the exact string
+   `wallet-backend account recovery\nusername: <username>\nnew address: <newAddress>`
+   - proving the caller controls that address's key, the same non-custodial
+   guarantee `Register` enforces via SIWE, so recovery can never attach a
+   username to an address no one can actually sign from. On success this
+   re-points the username's `User.Address` and primary `UserWallet.Address`
+   to `newAddress` in one transaction, and revokes any shared-access group
+   memberships the old address held (other members must manually re-invite
+   the recovered account once satisfied the recovery is legitimate, rather
+   than the server silently trusting it).
+4. Every completed recovery is logged to `AccountRecoveryLog`, including an
+   EIP-191 signature over the change from a server-side recovery-authority
+   key (`RECOVERY_AUTHORITY_SALT`) - a tamper-evident attestation standing
+   in for the on-chain co-signature Stellar's native flow used, since
+   re-pointing a username is a purely application-level change with nothing
+   to co-sign on-chain.
+
+A small blocklist of reserved usernames (`ReservedName`, seeded on first
+boot) is checked at registration so no one can register `admin`, `support`,
+and similar staff/brand-impersonating handles.
+
 ## Adding a real integration
 
 The `notify`, `storage`, `kyc`, `fiat`, `rates`, and `alerting` packages are

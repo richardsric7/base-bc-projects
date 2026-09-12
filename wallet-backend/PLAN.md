@@ -154,7 +154,7 @@ flow instead of duplicating each component's route surface, which is a
 simplification worth calling out (the original's near-total endpoint
 duplication is what a from-scratch design would avoid).
 
-### 4.3 Account security & recovery — **planned**
+### 4.3 Account security & recovery — **DONE**
 
 Original routes: security questions (save/list/verify), email-OTP
 recovery request/verify, enable/disable account recovery, do-recovery
@@ -169,12 +169,33 @@ Stellar, recovery replaces the account's *signer key* (the account address
 itself never changes). On Base, an EOA's address *is* derived from its key
 — there's no way to "re-key" an address the way Stellar accounts support.
 **Recovery on Base therefore means re-pointing the `User.Address` to a new
-address the user proves ownership of via SIWE**, gated by the same
-security-question + email-OTP factors as before, with the recovery-signer
-role (`cryptoutil.DeriveKey`-derived) co-signing an on-chain attestation of
-the change rather than a Stellar `SetOptions` operation. Any shared-access
-`GroupMember` rows for the old address are revoked and other group members
-notified, exactly matching the original's security posture.
+address**, gated by three factors: every configured security answer, a
+valid unexpired email OTP, and a `personal_sign` signature over a canonical
+recovery message produced by the *new* address's own key (the same
+non-custodial ownership proof `Register` enforces via SIWE, so recovery can
+never attach a username to an address no one can actually sign from — see
+`internal/components/users/services/recovery.go`). A recovery-authority
+key (`cryptoutil.DeriveKey`-derived from `RECOVERY_AUTHORITY_SALT`) then
+signs an off-chain `AccountRecoveryLog` attestation of the exact change —
+username, old address, new address — as a tamper-evident record standing
+in for the on-chain co-signature the original's native Stellar multi-sig
+recovery used; there's nothing to co-sign on-chain since re-pointing which
+address controls a username is a purely application-level change. Any
+shared-access `GroupMember` rows for the old address are revoked (not
+transferred) in the same transaction, matching the original's security
+posture of requiring other group members to manually re-invite a recovered
+account once satisfied the recovery is legitimate. `UserMobilePhoneVerification`
+was dropped — no SMS provider is wired into the base template (see
+`internal/notify`'s doc comment) and the two remaining factors (security
+answers + email OTP + new-address signature) already exceed the original's
+minimum bar; a real deployment wiring in an SMS provider can add phone OTP
+as a fourth factor without changing this design. `request-otp` intentionally
+always returns `204` regardless of whether the username exists or has
+recovery enabled, so the endpoint can't be used to enumerate accounts —
+matching the original's anti-enumeration posture. Implemented, unit-tested
+(18 tests covering success, OTP expiry/replay, wrong/incomplete answers,
+forged new-address signatures, invalid addresses, and reserved-username
+registration), and documented in the README's "Account recovery" section.
 
 ### 4.4 KYC — **planned**
 
@@ -527,7 +548,7 @@ needs, not strictly by the order features appear above.
 |---|---|---|---|
 | 0 | Core wallet/auth/payments/swaps/assets (§4.1) | — | **DONE** |
 | 1 | Shared/multi-party wallet access (§4.2) | Phase 0 | **DONE** |
-| 2 | Account security & recovery (§4.3) | Phase 0 |
+| 2 | Account security & recovery (§4.3) | Phase 0 | **DONE** |
 | 3 | KYC — Sumsub + Doja (§4.4) | Phase 0 |
 | 4 | Fiat payments & activation — Flutterwave (§4.5) | Phase 0, benefits from Phase 3 (activation often gated on KYC) |
 | 5 | Stablerail (§4.6) | Phase 3 (BVN/KYC-triggered onboarding) |

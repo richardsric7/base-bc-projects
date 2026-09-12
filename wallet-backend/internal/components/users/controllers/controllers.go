@@ -16,7 +16,7 @@ import (
 
 // Init registers the users component's routes on router.
 func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
-	svc := services.New(gc.DB)
+	svc := services.New(gc.DB, gc.Mailer, gc.RecoveryAuthoritySalt, gc.RecoveryOTPTTL)
 
 	public := router.Group("/v1/users")
 	public.GET("/:username", getUser(svc))
@@ -28,6 +28,15 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
 	authed.DELETE("/:username", deleteUser(svc))
 	authed.POST("/security-answers", setSecurityAnswer(svc))
 	authed.POST("/security-answers/verify", verifySecurityAnswer(svc))
+	authed.POST("/account-recovery", enableAccountRecovery(svc))
+	authed.DELETE("/account-recovery", disableAccountRecovery(svc))
+
+	// Account recovery is deliberately unauthenticated - see recovery.go's
+	// package doc comment for why: its purpose is helping someone who can
+	// no longer produce a SIWE signature at all.
+	recovery := router.Group("/v1/account-recovery")
+	recovery.POST("/:username/request-otp", requestRecoveryOTP(svc))
+	recovery.POST("/:username/recover", recoverAccount(svc))
 }
 
 type registerRequest struct {
@@ -143,5 +152,79 @@ func verifySecurityAnswer(svc *services.Service) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"match": ok})
+	}
+}
+
+func enableAccountRecovery(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, err := svc.GetByAddress(c.GetString(middleware.CtxSubject))
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		if err := svc.EnableAccountRecovery(user.ID); err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	}
+}
+
+func disableAccountRecovery(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, err := svc.GetByAddress(c.GetString(middleware.CtxSubject))
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		if err := svc.DisableAccountRecovery(user.ID); err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	}
+}
+
+// requestRecoveryOTP always responds 204 regardless of whether the
+// username exists or has recovery enabled - see services.RequestRecoveryOTP.
+func requestRecoveryOTP(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if err := svc.RequestRecoveryOTP(c.Param("username")); err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	}
+}
+
+type recoverAccountRequest struct {
+	NewAddress          string                  `json:"newAddress" binding:"required"`
+	NewAddressSignature string                  `json:"newAddressSignature" binding:"required"`
+	OTP                 string                  `json:"otp" binding:"required"`
+	Answers             []securityAnswerRequest `json:"answers" binding:"required"`
+}
+
+// recoverAccount expects newAddressSignature to be a personal_sign
+// signature, produced by newAddress's own key, over
+// services.RecoveryMessage(username, newAddress) - proving the caller
+// controls the address they're asking the account to be re-pointed to,
+// the same way Register proves control of an address via SIWE.
+func recoverAccount(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req recoverAccountRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			apperrors.Abort(c, apperrors.BadRequest("newAddress, newAddressSignature, otp and answers are required"))
+			return
+		}
+		answers := make([]services.SecurityAnswerInput, len(req.Answers))
+		for i, a := range req.Answers {
+			answers[i] = services.SecurityAnswerInput{SecurityQuestionID: a.SecurityQuestionID, Answer: a.Answer}
+		}
+		logEntry, err := svc.Recover(c.Param("username"), req.NewAddress, req.NewAddressSignature, req.OTP, answers)
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, logEntry)
 	}
 }

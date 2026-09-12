@@ -5,21 +5,27 @@ package services
 
 import (
 	"errors"
+	"strings"
+	"time"
 
 	"gorm.io/gorm"
 
 	"wallet-backend/internal/apperrors"
 	"wallet-backend/internal/components/users/models"
 	"wallet-backend/internal/cryptoutil"
+	"wallet-backend/internal/notify"
 	"wallet-backend/internal/validators"
 )
 
 type Service struct {
-	DB *gorm.DB
+	DB                    *gorm.DB
+	Mailer                notify.Mailer
+	RecoveryAuthoritySalt string
+	RecoveryOTPTTL        time.Duration
 }
 
-func New(db *gorm.DB) *Service {
-	return &Service{DB: db}
+func New(db *gorm.DB, mailer notify.Mailer, recoveryAuthoritySalt string, recoveryOTPTTL time.Duration) *Service {
+	return &Service{DB: db, Mailer: mailer, RecoveryAuthoritySalt: recoveryAuthoritySalt, RecoveryOTPTTL: recoveryOTPTTL}
 }
 
 // RegisterInput is the payload accepted by Register.
@@ -45,9 +51,16 @@ func (s *Service) Register(input RegisterInput) (*models.User, error) {
 	if !validators.IsValidAddress(input.Address) {
 		return nil, apperrors.BadRequest("invalid EVM address")
 	}
+	reserved, err := s.isReservedUsername(input.Username)
+	if err != nil {
+		return nil, err
+	}
+	if reserved {
+		return nil, apperrors.Conflict("this username is reserved")
+	}
 
 	var existing models.User
-	err := s.DB.Where("username = ? OR email = ? OR address = ?", input.Username, input.Email, input.Address).
+	err = s.DB.Where("username = ? OR email = ? OR address = ?", input.Username, input.Email, input.Address).
 		First(&existing).Error
 	if err == nil {
 		return nil, apperrors.Conflict("username, email or address is already registered")
@@ -155,9 +168,11 @@ func (s *Service) SetSecurityAnswer(userID, questionID uint, answer string) erro
 	return nil
 }
 
-// VerifySecurityAnswer checks a candidate answer against the stored hash;
-// used as one factor in the account-recovery flow (combine with an email
-// OTP check in the controller before allowing any account change).
+// VerifySecurityAnswer checks a candidate answer against the stored hash -
+// an authenticated "check my own answer" utility for a logged-in user. The
+// actual account-recovery flow (for someone who can no longer sign in at
+// all) is unauthenticated and lives in recovery.go's Recover, which
+// verifies every configured answer plus an email OTP together.
 func (s *Service) VerifySecurityAnswer(userID, questionID uint, answer string) (bool, error) {
 	var record models.UserSecurityAnswer
 	err := s.DB.Where("user_id = ? AND security_question_id = ?", userID, questionID).First(&record).Error
@@ -168,4 +183,33 @@ func (s *Service) VerifySecurityAnswer(userID, questionID uint, answer string) (
 		return false, apperrors.Internal("failed to load security answer")
 	}
 	return cryptoutil.CheckPasswordHash(answer, record.AnswerHash), nil
+}
+
+// isReservedUsername reports whether username (case-insensitively) matches
+// a reserved name - staff handles, brand names, impersonation-prone
+// strings - that no one may register.
+func (s *Service) isReservedUsername(username string) (bool, error) {
+	var count int64
+	err := s.DB.Model(&models.ReservedName{}).Where("name = ?", strings.ToLower(username)).Count(&count).Error
+	if err != nil {
+		return false, apperrors.Internal("failed to check reserved usernames")
+	}
+	return count > 0, nil
+}
+
+// EnableAccountRecovery opts a user into recovery-by-security-question so a
+// future loss of wallet access can be recovered from - see recovery.go.
+func (s *Service) EnableAccountRecovery(userID uint) error {
+	if err := s.DB.Model(&models.User{}).Where("id = ?", userID).Update("account_recovery_enabled", true).Error; err != nil {
+		return apperrors.Internal("failed to enable account recovery")
+	}
+	return nil
+}
+
+// DisableAccountRecovery opts a user out.
+func (s *Service) DisableAccountRecovery(userID uint) error {
+	if err := s.DB.Model(&models.User{}).Where("id = ?", userID).Update("account_recovery_enabled", false).Error; err != nil {
+		return apperrors.Internal("failed to disable account recovery")
+	}
+	return nil
 }
