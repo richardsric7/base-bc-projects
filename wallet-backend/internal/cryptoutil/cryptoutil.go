@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/ethereum/go-ethereum/accounts"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -53,6 +55,31 @@ func DeriveKey(seedMaterial string) (*ecdsa.PrivateKey, error) {
 		}
 	}
 	return nil, errors.New("cryptoutil: failed to derive a valid secp256k1 key after 256 attempts")
+}
+
+// VerifyPersonalSign reports whether signature is a valid EIP-191
+// "personal_sign" signature of message by expectedAddress. Use this for
+// off-chain approval flows (see PLAN.md §2's shared-access row) where a
+// member proves authorization by signing a description of an action rather
+// than a transaction itself. signature is the raw 65-byte
+// r||s||v signature most wallet libraries produce (v as 27/28 or 0/1 -
+// both are normalized).
+func VerifyPersonalSign(message string, signature []byte, expectedAddress common.Address) (bool, error) {
+	if len(signature) != 65 {
+		return false, fmt.Errorf("signature must be 65 bytes, got %d", len(signature))
+	}
+	sig := make([]byte, 65)
+	copy(sig, signature)
+	if sig[64] >= 27 {
+		sig[64] -= 27
+	}
+
+	hash := accounts.TextHash([]byte(message))
+	pubKey, err := crypto.SigToPub(hash, sig)
+	if err != nil {
+		return false, fmt.Errorf("recover public key: %w", err)
+	}
+	return crypto.PubkeyToAddress(*pubKey) == expectedAddress, nil
 }
 
 // HashSHA256Hex returns the hex-encoded SHA-256 digest of s.

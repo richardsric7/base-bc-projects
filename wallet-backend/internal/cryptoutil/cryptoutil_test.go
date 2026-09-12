@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -68,5 +69,61 @@ func TestHashAndCheckPassword(t *testing.T) {
 	}
 	if CheckPasswordHash("wrong password", hash) {
 		t.Fatal("expected an incorrect password not to verify")
+	}
+}
+
+func TestVerifyPersonalSign(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	address := crypto.PubkeyToAddress(key.PublicKey)
+	message := "approve shared-access action #42"
+
+	hash := accounts.TextHash([]byte(message))
+	sig, err := crypto.Sign(hash, key)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+
+	ok, err := VerifyPersonalSign(message, sig, address)
+	if err != nil {
+		t.Fatalf("VerifyPersonalSign returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected a valid signature to verify")
+	}
+
+	// A signature with V normalized to 27/28 (the format most wallet
+	// libraries actually produce) should verify identically.
+	sig27 := append([]byte{}, sig...)
+	sig27[64] += 27
+	ok27, err := VerifyPersonalSign(message, sig27, address)
+	if err != nil {
+		t.Fatalf("VerifyPersonalSign (v=27 form) returned error: %v", err)
+	}
+	if !ok27 {
+		t.Fatal("expected a v=27-normalized signature to verify")
+	}
+
+	otherKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	wrongAddress := crypto.PubkeyToAddress(otherKey.PublicKey)
+	ok, err = VerifyPersonalSign(message, sig, wrongAddress)
+	if err != nil {
+		t.Fatalf("VerifyPersonalSign returned error: %v", err)
+	}
+	if ok {
+		t.Fatal("expected the signature not to verify against a different address")
+	}
+
+	ok, err = VerifyPersonalSign("a different message", sig, address)
+	if err != nil {
+		t.Fatalf("VerifyPersonalSign returned error: %v", err)
+	}
+	if ok {
+		t.Fatal("expected the signature not to verify against a different message")
 	}
 }

@@ -29,6 +29,8 @@ import (
 	paymentsControllers "wallet-backend/internal/components/payments/controllers"
 	ratesControllers "wallet-backend/internal/components/rates/controllers"
 	rootControllers "wallet-backend/internal/components/root/controllers"
+	sharedaccessControllers "wallet-backend/internal/components/sharedaccess/controllers"
+	sharedaccessModels "wallet-backend/internal/components/sharedaccess/models"
 	swapsControllers "wallet-backend/internal/components/swaps/controllers"
 	usersControllers "wallet-backend/internal/components/users/controllers"
 
@@ -50,6 +52,7 @@ func allModels() []interface{} {
 	models = append(models, assetsModels.Models...)
 	models = append(models, paymentsModels.Models...)
 	models = append(models, announcementsModels.Models...)
+	models = append(models, sharedaccessModels.Models...)
 	return models
 }
 
@@ -136,6 +139,7 @@ func main() {
 		JWTSecret:    env.JWTSecret,
 		JWTExpiry:    durationFromMinutes(env.JWTExpiryMinutes),
 		SIWEDomain:   env.SIWEDomain,
+		GroupKeySalt: env.GroupKeySalt,
 		Organisation: env.Organisation,
 	}
 
@@ -149,6 +153,7 @@ func main() {
 	assetsControllers.Init(router, gc)
 	paymentsControllers.Init(router, gc)
 	swapsControllers.Init(router, gc)
+	sharedaccessControllers.Init(router, gc)
 	ratesControllers.Init(router, gc)
 	announcementsControllers.Init(router, gc)
 	callbacksControllers.Init(router, gc)

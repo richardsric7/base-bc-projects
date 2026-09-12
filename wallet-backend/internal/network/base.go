@@ -18,6 +18,7 @@ package network
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"fmt"
 	"math/big"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
@@ -66,11 +68,22 @@ type UnsignedTx struct {
 	Type                 string `json:"type"` // always "0x2" (EIP-1559) in this template
 }
 
-// buildUnsignedTx resolves nonce and EIP-1559 gas parameters against current
-// chain state and estimates a gas limit for the given call. explicitNonce
-// lets a caller pre-book a specific nonce (see PLAN.md §3's offline-batching
-// requirement); nil means "use the next pending nonce."
-func (c *Client) buildUnsignedTx(ctx context.Context, from common.Address, to *common.Address, value *big.Int, data []byte, explicitNonce *uint64) (*UnsignedTx, error) {
+// txParams is the resolved set of EIP-1559 parameters shared by both the
+// client-facing "unsigned tx" path (buildUnsignedTx) and the server-signed
+// path (SignAndSubmitTx) - one place computes nonce/gas/fees, so the two
+// paths can never drift apart.
+type txParams struct {
+	nonce    uint64
+	tipCap   *big.Int
+	feeCap   *big.Int
+	gasLimit uint64
+}
+
+// resolveTxParams resolves nonce and EIP-1559 gas parameters against
+// current chain state and estimates a gas limit for the given call.
+// explicitNonce lets a caller pre-book a specific nonce (see PLAN.md §3's
+// offline-batching requirement); nil means "use the next pending nonce."
+func (c *Client) resolveTxParams(ctx context.Context, from common.Address, to *common.Address, value *big.Int, data []byte, explicitNonce *uint64) (txParams, error) {
 	var nonce uint64
 	var err error
 	if explicitNonce != nil {
@@ -78,18 +91,18 @@ func (c *Client) buildUnsignedTx(ctx context.Context, from common.Address, to *c
 	} else {
 		nonce, err = c.Eth.PendingNonceAt(ctx, from)
 		if err != nil {
-			return nil, fmt.Errorf("fetch nonce: %w", err)
+			return txParams{}, fmt.Errorf("fetch nonce: %w", err)
 		}
 	}
 
 	tipCap, err := c.Eth.SuggestGasTipCap(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("suggest gas tip cap: %w", err)
+		return txParams{}, fmt.Errorf("suggest gas tip cap: %w", err)
 	}
 
 	header, err := c.Eth.HeaderByNumber(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("fetch latest header: %w", err)
+		return txParams{}, fmt.Errorf("fetch latest header: %w", err)
 	}
 	baseFee := header.BaseFee
 	if baseFee == nil {
@@ -101,9 +114,20 @@ func (c *Client) buildUnsignedTx(ctx context.Context, from common.Address, to *c
 
 	gasLimit, err := c.Eth.EstimateGas(ctx, ethereum.CallMsg{From: from, To: to, Value: value, Data: data})
 	if err != nil {
-		return nil, fmt.Errorf("estimate gas: %w", err)
+		return txParams{}, fmt.Errorf("estimate gas: %w", err)
 	}
 	gasLimit = gasLimit * 12 / 10 // 20% headroom over the point estimate
+
+	return txParams{nonce: nonce, tipCap: tipCap, feeCap: feeCap, gasLimit: gasLimit}, nil
+}
+
+// buildUnsignedTx resolves tx params and formats them as an UnsignedTx for
+// a client to sign offline - see PLAN.md §3.
+func (c *Client) buildUnsignedTx(ctx context.Context, from common.Address, to *common.Address, value *big.Int, data []byte, explicitNonce *uint64) (*UnsignedTx, error) {
+	params, err := c.resolveTxParams(ctx, from, to, value, data, explicitNonce)
+	if err != nil {
+		return nil, err
+	}
 
 	var toStr string
 	if to != nil {
@@ -115,15 +139,52 @@ func (c *Client) buildUnsignedTx(ctx context.Context, from common.Address, to *c
 
 	return &UnsignedTx{
 		ChainID:              hexutil.EncodeBig(c.ChainID),
-		Nonce:                nonce,
+		Nonce:                params.nonce,
 		To:                   toStr,
 		Value:                hexutil.EncodeBig(value),
 		Data:                 hexutil.Encode(data),
-		Gas:                  gasLimit,
-		MaxFeePerGas:         hexutil.EncodeBig(feeCap),
-		MaxPriorityFeePerGas: hexutil.EncodeBig(tipCap),
+		Gas:                  params.gasLimit,
+		MaxFeePerGas:         hexutil.EncodeBig(params.feeCap),
+		MaxPriorityFeePerGas: hexutil.EncodeBig(params.tipCap),
 		Type:                 "0x2",
 	}, nil
+}
+
+// SignAndSubmitTx resolves tx params, builds an EIP-1559 transaction,
+// signs it with signer, and submits it - for the cases where the *server*
+// controls the sending key (a shared-access group's derived key, an escrow
+// release, a tokenized-asset mint) rather than a client. See PLAN.md §2's
+// shared-access and asset-issuance rows for why some flows are
+// server-signed instead of the usual client build/sign/submit split.
+func (c *Client) SignAndSubmitTx(ctx context.Context, signer *ecdsa.PrivateKey, to *common.Address, value *big.Int, data []byte, explicitNonce *uint64) (string, error) {
+	from := crypto.PubkeyToAddress(signer.PublicKey)
+	params, err := c.resolveTxParams(ctx, from, to, value, data, explicitNonce)
+	if err != nil {
+		return "", err
+	}
+	if value == nil {
+		value = big.NewInt(0)
+	}
+
+	tx := types.NewTx(&types.DynamicFeeTx{
+		ChainID:   c.ChainID,
+		Nonce:     params.nonce,
+		GasTipCap: params.tipCap,
+		GasFeeCap: params.feeCap,
+		Gas:       params.gasLimit,
+		To:        to,
+		Value:     value,
+		Data:      data,
+	})
+
+	signedTx, err := types.SignTx(tx, types.LatestSignerForChainID(c.ChainID), signer)
+	if err != nil {
+		return "", fmt.Errorf("sign transaction: %w", err)
+	}
+	if err := c.Eth.SendTransaction(ctx, signedTx); err != nil {
+		return "", fmt.Errorf("submit transaction: %w", err)
+	}
+	return signedTx.Hash().Hex(), nil
 }
 
 // BuildNativeTransferTx builds an unsigned ETH transfer.
@@ -134,12 +195,23 @@ func (c *Client) BuildNativeTransferTx(ctx context.Context, from, to string, amo
 
 // BuildERC20TransferTx builds an unsigned ERC-20 transfer(to, amount) call.
 func (c *Client) BuildERC20TransferTx(ctx context.Context, from, tokenAddress, to string, amount *big.Int, explicitNonce *uint64) (*UnsignedTx, error) {
+	data, err := EncodeERC20Transfer(to, amount)
+	if err != nil {
+		return nil, err
+	}
+	tokenAddr := common.HexToAddress(tokenAddress)
+	return c.buildUnsignedTx(ctx, common.HexToAddress(from), &tokenAddr, big.NewInt(0), data, explicitNonce)
+}
+
+// EncodeERC20Transfer ABI-encodes a transfer(to, amount) call, for callers
+// (e.g. shared-access action proposals) that need just the calldata rather
+// than a fully resolved UnsignedTx.
+func EncodeERC20Transfer(to string, amount *big.Int) ([]byte, error) {
 	data, err := erc20ABI.Pack("transfer", common.HexToAddress(to), amount)
 	if err != nil {
 		return nil, fmt.Errorf("encode erc20 transfer: %w", err)
 	}
-	tokenAddr := common.HexToAddress(tokenAddress)
-	return c.buildUnsignedTx(ctx, common.HexToAddress(from), &tokenAddr, big.NewInt(0), data, explicitNonce)
+	return data, nil
 }
 
 // BuildApproveTx builds an unsigned ERC-20 approve(spender, amount) call -

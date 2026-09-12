@@ -42,6 +42,12 @@ type GlobalConfig struct {
 	JWTExpiry    time.Duration
 	SIWEDomain   string // the "domain" every SIWE sign-in message must declare
 	Organisation string
+
+	// GroupKeySalt seeds shared-access group key derivation (see
+	// internal/components/sharedaccess) - change this and every existing
+	// group's controlling address changes with it, so treat it like a
+	// secret and never rotate it casually once groups exist in production.
+	GroupKeySalt string
 }
 
 // Env holds every raw environment-derived setting. Load it once in main and
@@ -76,6 +82,8 @@ type Env struct {
 	JWTSecret        string
 	JWTExpiryMinutes int
 	SIWEDomain       string
+
+	GroupKeySalt string
 
 	Organisation string
 }
@@ -116,6 +124,8 @@ func LoadEnv() Env {
 		JWTSecret:        getEnv("JWT_SECRET", "dev-only-change-me"),
 		JWTExpiryMinutes: getEnvInt("JWT_EXPIRY_MINUTES", 60),
 		SIWEDomain:       getEnv("SIWE_DOMAIN", "localhost"),
+
+		GroupKeySalt: getEnv("GROUP_KEY_SALT", "dev-only-change-me"),
 
 		Organisation: getEnv("ORGANISATION", "wallet-backend"),
 	}
