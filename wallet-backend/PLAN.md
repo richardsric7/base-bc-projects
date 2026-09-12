@@ -138,7 +138,7 @@ Base design: per §2's multi-sig substitution.
 | Original model | Base model |
 |---|---|
 | `WalletPermission` | `GroupMember{GroupID, MemberAddress, Role}` (`INITIATOR`/`APPROVER`/`VIEW_ONLY`) |
-| `ClosedGroup`/`UserClosedGroup` | `ClosedGroup{ID, Name, Threshold, Address}` (`Address` = the group's derived Base address) + `GroupMember` |
+| `ClosedGroup`/`UserClosedGroup` | `ClosedGroup{ID, Name, Purpose, Threshold, Address}` (`Address` = the group's derived Base address, nil unless `Purpose == WALLET_ACCESS`) + `GroupMember` |
 | `PendingAuth` | `PendingAction{ID, GroupID, ProposerAddress, Kind, To, TokenAddress, Value, Data, RequiredApprovals, Status, TxHash}` |
 | `PendingTransactionSignature` | `PendingActionApproval{ID, PendingActionID, MemberAddress, Signature}` |
 
@@ -153,6 +153,14 @@ payments/swaps `Build` step would — one generalized propose/approve/execute
 flow instead of duplicating each component's route surface, which is a
 simplification worth calling out (the original's near-total endpoint
 duplication is what a from-scratch design would avoid).
+
+`ClosedGroup` also carries a `Purpose` field (`WALLET_ACCESS` — the
+default, everything above — or `PRIVATE_OFFERING`), added ahead of Phase
+9: tokenization's private-offering gating reuses this same table and
+`GroupMember` as a plain membership allow-list rather than a parallel
+`ClosedGroup`-shaped table of its own, per §4.9. A `PRIVATE_OFFERING` row
+has no `Address`/`Threshold` (no wallet, no approval flow) and never
+appears in this section's routes.
 
 ### 4.3 Account security & recovery — **DONE**
 

@@ -87,8 +87,11 @@ func TestCreateGroup_DerivesDistinctDeterministicAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
-	if group.Address == "" {
+	if group.Address == nil || *group.Address == "" {
 		t.Fatal("expected a derived group address")
+	}
+	if group.Purpose != models.PurposeWalletAccess {
+		t.Fatalf("expected purpose WALLET_ACCESS, got %q", group.Purpose)
 	}
 
 	other, err := svc.CreateGroup("other wallet", 1, []MemberInput{
@@ -98,7 +101,7 @@ func TestCreateGroup_DerivesDistinctDeterministicAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
-	if other.Address == group.Address {
+	if *other.Address == *group.Address {
 		t.Fatal("expected different groups to derive different addresses")
 	}
 }

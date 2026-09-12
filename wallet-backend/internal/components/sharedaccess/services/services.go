@@ -98,7 +98,7 @@ func (s *Service) CreateGroup(name string, threshold int, members []MemberInput)
 		return nil, apperrors.BadRequest(fmt.Sprintf("threshold (%d) exceeds the number of approvers (%d)", threshold, approverCount))
 	}
 
-	group := models.ClosedGroup{Name: name, Threshold: threshold}
+	group := models.ClosedGroup{Name: name, Purpose: models.PurposeWalletAccess, Threshold: threshold}
 	txErr := s.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&group).Error; err != nil {
 			return err
@@ -107,7 +107,8 @@ func (s *Service) CreateGroup(name string, threshold int, members []MemberInput)
 		if err != nil {
 			return err
 		}
-		group.Address = crypto.PubkeyToAddress(key.PublicKey).Hex()
+		address := crypto.PubkeyToAddress(key.PublicKey).Hex()
+		group.Address = &address
 		if err := tx.Model(&group).Update("address", group.Address).Error; err != nil {
 			return err
 		}
@@ -434,14 +435,17 @@ func (s *Service) Balance(ctx context.Context, groupID uint, callerAddress, toke
 	if err != nil {
 		return "", err
 	}
+	if group.Address == nil {
+		return "", apperrors.Internal("group has no wallet address")
+	}
 	if tokenAddress == "" {
-		balance, err := s.Blockchain.NativeBalance(ctx, group.Address)
+		balance, err := s.Blockchain.NativeBalance(ctx, *group.Address)
 		if err != nil {
 			return "", apperrors.Internal("failed to read balance: " + err.Error())
 		}
 		return balance.String(), nil
 	}
-	balance, err := s.Blockchain.ERC20BalanceOf(ctx, tokenAddress, group.Address)
+	balance, err := s.Blockchain.ERC20BalanceOf(ctx, tokenAddress, *group.Address)
 	if err != nil {
 		return "", apperrors.Internal("failed to read balance: " + err.Error())
 	}

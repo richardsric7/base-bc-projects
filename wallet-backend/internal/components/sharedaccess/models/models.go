@@ -19,17 +19,45 @@ const (
 	RoleViewOnly  GroupRole = "VIEW_ONLY" // may view balances/history only
 )
 
-// ClosedGroup is a shared wallet: a Base address whose controlling key is
-// deterministically derived (cryptoutil.DeriveKey) from the group's ID and
-// never exposed to any member. Threshold is how many distinct APPROVER
-// approvals a PendingAction needs before the server executes it.
+// ClosedGroupPurpose distinguishes what a ClosedGroup row is for. Both
+// purposes share one table (and one ClosedGroup/GroupMember schema) rather
+// than duplicating a near-identical "named group of member addresses"
+// concept - see PLAN.md §4.9's closed-group/private-offering write-up for
+// why tokenization's private-offering gating reuses this table instead of
+// its own.
+type ClosedGroupPurpose string
+
+const (
+	// PurposeWalletAccess is this package's original use: a group that
+	// jointly controls a shared Base wallet (Address/Threshold populated,
+	// PendingAction/PendingActionApproval rows apply).
+	PurposeWalletAccess ClosedGroupPurpose = "WALLET_ACCESS"
+	// PurposePrivateOffering is tokenization's use: a group whose
+	// membership list alone gates who may see/subscribe to a private
+	// tokenized-asset offering - no wallet, no threshold, no on-chain
+	// address of its own, so Address is nil and Threshold is unused for
+	// these rows.
+	PurposePrivateOffering ClosedGroupPurpose = "PRIVATE_OFFERING"
+)
+
+// ClosedGroup is a named group of member addresses, used two ways
+// (Purpose): a shared wallet whose controlling key is deterministically
+// derived (cryptoutil.DeriveKey) from the group's ID and never exposed to
+// any member, where Threshold is how many distinct APPROVER approvals a
+// PendingAction needs before the server executes it; or, for tokenization,
+// a plain allow-list of addresses permitted to subscribe to a private
+// offering. Address is a pointer because only PurposeWalletAccess rows
+// have one - a nullable column lets multiple PurposePrivateOffering rows
+// coexist under one uniqueIndex (SQL treats NULLs as distinct from each
+// other, unlike empty strings).
 type ClosedGroup struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Name      string    `gorm:"size:128;not null" json:"name"`
-	Address   string    `gorm:"uniqueIndex;size:42;not null" json:"address"`
-	Threshold int       `gorm:"not null" json:"threshold"`
-	Disabled  bool      `gorm:"default:false" json:"disabled"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID        uint               `gorm:"primaryKey" json:"id"`
+	Name      string             `gorm:"size:128;not null" json:"name"`
+	Purpose   ClosedGroupPurpose `gorm:"size:20;not null;default:WALLET_ACCESS" json:"purpose"`
+	Address   *string            `gorm:"uniqueIndex;size:42" json:"address,omitempty"`
+	Threshold int                `json:"threshold,omitempty"`
+	Disabled  bool               `gorm:"default:false" json:"disabled"`
+	CreatedAt time.Time          `json:"createdAt"`
 }
 
 // GroupMember is one member's role on a group.
