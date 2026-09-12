@@ -187,6 +187,45 @@ func (c *Client) SignAndSubmitTx(ctx context.Context, signer *ecdsa.PrivateKey, 
 	return signedTx.Hash().Hex(), nil
 }
 
+// SignTx signs a transaction with signer and returns its raw hex encoding
+// without submitting it - the server-signed counterpart to
+// SubmitSignedTransaction's later, deferred submission. Used where a
+// server-derived key (not a user's own) must sign now but submission
+// needs to wait on an external event, e.g. tokenization's fiat purchase
+// flow (PLAN.md §4.9), which reuses internal/fiat's decoupled invoice
+// pattern: sign the distribution-key transfer at invoice-creation time,
+// submit it only once the fiat charge clears.
+func (c *Client) SignTx(ctx context.Context, signer *ecdsa.PrivateKey, to *common.Address, value *big.Int, data []byte, explicitNonce *uint64) (rawTxHex string, err error) {
+	from := crypto.PubkeyToAddress(signer.PublicKey)
+	params, err := c.resolveTxParams(ctx, from, to, value, data, explicitNonce)
+	if err != nil {
+		return "", err
+	}
+	if value == nil {
+		value = big.NewInt(0)
+	}
+
+	tx := types.NewTx(&types.DynamicFeeTx{
+		ChainID:   c.ChainID,
+		Nonce:     params.nonce,
+		GasTipCap: params.tipCap,
+		GasFeeCap: params.feeCap,
+		Gas:       params.gasLimit,
+		To:        to,
+		Value:     value,
+		Data:      data,
+	})
+	signedTx, err := types.SignTx(tx, types.LatestSignerForChainID(c.ChainID), signer)
+	if err != nil {
+		return "", fmt.Errorf("sign transaction: %w", err)
+	}
+	raw, err := signedTx.MarshalBinary()
+	if err != nil {
+		return "", fmt.Errorf("encode signed transaction: %w", err)
+	}
+	return hexutil.Encode(raw), nil
+}
+
 // DeployContract signs and submits a contract-creation transaction
 // (constructor-encoded bytecode - see internal/contracts) from deployer,
 // returning the resulting contract's address (computed the same way the

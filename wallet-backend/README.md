@@ -396,6 +396,82 @@ for why those packages test ABI encode/decode round-trips and price math
 directly instead of against a live chain, the same posture this port
 takes for every other vendor/RPC integration without local credentials.
 
+## Tokenization
+
+Representing and trading a tokenized real-world asset — the largest
+subsystem in this port. See `PLAN.md` §4.9 for the full design; this
+section covers the shape a caller actually sees.
+
+**Lifecycle**: `DRAFT → APPLICATION_CONFIRMED → FEE_CONFIRMED →
+FEE_ACKNOWLEDGED → MINTED → PRIMARY_SALE_ACTIVE → SECONDARY_SALE_ACTIVE`.
+
+1. `POST /v1/tokenization` (authed) creates or updates a Draft application
+   — requires KYC. `PUT /v1/tokenization/:assetId/confirm` charges the
+   application fee and moves to `APPLICATION_CONFIRMED`.
+2. `PUT /v1/admin/tokenization/:assetId/vet` (staff) selects the asset's
+   stakeholders (custodian, manager, issuing house, legal partner, rating
+   agency, trustee) and snapshots their fees.
+   `POST /v1/tokenization/:assetId/fee/confirm` (authed, requires vetting)
+   moves to `FEE_CONFIRMED`; `POST /v1/admin/tokenization/:assetId/acknowledge-fee`
+   (staff) moves to `FEE_ACKNOWLEDGED`.
+3. `POST /v1/tokenization/:assetId/mint-request` (a global minting
+   approver/initiator) opens a mint request requiring signoff from the
+   asset's own `MintingApprovers` list (≥4 addresses, threshold =
+   `len(approvers)-2`). Each approver signs
+   `GET /v1/tokenization/mint-approvals/:mintApprovalId`'s returned
+   message and posts it to
+   `POST /v1/tokenization/mint-approvals/:mintApprovalId/sign`. Once the
+   threshold is met, the server derives a per-asset issuer key (contract
+   owner) and distribution key (treasury), deploys `TokenizedAsset.sol`
+   and `Sale.sol` (Phase 8), mints the reserved and for-sale supply, lists
+   the asset as a `CuratedToken`, and flips `Status` to `MINTED`.
+4. Once a background worker (main.go, 30s poll) sees `SalesStart` arrive,
+   `Status` flips to `PRIMARY_SALE_ACTIVE`. Buyers purchase via:
+   - **Crypto**: `POST /v1/tokenization/:assetId/subscribe` builds an
+     unsigned `Sale.buy()` call (after the buyer separately `approve()`s
+     the quote token); `POST /v1/tokenization/:assetId/subscribe/confirm`
+     records it once self-submitted.
+   - **Fiat**: `POST /v1/tokenization/:assetId/subscribe/fiat` reuses
+     `internal/fiat`'s decoupled invoice pattern unchanged — the server
+     signs the distribution-key transfer immediately and hands it to the
+     existing Flutterwave invoice/webhook flow, so no buyer signature is
+     needed at all (Base has no trustline step to require one for, unlike
+     the Stellar original).
+   A `PRIVATE` offering (`OfferingType`) additionally requires the buyer
+   be a member of the asset's `ClosedGroupID` — a
+   `sharedaccess.ClosedGroup` with `Purpose: PRIVATE_OFFERING` (§4.2),
+   reused rather than duplicated.
+5. Once `SalesEnd` arrives, the worker pauses the `Sale` contract and
+   flips `Status` to `SECONDARY_SALE_ACTIVE` — from here the asset trades
+   only through the existing off-chain order book (Market making, above),
+   which already supports any curated ERC-20 pair.
+6. `POST /v1/tokenization/:assetId/early-exit` builds an unsigned
+   `burn()` call the holder submits themselves (no server-signed transfer
+   needed — `TokenizedAsset.sol` is `ERC20Burnable`);
+   `POST /v1/tokenization/:assetId/early-exit/confirm` records the
+   NAV-based penalty payout for manual/off-chain settlement, exactly as
+   upstream never automated it on-chain either.
+7. `POST /v1/tokenization/:assetId/interest` logs a pre-launch waitlist
+   entry (only while `Status == MINTED`), notified when the primary sale
+   activates.
+
+A large reference-data surface (sectors, custodians, managers, issuing
+houses, legal partners, rating agencies, trustees, fees, currencies,
+protection options, proceed cycles, allowed countries, country configs) is
+available at `GET /v1/tokenization/public` (unauthenticated subset) and
+`GET /v1/tokenization/reference` (full, authed).
+
+**Deliberately dropped or simplified versus the original** (all documented
+in `PLAN.md` §4.9): no synthetic intermediate "internal balance" quote
+currency or multi-hop DEX pathfinding (a purchase settles in exactly the
+asset's configured quote currency); no trustline/authorization-flag
+concept anywhere; the dormant proceed/payout-schedule engine is ported as
+schema only, never wired to a route or worker, matching its actual
+(non-functional) state upstream; the partner-API passthrough
+(`/v1/trovo-api/assets/...`) is deferred to Phase 11 alongside its API-key
+middleware, since the `servicelinks` component it belongs to doesn't exist
+yet.
+
 ## Adding a real integration
 
 The `notify`, `storage`, `kyc`, `fiat`, `rates`, and `alerting` packages are

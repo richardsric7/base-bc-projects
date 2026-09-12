@@ -566,71 +566,253 @@ across multiple resting offers, the failed-settlement-cancels-the-
 failing-side behavior, offer cancellation (ownership and status-conflict
 checks), and order-book/history listing.
 
-### 4.9 Tokenization — **planned, the largest subsystem**
+### 4.9 Tokenization — the largest subsystem — **DONE**
 
-Original: ~55 model types (`models/tokenization.go`, 6,830 lines),
-7-value status state machine (Draft → Application Confirmed → Fee Confirmed
-→ Fee Acknowledged → Minted → Primary Sale Active → Secondary Sale Active,
-each transition on a specific route or background worker), covering:
-creation/application intake, vetting, sales-date management, fee
-payment+proof+acknowledgement, document/logo upload, minting (with its own
-`MintingApprovers` CSV gate distinct from shared-access), primary
-sale/subscription (crypto **and** the two-phase fiat flow), expression of
-interest (pre-launch waitlist + notification-on-activation), secondary
-sale/trading, early exit (with penalty-percentage payout), closed-group
-(private offering) gating, and a large reference-data surface (sectors,
-sub-sectors, types, document types, custodians, managers, issuing houses,
-legal partners, rating agencies, trustees, fees, currencies, protection
-options, proceed cycles, allowed countries, country configs, minting
-approver/initiator allow-lists). Background workers: primary-sales
-activation (every 5s), secondary-sales activation (every 5s),
-post-tokenization trustline automation (every 5s), interest-notification
-(every 5s). Public discovery endpoint (`/v1/public/tokenization`), full
-admin surface (`/v1/trovo-manager/tokenization/...`), and partner-API
-passthrough (`/v1/trovo-api/assets/...`).
+Original (per a full read of `models/tokenization.go`, 6,830 lines, and
+`services/tokenized_assets.go`, 5,003 lines): a bare-`int` 7-value status
+state machine (Draft(0) → Application Confirmed(1) → Fee Confirmed(2) →
+Fee Acknowledged(3) → Minted(4) → Primary Sale Active(5) → Secondary Sale
+Active(6)), each transition on a specific route or background worker,
+covering: creation/application intake, vetting, sales-date management, fee
+payment+proof+acknowledgement, document/logo upload, minting (gated by a
+global staff allow-list *and* a per-asset ≥4-approver CSV multisig,
+distinct from shared-access's wallet-multisig mechanism), primary
+sale/subscription (crypto via Stellar path-payment DEX routing, **and** a
+two-phase fiat flow deferring on-chain submission to a webhook), expression
+of interest (pre-launch waitlist + notification-on-activation), secondary
+sale/trading (native Stellar DEX offers against a market-making wallet),
+early exit (NAV-based penalty payout, settled off-chain), closed-group
+(private offering) gating, a dormant/unwired payout-schedule engine, and a
+large reference-data surface (sectors, sub-sectors, types, document types,
+custodians, managers, issuing houses, legal partners, rating agencies,
+trustees, fees, currencies, protection options, proceed cycles, allowed
+countries, country configs, minting approver/initiator allow-lists).
+Background workers: primary-sales activation, secondary-sales activation,
+post-tokenization trustline automation, interest-notification. Public
+discovery endpoint, full admin surface (`/v1/trovo-manager/tokenization/...`),
+and partner-API passthrough (`/v1/trovo-api/assets/...`).
 
-Base design: this is where §2's asset-issuance substitution is load-bearing
-for the whole subsystem. Concretely:
+Base design — this is where §2's asset-issuance substitution is
+load-bearing for the whole subsystem, and where three already-built pieces
+of this port (Phase 7's market component, Phase 8's contracts, `internal/
+fiat`'s decoupled invoice pattern) do most of the work rather than needing
+new machinery:
 
-- **Minting (status → 4)** deploys a minimal mintable/burnable ERC-20
-  contract for the asset (see §5) instead of Stellar's "assign an issuer
-  keypair" step; `AssignIssuingWallet` becomes "derive the per-asset issuer
-  key and deploy its contract."
-- **Trustline automation (post-tokenization)** is dropped per §2 — nothing
-  to automate, since Base holders need no opt-in step. The background
-  worker that did this on Stellar (`ProcessPostTokenizationTrustline`) has
-  no Base equivalent and is removed, not ported.
-- **Primary sale (crypto)** is a `transferFrom`-style purchase against the
-  asset contract (buyer approves the settlement token, contract call pulls
-  payment and mints/transfers the tokenized asset) — the exact multi-step
-  atomic pattern Stellar achieved in one transaction now needs either two
-  transactions (approve, then buy) or a dedicated sale contract that holds
-  both legs atomically; recommend a dedicated minimal `Sale.sol` contract
-  per asset (buyer approves once, `buy()` does the pull+mint atomically) to
-  preserve the original's one-step purchase UX rather than accepting the
-  two-transaction approve/buy split as the default.
-- **Primary sale (fiat)** keeps the exact decoupled build/pay/submit
-  pattern (§2/§5 of earlier revisions) unchanged — this was never
-  Stellar-specific.
-- **Early exit** becomes a contract call (burn the held asset amount,
-  transfer the penalty-adjusted payout) rather than a Stellar payment from
-  a distribution wallet.
-- **Sales-activation background workers** (primary/secondary) port
-  directly — same 5s-poll shape, checking `SalesStart`/`SalesEnd` against
-  `time.Now()` and flipping status, just against the Base-model
-  `TokenizedAsset` row instead of the Stellar one.
-- **The dormant payout-schedule engine** (`ProceedPayout`,
-  `TokenizedAssetPayoutSchedule`, `TokenizedAssetPayoutEngineTask`) was
-  found *incomplete and unwired* upstream (hardcoded to a placeholder
-  asset, no route or worker calls it) — see §9 for whether to finish it
-  properly as part of this port or explicitly leave it out.
-- **Reference data** (sectors, custodians, fees, etc.) is chain-agnostic —
-  ports as a direct schema translation, no design decision needed.
-- **Closed groups (private offerings)** reuses the same `ClosedGroup`
-  concept as shared-access (§4.2) for *membership gating* rather than
-  *wallet control* — worth a shared underlying table (`ClosedGroup` +
-  `ClosedGroupMember`) with a `Purpose` discriminator (`WALLET_ACCESS` vs
-  `PRIVATE_OFFERING`) rather than two parallel implementations.
+**Status model.** Same seven states, as a typed `Status string` enum
+(`DRAFT`, `APPLICATION_CONFIRMED`, `FEE_CONFIRMED`, `FEE_ACKNOWLEDGED`,
+`MINTED`, `PRIMARY_SALE_ACTIVE`, `SECONDARY_SALE_ACTIVE`) rather than a
+bare `int` — every transition and its trigger ports 1:1 (admin
+vetting sets a separate `VettingStatus` flag without moving
+`AssetTokenizationStatus`, exactly as upstream).
+
+**Core `TokenizedAsset` fields.** The identity/fee/sales-mechanics/
+compliance-flag/project-narrative fields, and the ~300-field asset-class
+descriptive tail (bond/mutual-fund/REIT/commodity/warehouse-receipt/vault/
+private-equity-fund narrative columns), are chain-agnostic business data
+with no Stellar-specific content — ported as a direct schema translation,
+grouped into embedded structs by asset class for readability rather than
+upstream's one flat 550-field table, with no fields dropped. What changes
+is only the handful of fields that named a Stellar primitive:
+
+| Original field(s) | Base field(s) | Why |
+|---|---|---|
+| `IssuingWalletPublicKey` (a Stellar issuer account) | `IssuerContractAddress` (the deployed `TokenizedAsset.sol` address) | Base's issuer is a contract, not an account — §2. |
+| `MarketMakingWallet`/`WalletToHoldAssetsNotForSale` | `DistributionAddress` (a `cryptoutil.DeriveKey`-derived per-asset key holding un-sold supply and signing fiat-purchase transfers) | Same per-asset-derived-key pattern used everywhere else in this port. |
+| (no equivalent — Stellar's `ManageSellOffer` *was* the sale) | `SaleContractAddress` (the deployed `Sale.sol` address) | The atomic buy() this port already built in Phase 8. |
+| `AssetQuoteCurrency` + resolving a Stellar issuer via `CountryConfig.InternalBalanceTokenCode/InternalTokenIssuer` | `AssetQuoteCurrency` (a `CuratedToken` symbol, resolved directly — no separate issuer lookup) | See "Quote currency" below. |
+| `ClosedGroupID` → a tokenization-only `ClosedGroup` | `ClosedGroupID` → `sharedaccess.ClosedGroup{Purpose: PRIVATE_OFFERING}` (§4.2, already built) | One table for both purposes rather than a parallel one. |
+| `PostTokenizationTrustlineCandidate` + its worker | dropped entirely | No trustline/opt-in concept on Base — §2. |
+
+**Quote currency — simplified, not just substituted.** Upstream resolves a
+purchase's settlement currency through a `CountryConfig`-scoped "internal
+balance token" (a synthetic intermediate Stellar asset, 1:1-minted per
+purchase, existing only to let Stellar's path-payment engine route
+`CNGN → NGN → AssetCode` in one atomic transaction — see
+`TOKENIZATION_PLAN.md` upstream) plus a "trustline authorization required"
+flag check with no ERC-20 equivalent. None of this exists to solve a
+problem Base has: an ERC-20 holder needs no opt-in, so there is nothing to
+authorize, and a purchase settles in exactly the token the asset is quoted
+in — no intermediate currency, no multi-hop pathfinding. `AssetQuoteCurrency`
+is simply a `CuratedToken` symbol (e.g. `"USDC"`); a buyer who holds a
+different token swaps into it beforehand via the already-generic
+`internal/components/swaps` component rather than the purchase transaction
+doing an implicit conversion. `CountryConfig` keeps only the fee/compliance
+fields that are genuinely per-country (SEC fee rates, VAT, application fee,
+minimum-balance-to-apply); `InternalBalanceTokenCode`/`InternalTokenIssuer`
+and `checkDistributionWalletHasQuoteCurrencyAuthorization` are dropped, not
+ported — documented here as a deliberate simplification, not an oversight.
+
+**Minting.** Two independent gates port directly: a global
+`MintingApprover`/`MintingInitiator` staff allow-list (who may call the
+mint endpoint at all), and a per-asset `MintingApprovers` CSV requiring
+≥4 entries before a mint can execute. The CSV's approval collection
+becomes a dedicated `MintApproval`/`MintApprovalSignoff` pair (the same
+signature-over-a-canonical-description primitive shared-access's
+`PendingAction`/`PendingActionApproval` uses, kept as its own table rather
+than reusing that one — this is a staff sign-off on an admin action, not a
+group wallet's own transaction, per the original's own separation between
+the two mechanisms). Once `len(approvers)-2` signoffs are collected
+(upstream's exact threshold), the server: derives a per-asset issuer key
+(`cryptoutil.DeriveKey`, owns the contract) and a per-asset distribution
+key (holds un-sold supply); deploys `TokenizedAsset.sol`; mints
+`NumberOfTokenToBeIssued - MaxNumberOfTokenAvailableForSale` to the
+distribution address and `MaxNumberOfTokenAvailableForSale` directly to a
+newly-deployed `Sale.sol` (quote currency, `PricePerToken`, proceeds to the
+distribution address); mints `FeeInAsset` to the fee wallet if set. No
+`ChangeTrust`/`SetTrustLineFlags` steps exist to port. Status → `MINTED`.
+
+**Primary sale (crypto).** `Sale.sol` (Phase 8) *is* the one-step atomic
+purchase the original achieved via `PathPaymentStrictSend` against its own
+`ManageSellOffer` — buyer `approve()`s the quote token, then `buy()` pulls
+payment and releases the asset in one transaction. The backend's role
+shrinks to: build the unsigned `buy()` call (the same build/sign/submit
+shape every other on-chain action in this codebase uses), and record a
+`TokenizedAssetSubscription` once the buyer's self-submitted transaction
+confirms. No swap/pathfinding logic is needed in this component at all.
+
+**Primary sale (fiat).** Reuses `internal/fiat`'s decoupled invoice pattern
+*unchanged* — its own doc comment already names this exact upstream flow as
+what it was modeled on. Since settlement here is a server-derived
+distribution-key transfer rather than something the buyer must co-sign (no
+trustline step exists to require the buyer's signature for), the server
+signs the transfer at invoice-creation time, hands the raw signed
+transaction to `fiatSvc.CreateInvoice(..., PaymentType: "TOKENIZED_ASSET_
+PURCHASE", signedTransaction: &raw)`, and the *already-built, unmodified*
+Flutterwave webhook handler's generic `default` branch calls
+`SettlePendingInvoice` to submit it once payment clears. This drops the
+original's buyer-signature round trip entirely (a real simplification, not
+a feature loss — Base needs no such step) and requires zero changes to
+`internal/components/fiat` itself, only a `TokenizedAssetSubscription` row
+created alongside the invoice for tokenization-specific bookkeeping.
+
+**Secondary sale/trading.** No bespoke code: Phase 7's off-chain
+order-book market-making component already trades any curated ERC-20 pair.
+Once an asset is minted its contract is added to the `CuratedToken`
+catalog (so it's visible and, per Phase 7, immediately tradeable); reaching
+`SECONDARY_SALE_ACTIVE` calls `Sale.setPaused(true)` (already built in
+Phase 8) so the primary-sale contract stops accepting purchases and the
+market component becomes the asset's only live trading venue — the direct
+functional equivalent of upstream's "primary window closes, DEX offer
+remains" without a second component to build.
+
+**Early exit.** `TokenizedAsset.sol` is `ERC20Burnable`, so a holder can
+burn their own balance directly — no server-signed "payment back to the
+distribution wallet" transaction is needed at all (a simplification over
+upstream, which needed the distribution-wallet hop because Stellar has no
+holder-initiated burn). The backend builds the unsigned `burn(quantity)`
+call, the holder self-submits it, and the server records a
+`TokenizedAssetEarlyExit` row with the same NAV-based penalty-percentage
+payout formula (`payoutPricePerToken = (CurrentNAVPerToken or
+PricePerToken) * (1 - (EarlyExitPenalty% + EarlyExitFee%))`) for
+off-chain/manual settlement — upstream itself never automated this payout
+on-chain either, so this is a direct port, not a new gap.
+
+**Expression of interest.** Direct port: a waitlist row gated on
+`Status == MINTED` (upstream's literal, if slightly non-obvious, gate —
+preserved as-is rather than "fixed," since it's the actual documented
+behavior, not a bug). Upstream's channel-plus-separate-goroutine hand-off
+to a dedicated notification worker is simplified to a synchronous
+notify-all-subscribers call inside the primary-sales-activation sweep
+itself — same notifications fire, one fewer moving part.
+
+**Background workers.** Primary- and secondary-sales activation port
+directly (sweep on `SalesStart`/`SalesEnd` vs. `time.Now()`), with one
+fix rather than a faithful reproduction: upstream's own activation
+routines block for 15 minutes *inside* a function an outer loop already
+re-polls every 5 seconds — almost certainly an unintended stacking of two
+different intended cadences, not a deliberate design, so this port uses a
+single clean poll interval instead of reproducing the stall (the same
+"fix, don't reproduce, and say so" posture already applied to the
+Patron/membership activation worker, §10). Post-tokenization-trustline
+automation is dropped, per §2 (nothing to automate). Interest-notification
+is folded into the primary-sales sweep, per above.
+
+**The dormant payout-schedule engine** (`ProceedPayout`,
+`TokenizedAssetPayoutSchedule`, `TokenizedAssetPayoutEngineTask`) is
+ported as models only, never wired to a route or worker — confirmed via
+`payouts.go` (a 160-line file whose actual logic sits in a dead `func
+main()` inside `package users`, hardcoded placeholder asset/issuer
+constants, never called from anywhere else in the codebase) and
+`TOKENIZATION_PLAN.md`'s own note that the production payout engine was
+never tracked down. Per §9's resolved policy: port-without-wiring, not
+skip and not finish — carrying forward the exact same "exists in schema,
+does nothing" state it has upstream, documented plainly rather than
+silently.
+
+**Reference data** (sectors, custodians, managers, issuing houses, legal
+partners, rating agencies, trustees, fees, protection options, proceed
+cycles, allowed countries, minting approver/initiator allow-lists) is
+chain-agnostic — ports as a direct schema translation. `TokenizationCurrency`
+becomes a thin allow-list of `CuratedToken` symbols (no separate
+issuer/contract bookkeeping — `CuratedToken` already has it).
+
+**Closed groups (private offerings)** reuse `sharedaccess.ClosedGroup`
+with `Purpose: PRIVATE_OFFERING` (§4.2, already built) rather than a
+parallel table.
+
+**Routes.** `/v1/tokenization/...` (public discovery + authed
+application/subscription/early-exit/expression-of-interest, mirroring
+upstream's route shape) and `/v1/admin/tokenization/...` (vetting,
+fee-acknowledgement, minting, sales-date management — gated by
+`middleware.JWTAuth(gc.JWTSecret, middleware.AudienceAdmin)`, the same
+admin-JWT mechanism the announcements component already established, so
+this doesn't need to wait on Phase 12's admin-surface work). The
+`/v1/trovo-api/assets/...` partner-API passthrough is **deferred to Phase
+11** alongside its API-key middleware (§5, §10) — it has no caller (the
+`servicelinks` component doesn't exist yet) and every one of its routes is
+a thin passthrough to a service function this phase already builds, so
+nothing about tokenization itself is blocked by deferring it.
+
+Implementation notes (what actually shipped, beyond the design above):
+
+- `internal/components/tokenization/models`: the core `TokenizedAsset`
+  table plus its ~300-field asset-class descriptive tail, grouped into
+  `gorm:"embedded"` structs by asset class (bond, fund, commercial paper,
+  commodity, vault, generic issuer/debt, REIT, private equity) rather than
+  upstream's one flat table, purely for readability — the underlying
+  schema is still one table. `EarlyExitPenaltyPercent`/
+  `EarlyExitFeePercent`/`CurrentNAVPerToken`/`MaturityDate` were pulled up
+  to core fields even though upstream declares them amid its REIT/
+  yield-fund/bond sections, since early exit reads them unconditionally
+  regardless of asset class. `MintingInitiators`/`MintingApprovers` are
+  CSVs of **addresses**, not usernames as upstream has them — a signature
+  is verified against an address directly, so there's no extra
+  username-to-address resolution step, consistent with sharedaccess's
+  `GroupMember.MemberAddress`.
+- Minting's per-asset ≥4-approver signoff is its own `MintApproval`/
+  `MintApprovalSignoff` pair (an EIP-191 `personal_sign` over a canonical
+  message, the same primitive shared-access's `PendingAction`/
+  `PendingActionApproval` uses) rather than reusing that table directly —
+  a staff sign-off on an admin action is a different concept from a group
+  wallet's own transaction, matching upstream's own separation between the
+  two mechanisms.
+- `network.Client` gained one new primitive for this phase:
+  `SignTx` (sign a transaction with a server-held key and return its raw
+  hex **without** submitting it), the missing piece needed to slot
+  tokenization's fiat purchase settlement into `internal/fiat`'s existing
+  decoupled invoice pattern (`SubmitSignedTransaction` submits it later,
+  once the fiat charge clears).
+- `internal/components/fiat/controllers.Init` now returns its `*services.
+  Service` (previously unexported from `main.go`) so tokenization's
+  `CreateFiatInvoice` hook — a function field, populated post-construction
+  in `main.go`, the same pattern KYC's `OnBVNVerified` hook uses to reach
+  Stablerail — can call `CreateInvoice` without tokenization importing
+  `fiat/services` directly.
+- One real bug caught by the test suite while porting `VetTokenizationAssetInfo`'s
+  status guard: comparing `Status` (a string enum) with Go's `>` operator
+  compares lexicographically, not by pipeline position (`"DRAFT" >
+  "APPLICATION_CONFIRMED"` is true as strings) — fixed with an explicit
+  `statusRank` lookup table rather than ever comparing `Status` values
+  with `<`/`>` directly.
+- Verification: `go build`/`vet`/`gofmt` clean; 20 unit tests in
+  `internal/components/tokenization/services` covering the application
+  lifecycle (KYC/currency/token-limit validation, the server-controlled-
+  field reset security property, draft-only resubmission, vetting's
+  stakeholder validation), the full mint flow end-to-end against a fake
+  blockchain client (threshold-gated signoff → two contract deployments →
+  `CuratedToken` listing → `Status` transition), crypto and fiat purchase
+  gating (sale status, private-offering membership, the fiat-invoice hook
+  wiring), and the early-exit penalty-payout formula.
 
 ### 4.10 Patron/membership — **planned**
 
@@ -864,7 +1046,7 @@ needs, not strictly by the order features appear above.
 | 6 | Crypto deposit/withdrawal — OneLiquidity (§4.7) | §5's contract-deployment infra (for the mint side) | **DONE** (via treasury transfer, not mint — see §4.7) |
 | 7 | Market making (§4.8) | §11's design decision | **DONE** |
 | 8 | On-chain infra: Solidity contracts + deployment helper, price reading, log polling (§5) | Needed before Phase 9 | **DONE** |
-| 9 | Tokenization (§4.9) | Phase 8, Phase 1 (closed-group reuse), Phase 4 (fiat purchase flow) | |
+| 9 | Tokenization (§4.9) | Phase 8, Phase 1 (closed-group reuse), Phase 4 (fiat purchase flow) | **DONE** (partner-API passthrough deferred to Phase 11 — see §4.9) |
 | 10 | Patron/membership (§4.10) | Phase 0 | |
 | 11 | Servicelinks partner API (§4.11), including the API-key auth middleware (§5) | Nearly everything above, since it's a passthrough layer | |
 | 12 | Admin surface (§4.12) | Whatever subsystems exist by then | |

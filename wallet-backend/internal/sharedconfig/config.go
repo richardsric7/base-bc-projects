@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 
 	"wallet-backend/internal/alerting"
@@ -105,6 +106,17 @@ type GlobalConfig struct {
 	// currently derives to, so rotating it orphans any standing
 	// approvals.
 	MarketEscrowKeySalt string
+
+	// TokenizationIssuerKeySalt/TokenizationDistributionKeySalt seed the
+	// per-asset issuer (mint authority) and distribution (treasury/
+	// proceeds) key derivations (see internal/components/tokenization) -
+	// same rotation caution as MarketEscrowKeySalt: rotating either
+	// orphans every already-minted asset's on-chain contract ownership.
+	// TokenizationTokenLimit caps NumberOfTokenToBeIssued on a new
+	// application; zero means no cap.
+	TokenizationIssuerKeySalt       string
+	TokenizationDistributionKeySalt string
+	TokenizationTokenLimit          decimal.Decimal
 }
 
 // Env holds every raw environment-derived setting. Load it once in main and
@@ -167,6 +179,10 @@ type Env struct {
 	CryptoWithdrawalServiceFeePercent float64
 
 	MarketEscrowKeySalt string
+
+	TokenizationIssuerKeySalt       string
+	TokenizationDistributionKeySalt string
+	TokenizationTokenLimit          string
 
 	Organisation string
 }
@@ -235,6 +251,10 @@ func LoadEnv() Env {
 		CryptoWithdrawalServiceFeePercent: getEnvFloat64("CRYPTO_WITHDRAWAL_SERVICE_FEE_PERCENT", 1.0),
 
 		MarketEscrowKeySalt: getEnv("MARKET_ESCROW_KEY_SALT", "dev-only-change-me"),
+
+		TokenizationIssuerKeySalt:       getEnv("TOKENIZATION_ISSUER_KEY_SALT", "dev-only-change-me"),
+		TokenizationDistributionKeySalt: getEnv("TOKENIZATION_DISTRIBUTION_KEY_SALT", "dev-only-change-me"),
+		TokenizationTokenLimit:          getEnv("TOKENIZATION_TOKEN_LIMIT", "0"),
 
 		Organisation: getEnv("ORGANISATION", "wallet-backend"),
 	}

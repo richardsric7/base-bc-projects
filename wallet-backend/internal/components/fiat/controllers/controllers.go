@@ -23,8 +23,11 @@ import (
 	"wallet-backend/internal/sharedconfig"
 )
 
-// Init registers the fiat component's routes on router.
-func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
+// Init registers the fiat component's routes on router and returns the
+// underlying Service so main.go can wire other components' fiat-invoice
+// creation (see tokenization's CreateFiatInvoice hook) to the exact same
+// generic invoice pattern this component itself uses.
+func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	svc := services.New(gc.DB, gc.Blockchain, gc.Rates, gc.FaucetKeySalt, gc.ActivationRewardTokenSymbol)
 
 	authed := router.Group("/v1/fiat")
@@ -35,6 +38,8 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
 
 	webhooks := router.Group("/v1/callbacks/fiat")
 	webhooks.POST("/flutterwave/webhook", flutterwaveWebhook(svc, gc.FlutterwaveSecretHash))
+
+	return svc
 }
 
 func getActivationQuote(svc *services.Service) gin.HandlerFunc {

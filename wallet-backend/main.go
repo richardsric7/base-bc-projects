@@ -24,6 +24,7 @@ import (
 	kycModels "wallet-backend/internal/components/kyc/models"
 	marketModels "wallet-backend/internal/components/market/models"
 	paymentsModels "wallet-backend/internal/components/payments/models"
+	tokenizationModels "wallet-backend/internal/components/tokenization/models"
 	usersModels "wallet-backend/internal/components/users/models"
 
 	announcementsControllers "wallet-backend/internal/components/announcements/controllers"
@@ -42,6 +43,7 @@ import (
 	stablerailControllers "wallet-backend/internal/components/stablerail/controllers"
 	stablerailModels "wallet-backend/internal/components/stablerail/models"
 	swapsControllers "wallet-backend/internal/components/swaps/controllers"
+	tokenizationControllers "wallet-backend/internal/components/tokenization/controllers"
 	usersControllers "wallet-backend/internal/components/users/controllers"
 
 	"wallet-backend/internal/db"
@@ -70,6 +72,7 @@ func allModels() []interface{} {
 	models = append(models, stablerailModels.Models...)
 	models = append(models, cryptoModels.Models...)
 	models = append(models, marketModels.Models...)
+	models = append(models, tokenizationModels.Models...)
 	return models
 }
 
@@ -196,6 +199,10 @@ func main() {
 		CryptoWithdrawalServiceFeePercent: env.CryptoWithdrawalServiceFeePercent,
 
 		MarketEscrowKeySalt: env.MarketEscrowKeySalt,
+
+		TokenizationIssuerKeySalt:       env.TokenizationIssuerKeySalt,
+		TokenizationDistributionKeySalt: env.TokenizationDistributionKeySalt,
+		TokenizationTokenLimit:          parseDecimalOrZero(env.TokenizationTokenLimit),
 	}
 
 	router := gin.Default()
@@ -213,16 +220,27 @@ func main() {
 	announcementsControllers.Init(router, gc)
 	callbacksControllers.Init(router, gc)
 	kycSvc := kycControllers.Init(router, gc)
-	fiatControllers.Init(router, gc)
+	fiatSvc := fiatControllers.Init(router, gc)
 	stablerailSvc := stablerailControllers.Init(router, gc)
 	cryptoSvc := cryptoControllers.Init(router, gc)
 	marketControllers.Init(router, gc)
+	tokenizationSvc := tokenizationControllers.Init(router, gc)
 
 	// Wire the KYC component's Doja BVN-completion hook to Stablerail
 	// onboarding - see kyc/services.Service.OnBVNVerified's doc comment
 	// for why this is a post-construction callback rather than a
 	// constructor argument (avoids kyc importing stablerail directly).
 	kycSvc.OnBVNVerified = stablerailSvc.InitiateOnboardingByUsername
+
+	// Wire tokenization's fiat purchase flow onto the exact same generic
+	// invoice pattern the fiat component's own activation flow uses - see
+	// tokenization/services.CreateFiatInvoiceFunc's doc comment for why
+	// this is a callback rather than tokenization importing fiat/services
+	// directly.
+	tokenizationSvc.CreateFiatInvoice = func(address, id, serviceProvider, paymentType string, amount float64, currency string, signedTransaction *string) error {
+		_, err := fiatSvc.CreateInvoice(address, id, serviceProvider, paymentType, amount, currency, signedTransaction)
+		return err
+	}
 
 	if env.StablerailEnabled {
 		go func() {
@@ -252,6 +270,16 @@ func main() {
 		}()
 	}
 
+	// A single clean poll interval, replacing upstream's own accidental
+	// 15-minute-sleep-inside-a-5-second-loop stacking (PLAN.md §4.9).
+	go func() {
+		for {
+			tokenizationSvc.ActivatePrimarySales()
+			tokenizationSvc.ActivateSecondarySales(context.Background())
+			time.Sleep(30 * time.Second)
+		}
+	}()
+
 	// Roughly every two Base blocks (~4s at Base's ~2s block time) per
 	// PLAN.md §2 - the polling-based replacement for Horizon operation
 	// streaming's role in cache invalidation.
@@ -272,6 +300,16 @@ func main() {
 
 func durationFromMinutes(minutes int) time.Duration {
 	return time.Duration(minutes) * time.Minute
+}
+
+// parseDecimalOrZero parses a decimal-string env var, defaulting to zero
+// (meaning "no limit" for TokenizationTokenLimit) on anything unparseable.
+func parseDecimalOrZero(value string) decimal.Decimal {
+	parsed, err := decimal.NewFromString(value)
+	if err != nil {
+		return decimal.Zero
+	}
+	return parsed
 }
 
 // seedSecurityQuestions inserts a small default catalog on first boot so the
