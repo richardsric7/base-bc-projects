@@ -92,6 +92,13 @@ type GlobalConfig struct {
 	CryptoWalletDomain                string
 	CryptoTreasuryKeySalt             string
 	CryptoWithdrawalServiceFeePercent float64
+
+	// MarketEscrowKeySalt seeds the market-making escrow key derivation
+	// (see internal/components/market) - same rotation caution as
+	// GroupKeySalt: a maker's approve() targets the address this
+	// currently derives to, so rotating it orphans any standing
+	// approvals.
+	MarketEscrowKeySalt string
 }
 
 // Env holds every raw environment-derived setting. Load it once in main and
@@ -152,6 +159,8 @@ type Env struct {
 	CryptoWalletDomain                string
 	CryptoTreasuryKeySalt             string
 	CryptoWithdrawalServiceFeePercent float64
+
+	MarketEscrowKeySalt string
 
 	Organisation string
 }
@@ -218,6 +227,8 @@ func LoadEnv() Env {
 		CryptoWalletDomain:                getEnv("CRYPTO_WALLET_DOMAIN", "wallet-backend"),
 		CryptoTreasuryKeySalt:             getEnv("CRYPTO_TREASURY_KEY_SALT", "dev-only-change-me"),
 		CryptoWithdrawalServiceFeePercent: getEnvFloat64("CRYPTO_WITHDRAWAL_SERVICE_FEE_PERCENT", 1.0),
+
+		MarketEscrowKeySalt: getEnv("MARKET_ESCROW_KEY_SALT", "dev-only-change-me"),
 
 		Organisation: getEnv("ORGANISATION", "wallet-backend"),
 	}

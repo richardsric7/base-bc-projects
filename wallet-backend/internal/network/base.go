@@ -214,6 +214,19 @@ func EncodeERC20Transfer(to string, amount *big.Int) ([]byte, error) {
 	return data, nil
 }
 
+// EncodeERC20TransferFrom ABI-encodes a transferFrom(from, to, amount) call
+// - used by the market component to settle a matched trade by pulling each
+// side's asset via a prior approve() rather than holding user funds itself,
+// the same off-chain-order/on-chain-settlement pattern the 0x Protocol
+// popularized. See PLAN.md §4.8.
+func EncodeERC20TransferFrom(from, to string, amount *big.Int) ([]byte, error) {
+	data, err := erc20ABI.Pack("transferFrom", common.HexToAddress(from), common.HexToAddress(to), amount)
+	if err != nil {
+		return nil, fmt.Errorf("encode erc20 transferFrom: %w", err)
+	}
+	return data, nil
+}
+
 // BuildApproveTx builds an unsigned ERC-20 approve(spender, amount) call -
 // the base template's substitute for Stellar's trustline, see PLAN.md §5.1.
 // Callers should prefer an exact amount over an unlimited allowance and
@@ -298,6 +311,7 @@ func (c *Client) ERC20Allowance(ctx context.Context, tokenAddress, owner, spende
 
 const erc20ABIJSON = `[
 	{"constant":false,"inputs":[{"name":"to","type":"address"},{"name":"amount","type":"uint256"}],"name":"transfer","outputs":[{"name":"","type":"bool"}],"type":"function"},
+	{"constant":false,"inputs":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"amount","type":"uint256"}],"name":"transferFrom","outputs":[{"name":"","type":"bool"}],"type":"function"},
 	{"constant":false,"inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"name":"approve","outputs":[{"name":"","type":"bool"}],"type":"function"},
 	{"constant":true,"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"type":"function"},
 	{"constant":true,"inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}],"name":"allowance","outputs":[{"name":"","type":"uint256"}],"type":"function"}

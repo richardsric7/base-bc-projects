@@ -307,6 +307,44 @@ this project doesn't control minting for) and the one documented gap
 6. `GET /v1/crypto/withdrawal-history` (authed) lists the caller's
    withdrawal requests and their status.
 
+## Market making (off-chain order book)
+
+A server-matched limit-order book, standing in for placing a resting
+offer directly on Stellar's protocol-level DEX - Base has no equivalent,
+so this needed a real design choice (see `PLAN.md` §4.8 and §11 for why
+off-chain-matched was chosen over dropping resting orders entirely).
+
+Settlement pulls each matched side's asset via `transferFrom` against a
+prior `approve()` of a derived escrow address, rather than the server
+ever holding funds itself - the same off-chain-order/on-chain-settlement
+pattern the 0x Protocol popularized, necessary because Base wallets are
+non-custodial and the server can't move either side's asset without a
+signature it doesn't have.
+
+1. `GET /v1/market/escrow-address` (public) returns the address a maker
+   must `approve()` before placing an offer - for the base asset if
+   selling, for `quantity * pricePerUnit` of the quote asset if buying.
+2. `POST /v1/market/offers` (authed) with
+   `{"offerType": "BUY"|"SELL", "baseToken", "quoteToken", "pricePerUnit", "quantity"}`
+   places a resting limit order and immediately tries to match it,
+   price-time priority, against the book - repeatedly, until it's fully
+   filled or no more crossing offers remain. A match always executes at
+   the **resting** (older) offer's price. Only curated ERC-20 pairs can
+   be traded - native ETH has no `approve`/`transferFrom` concept.
+3. `GET /v1/market/orderbook?baseToken=...&quoteToken=...` (public) and
+   `GET /v1/market/trades?baseToken=...&quoteToken=...` (public) return
+   the live book and trade history for a pair.
+4. `GET /v1/market/offers` (authed) lists the caller's own offers;
+   `DELETE /v1/market/offers/:offerId` (authed) cancels one that's still
+   `OPEN` or `PARTIALLY_FILLED`.
+
+A known limitation, documented rather than hidden: settling a match is
+two independent `transferFrom` calls, not one atomic operation, so a
+second leg failing after the first already cleared cancels the failing
+side without automatically making the other side whole - the honest cost
+of not yet having an atomic on-chain escrow contract (a natural fit for
+Phase 8's on-chain infrastructure).
+
 ## Adding a real integration
 
 The `notify`, `storage`, `kyc`, `fiat`, `rates`, and `alerting` packages are

@@ -22,6 +22,7 @@ import (
 	cryptoModels "wallet-backend/internal/components/crypto/models"
 	fiatModels "wallet-backend/internal/components/fiat/models"
 	kycModels "wallet-backend/internal/components/kyc/models"
+	marketModels "wallet-backend/internal/components/market/models"
 	paymentsModels "wallet-backend/internal/components/payments/models"
 	usersModels "wallet-backend/internal/components/users/models"
 
@@ -32,6 +33,7 @@ import (
 	cryptoControllers "wallet-backend/internal/components/crypto/controllers"
 	fiatControllers "wallet-backend/internal/components/fiat/controllers"
 	kycControllers "wallet-backend/internal/components/kyc/controllers"
+	marketControllers "wallet-backend/internal/components/market/controllers"
 	paymentsControllers "wallet-backend/internal/components/payments/controllers"
 	ratesControllers "wallet-backend/internal/components/rates/controllers"
 	rootControllers "wallet-backend/internal/components/root/controllers"
@@ -67,6 +69,7 @@ func allModels() []interface{} {
 	models = append(models, fiatModels.Models...)
 	models = append(models, stablerailModels.Models...)
 	models = append(models, cryptoModels.Models...)
+	models = append(models, marketModels.Models...)
 	return models
 }
 
@@ -188,6 +191,8 @@ func main() {
 		CryptoWalletDomain:                env.CryptoWalletDomain,
 		CryptoTreasuryKeySalt:             env.CryptoTreasuryKeySalt,
 		CryptoWithdrawalServiceFeePercent: env.CryptoWithdrawalServiceFeePercent,
+
+		MarketEscrowKeySalt: env.MarketEscrowKeySalt,
 	}
 
 	router := gin.Default()
@@ -208,6 +213,7 @@ func main() {
 	fiatControllers.Init(router, gc)
 	stablerailSvc := stablerailControllers.Init(router, gc)
 	cryptoSvc := cryptoControllers.Init(router, gc)
+	marketControllers.Init(router, gc)
 
 	// Wire the KYC component's Doja BVN-completion hook to Stablerail
 	// onboarding - see kyc/services.Service.OnBVNVerified's doc comment

@@ -489,30 +489,74 @@ OneLiquidity account was available in this sandbox, so these calls are
 verified against OneLiquidity's documented contract via a mocked server
 rather than a live call.
 
-### 4.8 Market making (trades/offers) — **planned, needs an explicit decision**
+### 4.8 Market making (trades/offers) — **DONE**
 
 Original: `postUsersTradesHandler` places a resting limit offer directly on
 Stellar's built-in DEX order book (`MarketOffer` model,
 `services/market_making.go`).
 
 Base has no protocol-level order book to place a resting offer on — this
-needs one of two designs, and unlike the rest of this plan I'm not picking
-one silently:
+needed one of two designs, and unlike the rest of this plan that one
+wasn't picked silently:
 
 - **(a) Off-chain order book, server-matched**: the server holds proposed
   offers in a `MarketOffer` table and matches compatible buy/sell orders
-  itself, executing a transfer between the two parties' addresses (via the
-  shared-access-style server-signed execution, or a build/sign/submit pair
-  from each side) when a match is found. Preserves the "place a resting
-  limit order" UX exactly, at the cost of the server now matching trades
-  rather than a public DEX doing it.
+  itself, executing a transfer between the two parties' addresses when a
+  match is found. Preserves the "place a resting limit order" UX exactly,
+  at the cost of the server now matching trades rather than a public DEX
+  doing it.
 - **(b) Swap-only, no resting orders**: drop the resting-limit-offer
   concept entirely and treat "market making" as just using the existing
   swaps component against a DEX at whatever the current pool price is.
-  Much simpler, but is a real feature reduction, not just an
-  implementation detail.
 
-I'm flagging this rather than guessing — see §11.
+**Chosen: (a), off-chain order book, server-matched** (user decision).
+Implemented as `internal/components/market`.
+
+The one thing (a)'s original framing didn't spell out: since Base wallets
+are non-custodial, the server matching two offers still can't move either
+side's asset without a signature the server doesn't have. The
+implementation resolves this the same way the 0x Protocol popularized for
+off-chain order books: a maker `approve()`s a derived escrow address
+(`Service.EscrowAddress()`, `cryptoutil.DeriveKey`-derived from
+`MARKET_ESCROW_KEY_SALT` — same pattern as every other server-key role in
+this port) for the asset they're offering, and settlement pulls each
+matched side's asset via `transferFrom` against that allowance rather than
+ever holding funds itself between the two legs. This is a **new
+mechanism**, not something to translate from the original — there, the
+actual matching and settlement happened entirely inside Stellar's
+protocol-level DEX once a `ManageBuyOffer`/`ManageSellOffer` operation was
+submitted; the Trovo backend only recorded a local `MarketOffer` row for
+UI/tracking, it never executed a trade itself.
+
+Matching is price-time priority: a new offer matches the best-priced,
+oldest-at-that-price compatible resting offer repeatedly until it's fully
+filled or no more crossing offers remain, executing at the **resting**
+(older) offer's price — the standard maker-price convention. Only curated
+ERC-20 pairs can be traded (native ETH has no `approve`/`transferFrom`
+concept, so it's rejected at `PlaceOffer` time with a clear error — a
+natural extension once an escrow *contract* that can receive ETH directly
+exists, Phase 8). A known, explicitly documented limitation: settling a
+match is two independent `transferFrom` calls, not one atomic operation,
+so if the second leg fails after the first already cleared (e.g. the
+counterparty's allowance or balance changed between the two calls), the
+failing side's offer is canceled but the succeeding side isn't
+automatically made whole — the honest cost of not having an atomic
+on-chain escrow contract yet (Phase 8's natural fix, alongside the ERC-4337
+smart-account note already in §11).
+
+Dropped rather than ported: the original's market-making fee
+(`FeeChargedOnAsset`/`FeeValue`/`NetQuantity`) — its own live code had
+already zeroed it out (`serviceFee.Div(decimal.NewFromInt(0))`, guarded by
+`MARKET_MAKING_FEE_ENABLED` defaulting off, with the code comment "fees r
+now removed"), so there was no working fee behavior left to preserve.
+
+Verification: `go build`/`vet`/`gofmt` clean; 12 unit tests (including
+table-driven input validation) in `internal/components/market/services`
+covering full and partial fills, execution at the resting offer's price
+even when the taker would have accepted a worse one, price-time priority
+across multiple resting offers, the failed-settlement-cancels-the-
+failing-side behavior, offer cancellation (ownership and status-conflict
+checks), and order-book/history listing.
 
 ### 4.9 Tokenization — **planned, the largest subsystem**
 
@@ -780,7 +824,7 @@ needs, not strictly by the order features appear above.
 | 4 | Fiat payments & activation — Flutterwave (§4.5) | Phase 0, benefits from Phase 3 (activation often gated on KYC) | **DONE** |
 | 5 | Stablerail (§4.6) | Phase 3 (BVN/KYC-triggered onboarding) | **DONE** |
 | 6 | Crypto deposit/withdrawal — OneLiquidity (§4.7) | §5's contract-deployment infra (for the mint side) | **DONE** (via treasury transfer, not mint — see §4.7) |
-| 7 | Market making (§4.8) | §11's design decision |
+| 7 | Market making (§4.8) | §11's design decision | **DONE** |
 | 8 | On-chain infra: Solidity contracts + deployment helper, price reading, log polling (§5) | Needed before Phase 9 |
 | 9 | Tokenization (§4.9) | Phase 8, Phase 1 (closed-group reuse), Phase 4 (fiat purchase flow) |
 | 10 | Patron/membership (§4.10) | Phase 0 |
@@ -792,8 +836,9 @@ needs, not strictly by the order features appear above.
 ## 11. Open decisions needing input before implementation proceeds
 
 - **Market making design (§4.8)**: off-chain server-matched order book vs.
-  swap-only. This changes the feature, not just the implementation —
-  needs a call, not an assumption.
+  swap-only. **Resolved — off-chain server-matched order book chosen**;
+  see §4.8 for the implementation, including the escrow-based settlement
+  mechanism this required.
 - **Dead/dormant upstream code (§9)**: confirmed recommendation is skip the
   facematch KYC path, port-without-wiring the payout engine and the two
   unrouted Stablerail functions — flag if that's wrong.
