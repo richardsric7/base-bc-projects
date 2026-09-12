@@ -1,6 +1,10 @@
 package services
 
 import (
+	"context"
+	"errors"
+	"math/big"
+
 	"gorm.io/gorm"
 
 	"wallet-backend/internal/apperrors"
@@ -18,34 +22,66 @@ func New(db *gorm.DB, blockchain *network.Client) *Service {
 	return &Service{DB: db, Blockchain: blockchain}
 }
 
-// BuildPaymentXDR returns an unsigned payment transaction for the source
-// account's owner to sign client-side.
-func (s *Service) BuildPaymentXDR(sourcePublicKey, destinationPublicKey, assetCode, assetIssuer, amount string) (string, error) {
-	if !validators.IsValidStellarPublicKey(sourcePublicKey) || !validators.IsValidStellarPublicKey(destinationPublicKey) {
-		return "", apperrors.BadRequest("invalid Stellar public key")
+// BuildPaymentTx returns an unsigned native-ETH or ERC-20 transfer for the
+// source account's owner to sign client-side, with everything needed to
+// sign completely offline (see PLAN.md §3). Pass an empty tokenAddress for
+// a native ETH transfer. amount is a decimal string in the asset's smallest
+// unit (wei for ETH, the token's base unit for an ERC-20) to avoid
+// floating-point precision loss.
+func (s *Service) BuildPaymentTx(ctx context.Context, from, to, tokenAddress, amount string, nonce *uint64) (*network.UnsignedTx, error) {
+	if !validators.IsValidAddress(from) || !validators.IsValidAddress(to) {
+		return nil, apperrors.BadRequest("invalid address")
 	}
-	xdrString, err := s.Blockchain.BuildPaymentXDR(sourcePublicKey, destinationPublicKey, assetCode, assetIssuer, amount)
+	amountValue, ok := new(big.Int).SetString(amount, 10)
+	if !ok {
+		return nil, apperrors.BadRequest("amount must be a decimal integer string in the asset's smallest unit")
+	}
+
+	var tx *network.UnsignedTx
+	var err error
+	if tokenAddress == "" {
+		tx, err = s.Blockchain.BuildNativeTransferTx(ctx, from, to, amountValue, nonce)
+	} else {
+		if !validators.IsValidAddress(tokenAddress) {
+			return nil, apperrors.BadRequest("invalid token contract address")
+		}
+		tx, err = s.Blockchain.BuildERC20TransferTx(ctx, from, tokenAddress, to, amountValue, nonce)
+	}
 	if err != nil {
-		return "", apperrors.BadRequest(err.Error())
+		return nil, apperrors.BadRequest(err.Error())
 	}
-	return xdrString, nil
+	return tx, nil
 }
 
 // SubmitPayment submits a client-signed payment transaction and records it
-// in payment history.
-func (s *Service) SubmitPayment(signedXDR, fromPublicKey, toPublicKey, assetCode, assetIssuer, amount string) (*models.PaymentHistory, error) {
-	tx, err := s.Blockchain.SubmitSignedTransaction(signedXDR)
+// in payment history, keyed by a client-supplied idempotency key. Because
+// signing can happen long after Build (see PLAN.md §3 - the whole point of
+// offline signing), an app's natural retry-on-reconnect behavior means the
+// same signed transaction may arrive here more than once; resubmitting the
+// same idempotencyKey returns the original record rather than erroring or
+// creating a duplicate history entry.
+func (s *Service) SubmitPayment(ctx context.Context, idempotencyKey, signedTx, fromAddress, toAddress, tokenAddress, amount string) (*models.PaymentHistory, error) {
+	var existing models.PaymentHistory
+	err := s.DB.Where("idempotency_key = ?", idempotencyKey).First(&existing).Error
+	if err == nil {
+		return &existing, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, apperrors.Internal("failed to check for a previous submission")
+	}
+
+	hash, err := s.Blockchain.SubmitSignedTransaction(ctx, signedTx)
 	if err != nil {
 		return nil, apperrors.BadRequest("transaction rejected by the network: " + err.Error())
 	}
 
 	record := models.PaymentHistory{
-		FromPublicKey: fromPublicKey,
-		ToPublicKey:   toPublicKey,
-		AssetCode:     assetCode,
-		AssetIssuer:   assetIssuer,
-		Amount:        amount,
-		TxHash:        tx.Hash,
+		IdempotencyKey: idempotencyKey,
+		FromAddress:    fromAddress,
+		ToAddress:      toAddress,
+		TokenAddress:   tokenAddress,
+		Amount:         amount,
+		TxHash:         hash,
 	}
 	if err := s.DB.Create(&record).Error; err != nil {
 		return nil, apperrors.Internal("payment submitted but failed to record history")
@@ -53,11 +89,11 @@ func (s *Service) SubmitPayment(signedXDR, fromPublicKey, toPublicKey, assetCode
 	return &record, nil
 }
 
-// History returns the payments a public key has sent or received, most
+// History returns the payments an address has sent or received, most
 // recent first.
-func (s *Service) History(publicKey string) ([]models.PaymentHistory, error) {
+func (s *Service) History(address string) ([]models.PaymentHistory, error) {
 	var history []models.PaymentHistory
-	err := s.DB.Where("from_public_key = ? OR to_public_key = ?", publicKey, publicKey).
+	err := s.DB.Where("from_address = ? OR to_address = ?", address, address).
 		Order("created_at DESC").
 		Find(&history).Error
 	if err != nil {

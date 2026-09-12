@@ -3,8 +3,8 @@ package services
 import (
 	"testing"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/glebarez/sqlite"
-	"github.com/stellar/go-stellar-sdk/keypair"
 	"gorm.io/gorm"
 
 	"wallet-backend/internal/apperrors"
@@ -23,16 +23,26 @@ func newTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-const testPublicKey = "GBTNUZDIUMWZEGTNQCL5F73PIABCBJ4YQA2VJS7HXTBRDDSTWCE6UNXE"
+// randomAddress generates a fresh, syntactically valid EVM address for tests
+// that just need "some address," not a specific one.
+func randomAddress(t *testing.T) string {
+	t.Helper()
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	return crypto.PubkeyToAddress(key.PublicKey).Hex()
+}
 
 func TestRegister_Success(t *testing.T) {
 	svc := New(newTestDB(t))
+	address := randomAddress(t)
 
-	user, err := svc.Register(RegisterInput{Username: "alice", Email: "alice@example.com", PublicKey: testPublicKey})
+	user, err := svc.Register(RegisterInput{Username: "alice", Email: "alice@example.com", Address: address})
 	if err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
-	if user.Username != "alice" || user.PublicKey != testPublicKey {
+	if user.Username != "alice" || user.Address != address {
 		t.Fatalf("unexpected user: %+v", user)
 	}
 
@@ -40,16 +50,16 @@ func TestRegister_Success(t *testing.T) {
 	if err := svc.DB.Where("user_id = ?", user.ID).First(&wallet).Error; err != nil {
 		t.Fatalf("expected a primary wallet to be created: %v", err)
 	}
-	if !wallet.IsPrimary || wallet.PublicKey != testPublicKey {
+	if !wallet.IsPrimary || wallet.Address != address {
 		t.Fatalf("unexpected primary wallet: %+v", wallet)
 	}
 }
 
-func TestRegister_InvalidPublicKey(t *testing.T) {
+func TestRegister_InvalidAddress(t *testing.T) {
 	svc := New(newTestDB(t))
-	_, err := svc.Register(RegisterInput{Username: "alice", Email: "alice@example.com", PublicKey: "not-a-key"})
+	_, err := svc.Register(RegisterInput{Username: "alice", Email: "alice@example.com", Address: "not-an-address"})
 	if err == nil {
-		t.Fatal("expected an error for an invalid public key")
+		t.Fatal("expected an error for an invalid address")
 	}
 	appErr, ok := err.(*apperrors.AppError)
 	if !ok || appErr.StatusCode() != 400 {
@@ -59,15 +69,11 @@ func TestRegister_InvalidPublicKey(t *testing.T) {
 
 func TestRegister_DuplicateUsername(t *testing.T) {
 	svc := New(newTestDB(t))
-	if _, err := svc.Register(RegisterInput{Username: "alice", Email: "alice@example.com", PublicKey: testPublicKey}); err != nil {
+	if _, err := svc.Register(RegisterInput{Username: "alice", Email: "alice@example.com", Address: randomAddress(t)}); err != nil {
 		t.Fatalf("first Register returned error: %v", err)
 	}
 
-	other, err := keypair.Random()
-	if err != nil {
-		t.Fatalf("generate keypair: %v", err)
-	}
-	_, err = svc.Register(RegisterInput{Username: "alice", Email: "someone-else@example.com", PublicKey: other.Address()})
+	_, err := svc.Register(RegisterInput{Username: "alice", Email: "someone-else@example.com", Address: randomAddress(t)})
 	if err == nil {
 		t.Fatal("expected a conflict error for a duplicate username")
 	}
@@ -77,22 +83,42 @@ func TestRegister_DuplicateUsername(t *testing.T) {
 	}
 }
 
+func TestGetByAddress(t *testing.T) {
+	svc := New(newTestDB(t))
+	address := randomAddress(t)
+	if _, err := svc.Register(RegisterInput{Username: "carol", Email: "carol@example.com", Address: address}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	user, err := svc.GetByAddress(address)
+	if err != nil {
+		t.Fatalf("GetByAddress returned error: %v", err)
+	}
+	if user.Username != "carol" {
+		t.Fatalf("unexpected user: %+v", user)
+	}
+
+	if _, err := svc.GetByAddress(randomAddress(t)); err == nil {
+		t.Fatal("expected a not-found error for an unregistered address")
+	}
+}
+
 func TestSecurityAnswer_SetAndVerify(t *testing.T) {
 	svc := New(newTestDB(t))
-	user, err := svc.Register(RegisterInput{Username: "bob", Email: "bob@example.com", PublicKey: testPublicKey})
+	user, err := svc.Register(RegisterInput{Username: "bob", Email: "bob@example.com", Address: randomAddress(t)})
 	if err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
-	question := models.SecurityQuestion{Question: "What is your favorite testnet asset?"}
+	question := models.SecurityQuestion{Question: "What is your favorite testnet faucet?"}
 	if err := svc.DB.Create(&question).Error; err != nil {
 		t.Fatalf("create question: %v", err)
 	}
 
-	if err := svc.SetSecurityAnswer(user.ID, question.ID, "XLM"); err != nil {
+	if err := svc.SetSecurityAnswer(user.ID, question.ID, "Base Sepolia"); err != nil {
 		t.Fatalf("SetSecurityAnswer returned error: %v", err)
 	}
 
-	match, err := svc.VerifySecurityAnswer(user.ID, question.ID, "XLM")
+	match, err := svc.VerifySecurityAnswer(user.ID, question.ID, "Base Sepolia")
 	if err != nil {
 		t.Fatalf("VerifySecurityAnswer returned error: %v", err)
 	}
@@ -100,7 +126,7 @@ func TestSecurityAnswer_SetAndVerify(t *testing.T) {
 		t.Fatal("expected the correct answer to match")
 	}
 
-	noMatch, err := svc.VerifySecurityAnswer(user.ID, question.ID, "BTC")
+	noMatch, err := svc.VerifySecurityAnswer(user.ID, question.ID, "Ethereum Mainnet")
 	if err != nil {
 		t.Fatalf("VerifySecurityAnswer returned error: %v", err)
 	}

@@ -1,27 +1,30 @@
 # wallet-backend
 
-A base, brand-agnostic Stellar blockchain wallet backend. See
-[`PLAN.md`](./PLAN.md) for the full architecture rationale - this README is
-the practical "how do I run it" companion.
+A base, brand-agnostic wallet backend for **Base** (Coinbase's OP-Stack
+Ethereum L2). See [`PLAN.md`](./PLAN.md) for the full architecture
+rationale - this README is the practical "how do I run it" companion.
 
 Wallets in this template are **non-custodial**: the server only ever handles
-a user's Stellar *public* key. Every action that touches a user's own
-account (a payment, a trustline, a swap) follows a **build → sign → submit**
-flow: the server builds an unsigned transaction, the client signs it with a
-key only it holds, and the server submits the signed result. The server
-never asks for, stores, or signs with a user's secret key.
+a user's EVM *address*. Every action that touches a user's own account (a
+payment, an approval, a swap) follows a **build → sign → submit** flow: the
+server builds an unsigned transaction with everything needed to sign it with
+zero further network access, the client signs it offline with a key only it
+holds, and the server submits the signed result. The server never asks for,
+stores, or signs with a user's private key. See `PLAN.md` §3 for why this
+matters for an app that needs to work offline.
 
 ## Quick start
 
 ```bash
 go mod download
-cp .env.example .env       # defaults work out of the box: SQLite + console mail/SMS
+cp .env.example .env       # defaults work out of the box: SQLite + Base Sepolia + console mail/SMS
 go run .                   # serves on :8080
 ```
 
-No Postgres/Redis/Stellar account needed to boot - `DB_TYPE=sqlite` and
+No Postgres/Redis account needed to boot - `DB_TYPE=sqlite` and
 `ENABLE_CACHING=false` are the defaults, and outbound mail/SMS/push log to
-the console instead of sending anything.
+the console instead of sending anything. `BASE_RPC_URL`/`BASE_CHAIN_ID`
+default to Base Sepolia (the public testnet), never mainnet.
 
 To run against Postgres + Redis locally:
 
@@ -33,7 +36,8 @@ docker compose up
 
 - Go, [Gin](https://github.com/gin-gonic/gin) for HTTP
 - [GORM](https://gorm.io) over Postgres (production) or SQLite (dev/tests)
-- [go-stellar-sdk](https://github.com/stellar/go-stellar-sdk) for all Stellar/Horizon interaction
+- [go-ethereum](https://github.com/ethereum/go-ethereum) for all Base/EVM interaction - Base speaks standard Ethereum JSON-RPC, so no chain-specific SDK is needed
+- [siwe-go](https://github.com/spruceid/siwe-go) for Sign-In With Ethereum (EIP-4361)
 - Redis for optional response/data caching
 
 ## Project layout
@@ -49,11 +53,11 @@ internal/
 ├── sharedconfig/   GlobalConfig (DI struct) + Env loader
 ├── db/             OpenDB (postgres/sqlite), MigrateDB
 ├── cache/          Cache interface + Redis impl + no-op
-├── network/        Stellar/Horizon integration - the only package importing txnbuild/horizonclient
-├── middleware/      CORS, Stellar-signature auth, JWT admin auth
-├── cryptoutil/       keypair derivation, AES-GCM, bcrypt, hashing
+├── network/        Base/EVM integration - the only package importing go-ethereum
+├── middleware/      CORS, SIWE-session + admin JWT auth
+├── cryptoutil/       secp256k1 key derivation, AES-GCM, bcrypt, hashing
 ├── apperrors/        GenericError + typed constructors
-├── validators/       format validators
+├── validators/       format validators (EIP-55 address checks, etc.)
 ├── notify/           Mailer / SMSProvider / PushProvider + default impls
 ├── storage/          Blob interface + local-disk impl
 ├── kyc/              Provider interface + ManualKYCProvider stub
@@ -61,33 +65,38 @@ internal/
 ├── rates/            Provider interface + static/fixture impl
 ├── alerting/         Notifier interface + Discord webhook impl
 └── components/
-    ├── root/          health check, SEP-1 stellar.toml
-    ├── users/         registration, profile, security questions/recovery
-    ├── assets/        curated-asset catalog, trustline build/submit
-    ├── payments/      build/submit payment, payment history
-    ├── swaps/         build/submit path-payment swap
-    ├── announcements/ in-app announcements (public read, JWT-admin write)
-    └── callbacks/     generic webhook receiver stub
+    ├── root/          health check reporting the configured chain ID
+    ├── auth/           SIWE nonce issuance + verification -> session JWT
+    ├── users/          registration, profile, security questions/recovery
+    ├── assets/         curated-token catalog, balance lookup, allowance build/submit
+    ├── payments/       build/submit native or ERC-20 transfer, payment history
+    ├── swaps/          generic, router-address-configurable DEX call builder
+    ├── announcements/  in-app announcements (public read, JWT-admin write)
+    └── callbacks/      generic webhook receiver stub
 ```
 
 ## Auth
 
-- **Primary API** (`/v1/users`, `/v1/assets`, `/v1/payments`, `/v1/swaps`,
-  the write side of `/v1/users/security-answers`): Stellar-signature auth.
-  The client signs `<publicKey><unixTimestamp>` with its wallet's secret key
-  and sends:
+- **Primary API** (`/v1/users`, `/v1/assets`, `/v1/payments`, `/v1/swaps`):
+  Sign-In With Ethereum (SIWE, EIP-4361) exchanged for a session JWT.
 
-  ```
-  X-Public-Key: G...
-  X-Timestamp: 1732550400
-  X-Signature: <base64 ed25519 signature>
-  ```
+  1. `GET /v1/auth/nonce` → `{"nonce": "..."}`
+  2. Client builds a SIWE message (domain must match `SIWE_DOMAIN`, chain ID
+     must match `BASE_CHAIN_ID`) embedding that nonce, and signs it with the
+     wallet's `personal_sign`.
+  3. `POST /v1/auth/verify` with `{"message": "...", "signature": "0x..."}`
+     → `{"address": "0x...", "token": "<JWT>"}`
+  4. Send `Authorization: Bearer <token>` on subsequent requests.
 
-  See `internal/middleware/signature_auth.go`.
+  See `internal/components/auth/services` for the verification flow and
+  `internal/middleware/jwt_auth.go` for the session-JWT mechanics.
 
-- **Admin surface** (`POST /v1/admin/announcements`): a Bearer JWT, issued
-  via `middleware.IssueAdminToken` (wire up a real admin login flow before
-  shipping this to production - none is included in the base template).
+- **Admin surface** (`POST /v1/admin/announcements`): a separate-audience
+  Bearer JWT issued via `middleware.IssueToken(..., middleware.AudienceAdmin, ...)`
+  (wire up a real admin login flow before shipping this to production - none
+  is included in the base template). A wallet-session token can never be
+  used against an admin route or vice versa - see the `Audience*` constants
+  in `internal/middleware/jwt_auth.go`.
 
 ## Adding a real integration
 
@@ -102,6 +111,11 @@ jurisdiction-specific to fake usefully. Its doc comment lays out the
 recommended "build the on-chain leg → charge → submit on webhook" shape for
 whichever processor you plug in.
 
+`internal/components/swaps` doesn't hardcode a DEX: it ABI-encodes whatever
+router address, ABI fragment, and method a caller configures (see
+`internal/network/abi.go`), so it works unmodified against Uniswap V3's
+`SwapRouter02`, Aerodrome, or any other router deployed on Base.
+
 ## Testing
 
 ```bash
@@ -112,7 +126,8 @@ make ci       # tidy-check, build, vet, lint, test - same as the GitHub Actions 
 ## Deployment
 
 `Dockerfile` builds a static binary into a minimal Alpine image (SQLite
-support is pure-Go via `glebarez/sqlite`, so `CGO_ENABLED=0` works). CI
+support is pure-Go via `glebarez/sqlite`, and go-ethereum's signature
+verification has a pure-Go fallback, so `CGO_ENABLED=0` works). CI
 (`.github/workflows/ci.yml`) intentionally stops at build/vet/lint/test -
 add a deploy job once you've picked a registry and host; see the comment at
 the bottom of that file for the shape the upstream project used.

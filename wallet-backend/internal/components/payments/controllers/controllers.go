@@ -16,17 +16,17 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
 	svc := services.New(gc.DB, gc.Blockchain)
 
 	authed := router.Group("/v1/payments")
-	authed.Use(middleware.StellarSignatureAuth(gc.AuthWindow))
+	authed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
 	authed.POST("/build", buildPayment(svc))
 	authed.POST("/submit", submitPayment(svc))
-	authed.GET("/history/:publicKey", history(svc))
+	authed.GET("/history/:address", history(svc))
 }
 
 type buildPaymentRequest struct {
-	Destination string `json:"destination" binding:"required"`
-	AssetCode   string `json:"assetCode"`
-	AssetIssuer string `json:"assetIssuer"`
-	Amount      string `json:"amount" binding:"required"`
+	Destination  string  `json:"destination" binding:"required"`
+	TokenAddress string  `json:"tokenAddress"` // empty = native ETH
+	Amount       string  `json:"amount" binding:"required"`
+	Nonce        *uint64 `json:"nonce"` // optional - see PLAN.md §3 on offline-batched nonces
 }
 
 func buildPayment(svc *services.Service) gin.HandlerFunc {
@@ -36,33 +36,33 @@ func buildPayment(svc *services.Service) gin.HandlerFunc {
 			apperrors.Abort(c, apperrors.BadRequest("destination and amount are required"))
 			return
 		}
-		source := c.GetString(middleware.CtxPublicKey)
-		xdrString, err := svc.BuildPaymentXDR(source, req.Destination, req.AssetCode, req.AssetIssuer, req.Amount)
+		source := c.GetString(middleware.CtxSubject)
+		tx, err := svc.BuildPaymentTx(c.Request.Context(), source, req.Destination, req.TokenAddress, req.Amount, req.Nonce)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"xdr": xdrString})
+		c.JSON(http.StatusOK, tx)
 	}
 }
 
 type submitPaymentRequest struct {
-	SignedXDR   string `json:"signedXdr" binding:"required"`
-	Destination string `json:"destination" binding:"required"`
-	AssetCode   string `json:"assetCode"`
-	AssetIssuer string `json:"assetIssuer"`
-	Amount      string `json:"amount" binding:"required"`
+	IdempotencyKey string `json:"idempotencyKey" binding:"required"`
+	SignedTx       string `json:"signedTx" binding:"required"`
+	Destination    string `json:"destination" binding:"required"`
+	TokenAddress   string `json:"tokenAddress"`
+	Amount         string `json:"amount" binding:"required"`
 }
 
 func submitPayment(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req submitPaymentRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("signedXdr, destination and amount are required"))
+			apperrors.Abort(c, apperrors.BadRequest("idempotencyKey, signedTx, destination and amount are required"))
 			return
 		}
-		source := c.GetString(middleware.CtxPublicKey)
-		record, err := svc.SubmitPayment(req.SignedXDR, source, req.Destination, req.AssetCode, req.AssetIssuer, req.Amount)
+		source := c.GetString(middleware.CtxSubject)
+		record, err := svc.SubmitPayment(c.Request.Context(), req.IdempotencyKey, req.SignedTx, source, req.Destination, req.TokenAddress, req.Amount)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
@@ -73,7 +73,7 @@ func submitPayment(svc *services.Service) gin.HandlerFunc {
 
 func history(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		records, err := svc.History(c.Param("publicKey"))
+		records, err := svc.History(c.Param("address"))
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return

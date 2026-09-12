@@ -24,13 +24,17 @@ func New(db *gorm.DB) *Service {
 
 // RegisterInput is the payload accepted by Register.
 type RegisterInput struct {
-	Username  string
-	Email     string
-	PublicKey string
+	Username string
+	Email    string
+	Address  string
 }
 
-// Register creates a new user around a client-supplied Stellar public key.
-// The server never generates or handles the matching secret key.
+// Register creates a new user profile around an address that has already
+// proven ownership via SIWE (see internal/components/auth) - the caller
+// wires this to the address from the caller's verified session, never a
+// value taken from the request body, so a user can never register a
+// profile for an address they don't control. The server never generates or
+// handles the matching private key.
 func (s *Service) Register(input RegisterInput) (*models.User, error) {
 	if !validators.IsValidUsername(input.Username) {
 		return nil, apperrors.BadRequest("username must be 3-32 alphanumeric/underscore characters")
@@ -38,15 +42,15 @@ func (s *Service) Register(input RegisterInput) (*models.User, error) {
 	if !validators.IsValidEmail(input.Email) {
 		return nil, apperrors.BadRequest("invalid email address")
 	}
-	if !validators.IsValidStellarPublicKey(input.PublicKey) {
-		return nil, apperrors.BadRequest("invalid Stellar public key")
+	if !validators.IsValidAddress(input.Address) {
+		return nil, apperrors.BadRequest("invalid EVM address")
 	}
 
 	var existing models.User
-	err := s.DB.Where("username = ? OR email = ? OR public_key = ?", input.Username, input.Email, input.PublicKey).
+	err := s.DB.Where("username = ? OR email = ? OR address = ?", input.Username, input.Email, input.Address).
 		First(&existing).Error
 	if err == nil {
-		return nil, apperrors.Conflict("username, email or public key is already registered")
+		return nil, apperrors.Conflict("username, email or address is already registered")
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, apperrors.Internal("failed to check for existing user")
@@ -55,7 +59,7 @@ func (s *Service) Register(input RegisterInput) (*models.User, error) {
 	user := models.User{
 		Username:  input.Username,
 		Email:     input.Email,
-		PublicKey: input.PublicKey,
+		Address:   input.Address,
 		KYCStatus: "pending",
 	}
 
@@ -65,7 +69,7 @@ func (s *Service) Register(input RegisterInput) (*models.User, error) {
 		}
 		wallet := models.UserWallet{
 			UserID:    user.ID,
-			PublicKey: input.PublicKey,
+			Address:   input.Address,
 			Label:     "primary",
 			IsPrimary: true,
 		}
@@ -90,8 +94,22 @@ func (s *Service) GetByUsername(username string) (*models.User, error) {
 	return &user, nil
 }
 
+// GetByAddress fetches a user profile by their EVM address, used to check
+// whether the address behind a verified session has completed profile
+// registration yet.
+func (s *Service) GetByAddress(address string) (*models.User, error) {
+	var user models.User
+	if err := s.DB.Where("address = ?", address).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperrors.NotFound("user not found")
+		}
+		return nil, apperrors.Internal("failed to load user")
+	}
+	return &user, nil
+}
+
 // Delete removes a user account. Only the account owner (verified by the
-// signature-auth middleware) may call this for their own username.
+// SIWE-issued session JWT) may call this for their own username.
 func (s *Service) Delete(username string) error {
 	res := s.DB.Where("username = ?", username).Delete(&models.User{})
 	if res.Error != nil {

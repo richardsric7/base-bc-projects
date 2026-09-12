@@ -3,25 +3,26 @@ package models
 
 import "time"
 
-// User is an account holder. The wallet is non-custodial: PublicKey is
-// client-supplied at registration and the server never sees (let alone
-// stores) the matching secret key.
+// User is an account holder. The wallet is non-custodial: Address is the
+// EVM address recovered from a successful SIWE sign-in (see
+// internal/components/auth) - the server never sees, let alone stores, the
+// matching private key.
 type User struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	Username  string    `gorm:"uniqueIndex;size:32;not null" json:"username"`
 	Email     string    `gorm:"uniqueIndex;size:255;not null" json:"email"`
-	PublicKey string    `gorm:"uniqueIndex;size:56;not null" json:"publicKey"`
+	Address   string    `gorm:"uniqueIndex;size:42;not null" json:"address"`
 	KYCStatus string    `gorm:"size:32;default:pending" json:"kycStatus"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
-// UserWallet lets a user register additional Stellar accounts they control
+// UserWallet lets a user register additional EVM addresses they control
 // (e.g. a hardware-wallet address) alongside their primary wallet.
 type UserWallet struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	UserID    uint      `gorm:"index;not null" json:"userId"`
-	PublicKey string    `gorm:"uniqueIndex;size:56;not null" json:"publicKey"`
+	Address   string    `gorm:"uniqueIndex;size:42;not null" json:"address"`
 	Label     string    `gorm:"size:64" json:"label"`
 	IsPrimary bool      `gorm:"default:false" json:"isPrimary"`
 	CreatedAt time.Time `json:"createdAt"`

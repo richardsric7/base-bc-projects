@@ -11,7 +11,7 @@ import (
 )
 
 // Provider looks up an exchange rate between two currency/asset codes (e.g.
-// base="USD", quote="XLM").
+// base="USD", quote="ETH").
 type Provider interface {
 	GetRate(ctx context.Context, base, quote string) (decimal.Decimal, error)
 }

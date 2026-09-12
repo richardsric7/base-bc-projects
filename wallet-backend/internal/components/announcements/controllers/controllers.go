@@ -21,7 +21,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
 	router.GET("/v1/announcements", listAnnouncements(svc))
 
 	admin := router.Group("/v1/admin/announcements")
-	admin.Use(middleware.JWTAuth(gc.JWTSecret))
+	admin.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceAdmin))
 	admin.POST("", createAnnouncement(svc))
 }
 

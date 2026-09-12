@@ -1,8 +1,8 @@
 // Package cryptoutil groups the cryptographic primitives the wallet backend
-// needs outside of the Stellar transaction-signing path itself: deterministic
-// keypair derivation for server-controlled signer roles, symmetric
-// encryption for data at rest, and password hashing for non-wallet logins
-// (e.g. an admin panel).
+// needs outside of the on-chain transaction-signing path itself:
+// deterministic key derivation for server-controlled signer roles,
+// symmetric encryption for data at rest, and password hashing for
+// non-wallet logins (e.g. an admin panel).
 //
 // Note on naming: the upstream project this template is derived from called
 // this package "blockchainalgofuncs" and it was widely misread as
@@ -13,24 +13,46 @@ package cryptoutil
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 
-	"github.com/stellar/go-stellar-sdk/keypair"
+	"github.com/ethereum/go-ethereum/crypto"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// DeriveKeypair deterministically derives a Stellar keypair from arbitrary
-// seed material (e.g. "<server salt>|<role>|<user id>"). Use this for
-// server-controlled signer roles (fee sponsor accounts, an escrow signer,
-// etc.) - never for a user's own wallet key, which must be generated
-// client-side and never leave the client.
-func DeriveKeypair(seedMaterial string) (*keypair.Full, error) {
-	seed := sha256.Sum256([]byte(seedMaterial))
-	return keypair.FromRawSeed(seed)
+// DeriveKey deterministically derives a secp256k1 private key from
+// arbitrary seed material (e.g. "<server salt>|<role>|<user id>"). Use this
+// for server-controlled signer roles (a fee-sponsor account, an escrow
+// signer, etc.) - never for a user's own wallet key, which must be
+// generated client-side and never leave the client.
+//
+// Unlike ed25519 (where any 32-byte seed is a valid key), a secp256k1
+// private key must be a scalar in [1, N-1] for the curve order N; a plain
+// SHA-256 digest lands outside that range with negligible but nonzero
+// probability. This uses "try-and-increment": hash the seed material with
+// an appended counter and retry on the rare invalid output, rather than
+// silently accepting whatever SHA-256 produces the way a naive port of the
+// original ed25519 code would. For a production deployment that needs
+// standard hardware-wallet-compatible derivation paths (m/44'/60'/...),
+// upgrade to full BIP-32 HD derivation instead - this function only
+// guarantees a valid, deterministic key, not a standard derivation path.
+func DeriveKey(seedMaterial string) (*ecdsa.PrivateKey, error) {
+	for counter := uint32(0); counter < 256; counter++ {
+		var counterBytes [4]byte
+		binary.BigEndian.PutUint32(counterBytes[:], counter)
+		digest := sha256.Sum256(append([]byte(seedMaterial), counterBytes[:]...))
+		key, err := crypto.ToECDSA(digest[:])
+		if err == nil {
+			return key, nil
+		}
+	}
+	return nil, errors.New("cryptoutil: failed to derive a valid secp256k1 key after 256 attempts")
 }
 
 // HashSHA256Hex returns the hex-encoded SHA-256 digest of s.
@@ -72,7 +94,7 @@ func Decrypt(key, ciphertext []byte) ([]byte, error) {
 	}
 	nonceSize := gcm.NonceSize()
 	if len(ciphertext) < nonceSize {
-		return nil, errors.New("ciphertext too short")
+		return nil, fmt.Errorf("ciphertext too short")
 	}
 	nonce, data := ciphertext[:nonceSize], ciphertext[nonceSize:]
 	return gcm.Open(nil, nonce, data, nil)

@@ -16,49 +16,56 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
 	svc := services.New(gc.Blockchain)
 
 	authed := router.Group("/v1/swaps")
-	authed.Use(middleware.StellarSignatureAuth(gc.AuthWindow))
+	authed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
 	authed.POST("/build", buildSwap(svc))
 	authed.POST("/submit", submitSwap(svc))
 }
 
 type buildSwapRequest struct {
-	SendCode   string `json:"sendCode"`
-	SendIssuer string `json:"sendIssuer"`
-	SendAmount string `json:"sendAmount" binding:"required"`
-	DestCode   string `json:"destCode"`
-	DestIssuer string `json:"destIssuer"`
-	DestMin    string `json:"destMin" binding:"required"`
+	RouterAddress string        `json:"routerAddress" binding:"required"`
+	RouterABI     string        `json:"routerAbi" binding:"required"`
+	Method        string        `json:"method" binding:"required"`
+	Args          []interface{} `json:"args"`
+	ValueWei      string        `json:"valueWei"`
+	Nonce         *uint64       `json:"nonce"`
 }
 
 func buildSwap(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req buildSwapRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("sendAmount and destMin are required"))
+			apperrors.Abort(c, apperrors.BadRequest("routerAddress, routerAbi and method are required"))
 			return
 		}
-		publicKey := c.GetString(middleware.CtxPublicKey)
-		xdrString, err := svc.BuildSwapXDR(publicKey, req.SendCode, req.SendIssuer, req.SendAmount, req.DestCode, req.DestIssuer, req.DestMin, nil)
+		tx, err := svc.BuildSwapTx(c.Request.Context(), services.BuildSwapInput{
+			From:          c.GetString(middleware.CtxSubject),
+			RouterAddress: req.RouterAddress,
+			RouterABI:     req.RouterABI,
+			Method:        req.Method,
+			Args:          req.Args,
+			ValueWei:      req.ValueWei,
+			Nonce:         req.Nonce,
+		})
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"xdr": xdrString})
+		c.JSON(http.StatusOK, tx)
 	}
 }
 
 type submitRequest struct {
-	SignedXDR string `json:"signedXdr" binding:"required"`
+	SignedTx string `json:"signedTx" binding:"required"`
 }
 
 func submitSwap(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req submitRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("signedXdr is required"))
+			apperrors.Abort(c, apperrors.BadRequest("signedTx is required"))
 			return
 		}
-		hash, err := svc.SubmitSwap(req.SignedXDR)
+		hash, err := svc.SubmitSwap(c.Request.Context(), req.SignedTx)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return

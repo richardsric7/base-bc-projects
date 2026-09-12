@@ -24,10 +24,10 @@ import (
 
 // GlobalConfig is passed by pointer to every component's Init function.
 type GlobalConfig struct {
-	DB                *gorm.DB
-	Cache             cache.Cache
-	Blockchain        *network.Client
-	NetworkPassphrase string
+	DB         *gorm.DB
+	Cache      cache.Cache
+	Blockchain *network.Client
+	ChainID    int64 // 8453 = Base Mainnet, 84532 = Base Sepolia - see PLAN.md §8
 
 	Mailer  notify.Mailer
 	SMS     notify.SMSProvider
@@ -40,7 +40,7 @@ type GlobalConfig struct {
 
 	JWTSecret    string
 	JWTExpiry    time.Duration
-	AuthWindow   time.Duration
+	SIWEDomain   string // the "domain" every SIWE sign-in message must declare
 	Organisation string
 }
 
@@ -53,8 +53,8 @@ type Env struct {
 	DBConnectionString string
 	DBAutoMigrate      bool
 
-	HorizonURL  string
-	NetworkMode string // "testnet" or "public"
+	BaseRPCURL  string
+	BaseChainID int64
 
 	CacheEnabled  bool
 	RedisHost     string
@@ -73,16 +73,18 @@ type Env struct {
 
 	DiscordWebhookURL string
 
-	JWTSecret         string
-	JWTExpiryMinutes  int
-	AuthWindowSeconds int
+	JWTSecret        string
+	JWTExpiryMinutes int
+	SIWEDomain       string
 
 	Organisation string
 }
 
 // LoadEnv reads configuration from the process environment, applying
 // sensible development defaults so the service boots with a nearly-empty
-// .env file.
+// .env file. The one default worth flagging: BASE_CHAIN_ID defaults to
+// 84532 (Base Sepolia, the testnet) rather than mainnet, so a forgotten
+// env var can never accidentally point a fresh checkout at real funds.
 func LoadEnv() Env {
 	return Env{
 		Port: getEnv("PORT", "8080"),
@@ -91,8 +93,8 @@ func LoadEnv() Env {
 		DBConnectionString: getEnv("DB_CONNECTION_STRING", "wallet-backend.sqlite"),
 		DBAutoMigrate:      getEnvBool("DB_AUTOMIGRATE", true),
 
-		HorizonURL:  getEnv("HORIZON_URL", ""),
-		NetworkMode: getEnv("STELLAR_NETWORK", "testnet"),
+		BaseRPCURL:  getEnv("BASE_RPC_URL", "https://sepolia.base.org"),
+		BaseChainID: getEnvInt64("BASE_CHAIN_ID", 84532),
 
 		CacheEnabled:  getEnvBool("ENABLE_CACHING", false),
 		RedisHost:     getEnv("REDIS_HOST", "localhost"),
@@ -111,9 +113,9 @@ func LoadEnv() Env {
 
 		DiscordWebhookURL: getEnv("DISCORD_WEBHOOK_URL", ""),
 
-		JWTSecret:         getEnv("JWT_SECRET", "dev-only-change-me"),
-		JWTExpiryMinutes:  getEnvInt("JWT_EXPIRY_MINUTES", 60),
-		AuthWindowSeconds: getEnvInt("AUTH_WINDOW_SECONDS", 60),
+		JWTSecret:        getEnv("JWT_SECRET", "dev-only-change-me"),
+		JWTExpiryMinutes: getEnvInt("JWT_EXPIRY_MINUTES", 60),
+		SIWEDomain:       getEnv("SIWE_DOMAIN", "localhost"),
 
 		Organisation: getEnv("ORGANISATION", "wallet-backend"),
 	}
@@ -144,6 +146,18 @@ func getEnvInt(key string, fallback int) int {
 		return fallback
 	}
 	i, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return i
+}
+
+func getEnvInt64(key string, fallback int64) int64 {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback
+	}
+	i, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
 		return fallback
 	}

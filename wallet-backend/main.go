@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 
 	announcementsControllers "wallet-backend/internal/components/announcements/controllers"
 	assetsControllers "wallet-backend/internal/components/assets/controllers"
+	authControllers "wallet-backend/internal/components/auth/controllers"
 	callbacksControllers "wallet-backend/internal/components/callbacks/controllers"
 	paymentsControllers "wallet-backend/internal/components/payments/controllers"
 	ratesControllers "wallet-backend/internal/components/rates/controllers"
@@ -85,8 +87,11 @@ func main() {
 		log.Println("cache: disabled (set ENABLE_CACHING=true to enable Redis)")
 	}
 
-	blockchain := network.NewClient(env.HorizonURL, env.NetworkMode)
-	log.Printf("blockchain: Stellar %s network (horizon=%s)", env.NetworkMode, blockchain.Horizon.HorizonURL)
+	blockchain, err := network.NewClient(context.Background(), env.BaseRPCURL, env.BaseChainID)
+	if err != nil {
+		log.Fatalf("failed to connect to Base RPC %q: %v", env.BaseRPCURL, err)
+	}
+	log.Printf("blockchain: Base chain %d (rpc=%s)", env.BaseChainID, env.BaseRPCURL)
 
 	var mailer notify.Mailer = notify.NewConsoleMailer()
 	if !env.UseConsoleMailer && env.SMTPHost != "" {
@@ -109,15 +114,15 @@ func main() {
 	ratesProvider := rates.NewStaticProvider(map[string]decimal.Decimal{
 		// Example fixtures - replace with a live provider or DB-backed
 		// table for production use.
-		"USD/XLM": decimal.NewFromFloat(8.5),
-		"XLM/USD": decimal.NewFromFloat(0.1176),
+		"USD/ETH": decimal.NewFromFloat(0.00028),
+		"ETH/USD": decimal.NewFromFloat(3500),
 	})
 
 	gc := &sharedconfig.GlobalConfig{
-		DB:                gormDB,
-		Cache:             appCache,
-		Blockchain:        blockchain,
-		NetworkPassphrase: blockchain.NetworkPassphrase,
+		DB:         gormDB,
+		Cache:      appCache,
+		Blockchain: blockchain,
+		ChainID:    env.BaseChainID,
 
 		Mailer:  mailer,
 		SMS:     notify.NewConsoleSMSProvider(),
@@ -130,7 +135,7 @@ func main() {
 
 		JWTSecret:    env.JWTSecret,
 		JWTExpiry:    durationFromMinutes(env.JWTExpiryMinutes),
-		AuthWindow:   durationFromSeconds(env.AuthWindowSeconds),
+		SIWEDomain:   env.SIWEDomain,
 		Organisation: env.Organisation,
 	}
 
@@ -139,6 +144,7 @@ func main() {
 	router.Static(env.StorageURL, env.StorageDir)
 
 	rootControllers.Init(router, gc)
+	authControllers.Init(router, gc)
 	usersControllers.Init(router, gc)
 	assetsControllers.Init(router, gc)
 	paymentsControllers.Init(router, gc)
@@ -155,10 +161,6 @@ func main() {
 
 func durationFromMinutes(minutes int) time.Duration {
 	return time.Duration(minutes) * time.Minute
-}
-
-func durationFromSeconds(seconds int) time.Duration {
-	return time.Duration(seconds) * time.Second
 }
 
 // seedSecurityQuestions inserts a small default catalog on first boot so the

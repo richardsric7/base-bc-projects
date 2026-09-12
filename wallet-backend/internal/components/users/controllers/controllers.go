@@ -19,31 +19,35 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
 	svc := services.New(gc.DB)
 
 	public := router.Group("/v1/users")
-	public.POST("", register(svc))
 	public.GET("/:username", getUser(svc))
 	public.GET("/security-questions", listSecurityQuestions(svc))
 
 	authed := router.Group("/v1/users")
-	authed.Use(middleware.StellarSignatureAuth(gc.AuthWindow))
+	authed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
+	authed.POST("", register(svc))
 	authed.DELETE("/:username", deleteUser(svc))
 	authed.POST("/security-answers", setSecurityAnswer(svc))
 	authed.POST("/security-answers/verify", verifySecurityAnswer(svc))
 }
 
 type registerRequest struct {
-	Username  string `json:"username" binding:"required"`
-	Email     string `json:"email" binding:"required"`
-	PublicKey string `json:"publicKey" binding:"required"`
+	Username string `json:"username" binding:"required"`
+	Email    string `json:"email" binding:"required"`
 }
 
+// register requires a wallet-session JWT (see internal/components/auth) and
+// takes the address to register from that verified session, never from the
+// request body - so a caller can only ever register a profile for an
+// address they've proven ownership of via SIWE.
 func register(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req registerRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("username, email and publicKey are required"))
+			apperrors.Abort(c, apperrors.BadRequest("username and email are required"))
 			return
 		}
-		user, err := svc.Register(services.RegisterInput{Username: req.Username, Email: req.Email, PublicKey: req.PublicKey})
+		address := c.GetString(middleware.CtxSubject)
+		user, err := svc.Register(services.RegisterInput{Username: req.Username, Email: req.Email, Address: address})
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
@@ -63,8 +67,8 @@ func getUser(svc *services.Service) gin.HandlerFunc {
 	}
 }
 
-// deleteUser only allows a caller to delete the account whose primary
-// wallet matches their verified signature - never someone else's.
+// deleteUser only allows a caller to delete the account whose address
+// matches their verified session - never someone else's.
 func deleteUser(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		username := c.Param("username")
@@ -73,7 +77,7 @@ func deleteUser(svc *services.Service) gin.HandlerFunc {
 			apperrors.AbortAny(c, err)
 			return
 		}
-		if user.PublicKey != c.GetString(middleware.CtxPublicKey) {
+		if user.Address != c.GetString(middleware.CtxSubject) {
 			apperrors.Abort(c, apperrors.Forbidden("you may only delete your own account"))
 			return
 		}
@@ -97,7 +101,6 @@ func listSecurityQuestions(svc *services.Service) gin.HandlerFunc {
 }
 
 type securityAnswerRequest struct {
-	UserID             uint   `json:"userId" binding:"required"`
 	SecurityQuestionID uint   `json:"securityQuestionId" binding:"required"`
 	Answer             string `json:"answer" binding:"required"`
 }
@@ -106,10 +109,15 @@ func setSecurityAnswer(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req securityAnswerRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("userId, securityQuestionId and answer are required"))
+			apperrors.Abort(c, apperrors.BadRequest("securityQuestionId and answer are required"))
 			return
 		}
-		if err := svc.SetSecurityAnswer(req.UserID, req.SecurityQuestionID, req.Answer); err != nil {
+		user, err := svc.GetByAddress(c.GetString(middleware.CtxSubject))
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		if err := svc.SetSecurityAnswer(user.ID, req.SecurityQuestionID, req.Answer); err != nil {
 			apperrors.AbortAny(c, err)
 			return
 		}
@@ -121,10 +129,15 @@ func verifySecurityAnswer(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req securityAnswerRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("userId, securityQuestionId and answer are required"))
+			apperrors.Abort(c, apperrors.BadRequest("securityQuestionId and answer are required"))
 			return
 		}
-		ok, err := svc.VerifySecurityAnswer(req.UserID, req.SecurityQuestionID, req.Answer)
+		user, err := svc.GetByAddress(c.GetString(middleware.CtxSubject))
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		ok, err := svc.VerifySecurityAnswer(user.ID, req.SecurityQuestionID, req.Answer)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return

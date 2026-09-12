@@ -16,59 +16,73 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
 	svc := services.New(gc.DB, gc.Blockchain)
 
 	router.GET("/v1/assets", listCurated(svc))
+	router.GET("/v1/assets/balance/:address", getBalance(svc))
 
 	authed := router.Group("/v1/assets")
-	authed.Use(middleware.StellarSignatureAuth(gc.AuthWindow))
-	authed.POST("/trustline/build", buildTrustline(svc))
-	authed.POST("/trustline/submit", submitTrustline(svc))
+	authed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
+	authed.POST("/approve/build", buildApprove(svc))
+	authed.POST("/approve/submit", submit(svc))
 }
 
 func listCurated(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		assets, err := svc.ListCurated()
+		tokens, err := svc.ListCurated()
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, assets)
+		c.JSON(http.StatusOK, tokens)
 	}
 }
 
-type buildTrustlineRequest struct {
-	Code   string `json:"code" binding:"required"`
-	Issuer string `json:"issuer" binding:"required"`
-	Limit  string `json:"limit"` // optional; "0" removes the trustline, empty means max limit
-}
-
-func buildTrustline(svc *services.Service) gin.HandlerFunc {
+func getBalance(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var req buildTrustlineRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("code and issuer are required"))
-			return
-		}
-		publicKey := c.GetString(middleware.CtxPublicKey)
-		xdrString, err := svc.BuildTrustlineXDR(publicKey, req.Code, req.Issuer, req.Limit)
+		tokenAddress := c.Query("token") // empty = native ETH balance
+		balance, err := svc.Balance(c.Request.Context(), c.Param("address"), tokenAddress)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"xdr": xdrString})
+		c.JSON(http.StatusOK, gin.H{"balance": balance})
+	}
+}
+
+type buildApproveRequest struct {
+	TokenAddress string  `json:"tokenAddress" binding:"required"`
+	Spender      string  `json:"spender" binding:"required"`
+	Amount       string  `json:"amount" binding:"required"`
+	Nonce        *uint64 `json:"nonce"` // optional - see PLAN.md §3 on offline-batched nonces
+}
+
+func buildApprove(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req buildApproveRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			apperrors.Abort(c, apperrors.BadRequest("tokenAddress, spender and amount are required"))
+			return
+		}
+		owner := c.GetString(middleware.CtxSubject)
+		tx, err := svc.BuildApproveTx(c.Request.Context(), owner, req.TokenAddress, req.Spender, req.Amount, req.Nonce)
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, tx)
 	}
 }
 
 type submitRequest struct {
-	SignedXDR string `json:"signedXdr" binding:"required"`
+	SignedTx string `json:"signedTx" binding:"required"`
 }
 
-func submitTrustline(svc *services.Service) gin.HandlerFunc {
+func submit(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req submitRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("signedXdr is required"))
+			apperrors.Abort(c, apperrors.BadRequest("signedTx is required"))
 			return
 		}
-		hash, err := svc.SubmitSignedTransaction(req.SignedXDR)
+		hash, err := svc.SubmitSignedTransaction(c.Request.Context(), req.SignedTx)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return

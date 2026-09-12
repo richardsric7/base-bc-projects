@@ -40,7 +40,8 @@ services:
       ENABLE_CACHING: "true"
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      STELLAR_NETWORK: testnet
+      BASE_RPC_URL: https://sepolia.base.org
+      BASE_CHAIN_ID: 84532
     ports:
       - "8080:8080"
 
