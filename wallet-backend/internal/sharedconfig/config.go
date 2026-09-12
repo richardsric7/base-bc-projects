@@ -77,6 +77,12 @@ type GlobalConfig struct {
 	// its webhook's "verif-hash" header (its dashboard's "Secret Hash"
 	// setting, not a payment key) - see internal/fiat/flutterwave.
 	FlutterwaveSecretHash string
+
+	// Stablerail credentials for internal/components/stablerail - same
+	// env-sourced-secret rationale as Sumsub/Doja/Flutterwave above.
+	StablerailAPIKey  string
+	StablerailBaseURL string
+	StablerailEnabled bool
 }
 
 // Env holds every raw environment-derived setting. Load it once in main and
@@ -127,6 +133,10 @@ type Env struct {
 
 	FlutterwaveSecretKey  string
 	FlutterwaveSecretHash string
+
+	StablerailAPIKey  string
+	StablerailBaseURL string
+	StablerailEnabled bool
 
 	Organisation string
 }
@@ -183,6 +193,10 @@ func LoadEnv() Env {
 
 		FlutterwaveSecretKey:  getEnv("FLUTTERWAVE_SECRET_KEY", ""),
 		FlutterwaveSecretHash: getEnv("FLUTTERWAVE_SECRET_HASH", ""),
+
+		StablerailAPIKey:  getEnv("STABLERAIL_API_KEY", ""),
+		StablerailBaseURL: getEnv("STABLERAIL_BASE_URL", "https://beta.stablesrail.io/v1"),
+		StablerailEnabled: getEnvBool("STABLERAIL_ENABLED", false),
 
 		Organisation: getEnv("ORGANISATION", "wallet-backend"),
 	}

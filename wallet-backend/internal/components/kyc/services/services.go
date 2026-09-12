@@ -27,6 +27,18 @@ type Service struct {
 	SumsubToken     string
 	SumsubSecretKey string
 	DojaSecretKey   string
+
+	// OnBVNVerified is called (best-effort - a failure is logged, not
+	// propagated to the webhook caller) whenever a Doja Level-1 completion
+	// carries a BVN value, mirroring the original's inline call from its
+	// Doja webhook handler into Stablerail onboarding. Left nil by New();
+	// main.go wires it to internal/components/stablerail's
+	// InitiateOnboardingByUsername once that component exists (see
+	// PLAN.md §4.6) - a plain function field rather than importing
+	// stablerail directly, since stablerail's own services have no need to
+	// import kyc and a direct import the other way would be a needless
+	// coupling between two otherwise-independent vendor integrations.
+	OnBVNVerified func(username, bvn string) error
 }
 
 func New(db *gorm.DB, sumsubBaseURL, sumsubToken, sumsubSecretKey, dojaSecretKey string) *Service {

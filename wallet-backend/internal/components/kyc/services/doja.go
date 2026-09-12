@@ -69,13 +69,13 @@ func (s *Service) VerifyDojaWebhookSignature(payload []byte, signatureHeader str
 // ProcessDojaWebhook resolves event's widget and user, advances the
 // matching level's Submitted/Completed flags, and raises the user's
 // KYCVerifiedLevel once a level reaches "Completed". Ported from the
-// original's postCallbacksDojaWebhookHandler, with two deliberate
-// omissions documented inline: push notifications (no device-token
-// subsystem exists yet in this port - see PLAN.md §4.13) and the
-// BVN-triggered Stablerail onboarding call (Phase 5, not yet built) both
-// become no-ops here rather than being silently dropped from the design;
-// wiring either back in later is a small, additive change at the marked
-// points below.
+// original's postCallbacksDojaWebhookHandler, with one deliberate omission
+// documented inline: push notifications (no device-token subsystem exists
+// yet in this port - see PLAN.md §4.13) become a no-op comment rather than
+// being silently dropped from the design. The original's other inline
+// action on this same event - triggering Stablerail BVN onboarding - is
+// wired via OnBVNVerified (see Service's doc comment) rather than a direct
+// call, since this component has no reason to import stablerail directly.
 func (s *Service) ProcessDojaWebhook(event *models.DojaWebhookEvent) error {
 	var widget models.DojaWidget
 	if err := s.DB.Where("id = ?", event.WidgetID).First(&widget).Error; err != nil {
@@ -91,7 +91,8 @@ func (s *Service) ProcessDojaWebhook(event *models.DojaWebhookEvent) error {
 		return nil
 	}
 
-	return s.DB.Transaction(func(tx *gorm.DB) error {
+	newlyCompleted := false
+	txErr := s.DB.Transaction(func(tx *gorm.DB) error {
 		var progress models.UserDojaProgress
 		e := tx.Where("user_id = ?", user.ID).First(&progress).Error
 		if e != nil {
@@ -114,12 +115,7 @@ func (s *Service) ProcessDojaWebhook(event *models.DojaWebhookEvent) error {
 					Update("kyc_verified_level", widget.Level).Error; err != nil {
 					return err
 				}
-				// Hook point for Phase 5 (Stablerail): the original
-				// triggered BVN-based fiat-rail onboarding here when
-				// level 1 completed with a BVN value present
-				// (strings.EqualFold(event.IDType, "bvn")). Left as a
-				// comment rather than a stub function since there is
-				// nothing to call yet.
+				newlyCompleted = true
 			}
 			// Hook point for a future push-notification subsystem: the
 			// original sent a "KYC level completed" push here.
@@ -129,6 +125,19 @@ func (s *Service) ProcessDojaWebhook(event *models.DojaWebhookEvent) error {
 
 		return tx.Save(&progress).Error
 	})
+	if txErr != nil {
+		return txErr
+	}
+
+	// The BVN-onboarding trigger makes an outbound HTTP call
+	// (internal/components/stablerail), so it runs after the transaction
+	// commits rather than inside it.
+	if newlyCompleted && widget.Level == 1 && strings.EqualFold(event.IDType, "bvn") && event.Value != "" && s.OnBVNVerified != nil {
+		if err := s.OnBVNVerified(user.Username, event.Value); err != nil {
+			log.Printf("[kyc:doja] BVN onboarding trigger failed for %q: %v", user.Username, err)
+		}
+	}
+	return nil
 }
 
 func markDojaSubmitted(p *models.UserDojaProgress, level int) {

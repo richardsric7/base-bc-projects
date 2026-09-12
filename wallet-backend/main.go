@@ -35,6 +35,8 @@ import (
 	rootControllers "wallet-backend/internal/components/root/controllers"
 	sharedaccessControllers "wallet-backend/internal/components/sharedaccess/controllers"
 	sharedaccessModels "wallet-backend/internal/components/sharedaccess/models"
+	stablerailControllers "wallet-backend/internal/components/stablerail/controllers"
+	stablerailModels "wallet-backend/internal/components/stablerail/models"
 	swapsControllers "wallet-backend/internal/components/swaps/controllers"
 	usersControllers "wallet-backend/internal/components/users/controllers"
 
@@ -61,6 +63,7 @@ func allModels() []interface{} {
 	models = append(models, sharedaccessModels.Models...)
 	models = append(models, kycModels.Models...)
 	models = append(models, fiatModels.Models...)
+	models = append(models, stablerailModels.Models...)
 	return models
 }
 
@@ -172,6 +175,10 @@ func main() {
 		FaucetKeySalt:               env.FaucetKeySalt,
 		ActivationRewardTokenSymbol: env.ActivationRewardTokenSymbol,
 		FlutterwaveSecretHash:       env.FlutterwaveSecretHash,
+
+		StablerailAPIKey:  env.StablerailAPIKey,
+		StablerailBaseURL: env.StablerailBaseURL,
+		StablerailEnabled: env.StablerailEnabled,
 	}
 
 	router := gin.Default()
@@ -188,8 +195,34 @@ func main() {
 	ratesControllers.Init(router, gc)
 	announcementsControllers.Init(router, gc)
 	callbacksControllers.Init(router, gc)
-	kycControllers.Init(router, gc)
+	kycSvc := kycControllers.Init(router, gc)
 	fiatControllers.Init(router, gc)
+	stablerailSvc := stablerailControllers.Init(router, gc)
+
+	// Wire the KYC component's Doja BVN-completion hook to Stablerail
+	// onboarding - see kyc/services.Service.OnBVNVerified's doc comment
+	// for why this is a post-construction callback rather than a
+	// constructor argument (avoids kyc importing stablerail directly).
+	kycSvc.OnBVNVerified = stablerailSvc.InitiateOnboardingByUsername
+
+	if env.StablerailEnabled {
+		go func() {
+			for {
+				stablerailSvc.PollPendingOnboarding()
+				time.Sleep(10 * time.Second)
+				stablerailSvc.PollPendingOnramp()
+				time.Sleep(10 * time.Second)
+			}
+		}()
+		go func() {
+			for {
+				if err := stablerailSvc.SyncSupportedBanks(); err != nil {
+					log.Printf("[stablerail] error syncing supported banks: %v", err)
+				}
+				time.Sleep(10 * time.Minute)
+			}
+		}()
+	}
 
 	log.Printf("%s listening on :%s", env.Organisation, env.Port)
 	if err := router.Run(":" + env.Port); err != nil {

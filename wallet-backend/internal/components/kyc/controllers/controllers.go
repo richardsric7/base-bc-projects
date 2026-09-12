@@ -21,8 +21,12 @@ import (
 	"wallet-backend/internal/sharedconfig"
 )
 
-// Init registers the kyc component's routes on router.
-func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
+// Init registers the kyc component's routes on router and returns the
+// underlying Service so main.go can wire Service.OnBVNVerified once the
+// stablerail component (Phase 5) is also initialized - see that field's
+// doc comment for why this is a post-construction wire-up rather than a
+// constructor argument.
+func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	svc := services.New(gc.DB, gc.SumsubBaseURL, gc.SumsubToken, gc.SumsubSecretKey, gc.DojaSecretKey)
 
 	authed := router.Group("/v1/kyc")
@@ -36,6 +40,8 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
 	webhooks := router.Group("/v1/callbacks/kyc")
 	webhooks.POST("/sumsub/webhook", sumsubWebhook(svc))
 	webhooks.POST("/doja/webhook", dojaWebhook(svc))
+
+	return svc
 }
 
 func listSumsubLevels(svc *services.Service) gin.HandlerFunc {

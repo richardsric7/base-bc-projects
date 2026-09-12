@@ -241,6 +241,37 @@ agnostic settlement path rather than a Tokenization-specific one).
 - `GET /v1/fiat/payments` (authed) lists the caller's completed payments
   and invoices.
 
+## Stablerail (NGN on-ramp)
+
+A BVN-gated NGN-to-stablecoin deposit rail. Unlike every other external
+integration in this port, Stablerail's own API is already close to
+chain-agnostic - it takes a destination wallet address and a network code
+per request and performs the actual on-chain transfer on its own
+infrastructure, so this component has no `network.Client`/on-chain code
+at all; see `PLAN.md` §4.6.
+
+1. `POST /v1/stablerail/onboard/:bvn` (authed, 11-digit BVN) starts
+   identity verification with Stablerail - this also happens
+   automatically once Dojah's KYC webhook reports a completed BVN-type
+   Level 1 verification (see the KYC section above), via a callback
+   `main.go` wires from `kyc.Service.OnBVNVerified`.
+2. `GET /v1/stablerail/banks` (authed) lists Stablerail's synced
+   supported-bank list.
+3. `POST /v1/stablerail/onramp/:amount` (authed, NGN amount) - once
+   onboarding has completed - creates a deposit request and returns the
+   virtual account (`accountNumber`, `bankName`, `accountName`) to pay
+   into.
+4. A background poller checks pending onboarding/on-ramp requests against
+   Stablerail's status endpoints every 10 seconds; once a deposit is
+   funded, it automatically triggers Stablerail's own withdrawal of the
+   converted stablecoin to the user's Base address - no client action
+   needed. A separate poller re-syncs the supported-bank list every 10
+   minutes.
+
+Set `STABLERAIL_ENABLED=true` and `STABLERAIL_API_KEY` to turn this on;
+every route and the KYC-triggered hook return a `202` "not enabled"
+response otherwise.
+
 ## Adding a real integration
 
 The `notify`, `storage`, `kyc`, `fiat`, `rates`, and `alerting` packages are

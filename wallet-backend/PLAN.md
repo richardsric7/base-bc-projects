@@ -349,7 +349,7 @@ this backend only records the invoice and reacts to the webhook), so
 their real-world exercise is deferred to whichever phase first needs a
 server-initiated charge.
 
-### 4.6 Stablerail (NGN/cNGN rail) — **planned**
+### 4.6 Stablerail (NGN/cNGN rail) — **DONE**
 
 Original: BVN onboarding (triggered by Doja Level-1 KYC completion),
 cNGN on-ramp (virtual account generation + polling), bank-list sync.
@@ -363,6 +363,62 @@ Base design: chain-agnostic vendor integration, same shape as KYC/Flutterwave
 — real API calls against Stablerail's actual endpoints, on-ramp completion
 mints/transfers cNGN-equivalent (or bridges to a Base-native stablecoin,
 most naturally USDC) to the user's Base address instead of a Stellar asset.
+
+Implemented as `internal/components/stablerail`. This subsystem turned out
+to be **the closest thing to chain-agnostic in this whole port**: every
+Stablerail API call already takes a destination wallet address and a
+"network" code as ordinary request fields, and the actual on-chain
+transfer of converted funds happens on *Stablerail's own infrastructure*,
+not this backend's - the withdrawal step just tells Stablerail which
+address to send to. So porting to Base is one constant
+(`network = "base"` in place of the original's Stellar-specific `"xbn"`)
+plus using a 0x-address instead of a Stellar public key; no
+`network.Client`/on-chain code exists anywhere in this component.
+
+Ported: onboarding (`/onboarduser` + `/onboardstatus`), NGN on-ramp
+(`/cngnonramp` + `/getvirtualaccount` + `/cngnonrampstatus`), the automatic
+withdrawal a funded on-ramp triggers (`/withdrawasset`), and bank-list sync
+(`/getbankscode`) - all real HTTP calls against Stablerail's documented
+contract, with two background-goroutine pollers in `main.go` (onboarding
++ on-ramp status every 10s, bank sync every 10 minutes) mirroring the
+original's polling loops exactly. The Doja Level-1-BVN-completion trigger
+is wired via `kyc.Service.OnBVNVerified`, a function field main.go sets to
+`stablerailServices.InitiateOnboardingByUsername` - a plain callback
+rather than kyc importing stablerail directly, since these are two
+otherwise-independent vendor integrations with no other reason to know
+about each other.
+
+Per §9's policy on code the audit found dead upstream: `StablerailOfframp`
+(cNGN-to-bank payout) and its initiate/status functions are **not
+ported** - `StableRailInitiateOfframp` had no route calling it in the
+original and, unlike asset-withdrawal, no internal caller either, so
+there is no working behavior to preserve, only an unfinished stub.
+`StableRailInitiateAssetWithdrawal` *is* ported (as
+`initiateAssetWithdrawal`), since the original genuinely used it - called
+automatically once an on-ramp is funded, never as a standalone route
+either upstream or here. Also dropped, both because their absence is
+purely operational rather than functional: `StablerailOnboardUserRetry`
+(a queue for retrying a failed onboarding trigger - the original's own
+retry-queue writer is itself dead code, see the Doja webhook handler) and
+push notifications on state changes (no device-token subsystem exists yet
+- see §4.13), replaced with log lines at the same points.
+
+Config: `StablerailConfig`'s `APIKey`/`BaseURL`/`FintechID` became env vars
+(`STABLERAIL_API_KEY`/`STABLERAIL_BASE_URL`) rather than a database row,
+consistent with every other vendor credential in this port;
+`STABLERAIL_ENABLED` replaces the original's `EnableStablerail` int flag.
+`FintechID` itself is dropped - grepping the original found it read
+nowhere, only ever set.
+
+Verification: `go build`/`vet`/`gofmt` clean; 9 unit tests in
+`internal/components/stablerail/services` against a mocked Stablerail
+HTTP server, covering onboarding (success, disabled, already-registered
+skip, status-poll completion), on-ramp (requires onboarding first,
+success, status-poll-to-funded triggering the withdrawal call with
+`network: "base"`), and bank sync/list. No real Stablerail account was
+available in this sandbox, so these calls are verified against
+Stablerail's documented contract via a mocked server rather than a live
+call.
 
 ### 4.7 Crypto deposit/withdrawal — **planned**
 
@@ -669,7 +725,7 @@ needs, not strictly by the order features appear above.
 | 2 | Account security & recovery (§4.3) | Phase 0 | **DONE** |
 | 3 | KYC — Sumsub + Doja (§4.4) | Phase 0 | **DONE** |
 | 4 | Fiat payments & activation — Flutterwave (§4.5) | Phase 0, benefits from Phase 3 (activation often gated on KYC) | **DONE** |
-| 5 | Stablerail (§4.6) | Phase 3 (BVN/KYC-triggered onboarding) |
+| 5 | Stablerail (§4.6) | Phase 3 (BVN/KYC-triggered onboarding) | **DONE** |
 | 6 | Crypto deposit/withdrawal — OneLiquidity (§4.7) | §5's contract-deployment infra (for the mint side) |
 | 7 | Market making (§4.8) | §11's design decision |
 | 8 | On-chain infra: Solidity contracts + deployment helper, price reading, log polling (§5) | Needed before Phase 9 |
