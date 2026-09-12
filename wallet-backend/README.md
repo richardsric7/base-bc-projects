@@ -345,6 +345,57 @@ side without automatically making the other side whole - the honest cost
 of not yet having an atomic on-chain escrow contract (a natural fit for
 Phase 8's on-chain infrastructure).
 
+## On-chain infrastructure (contracts, price reading, cache invalidation)
+
+Base has no protocol-level asset issuer, order book, or operation stream
+the way Stellar/Horizon does, so this port adds the on-chain building
+blocks those features are built from (`PLAN.md` §5):
+
+- **Contracts** (`internal/contracts/solidity/`) — `TokenizedAsset.sol`
+  (an `ERC20Burnable`+`Ownable` token with an owner-only `mint`, used once
+  per tokenized asset — see the upcoming tokenization phase) and
+  `Sale.sol` (an `Ownable` primary-sale contract with `buy`/`setPaused`/
+  `withdrawUnsold`, so a purchase is one atomic on-chain call instead of
+  a bespoke multi-transaction dance). Both are compiled ahead of time
+  with solc 0.8.24 — never at runtime — and their ABI+bytecode is checked
+  in under `internal/contracts/artifacts/` and embedded into the binary
+  via `//go:embed`; see `internal/contracts/solidity/README.md` for the
+  exact toolchain and how to reproduce the build after editing a
+  `.sol` file. `internal/contracts/contracts.go` exposes Go helpers to
+  build deployment calldata and encode each contract's methods, and
+  `network.Client.DeployContract` submits a deployment the same way every
+  other transaction in this codebase is built (a hand-rolled
+  `types.DynamicFeeTx` with `To: nil`), not via
+  `go-ethereum/accounts/abi/bind`'s generated bindings.
+- **On-chain price reading** (`internal/network/price.go`) —
+  `GetPoolState` reads a Uniswap V3 pool's `slot0`/`token0`/`token1`, and
+  `PoolPrice` converts the pool's `sqrtPriceX96` into a human price
+  adjusted for both tokens' decimals. This is the direct substitute for
+  Stellar's protocol-level DEX price endpoints (`PLAN.md` §2).
+- **Chain-log polling for cache invalidation**
+  (`internal/network/watcher.go`) — `AddressWatcher` polls `eth_getLogs`
+  for `Transfer`/`Approval` events over the block range since its last
+  pass (main.go runs this roughly every two Base blocks, ~4s) and fires a
+  one-shot callback for each watched address a matching log touches. This
+  replaces Horizon's operation/effect streaming, which the original used
+  only to invalidate caches when something changed for an account
+  (`PLAN.md` §2). `GET /v1/users/:username` is wired up as the first
+  caller: a cache hit is served straight from Redis (backed by a 5-minute
+  TTL in case a poll is ever missed), and a cache miss registers the
+  user's address with the watcher so the entry is dropped the moment a
+  Transfer or Approval touches it. Any future endpoint that caches
+  something keyed by an address can reuse the same
+  `GlobalConfig.AddressWatcher` instead of building its own invalidation
+  path.
+
+Deploying and calling these contracts end-to-end needs a real (or
+in-process simulated) EVM, which isn't reachable in every environment
+this code is developed in — see the doc comments in
+`internal/contracts/contracts_test.go` and `internal/network/price_test.go`
+for why those packages test ABI encode/decode round-trips and price math
+directly instead of against a live chain, the same posture this port
+takes for every other vendor/RPC integration without local credentials.
+
 ## Adding a real integration
 
 The `notify`, `storage`, `kyc`, `fiat`, `rates`, and `alerting` packages are

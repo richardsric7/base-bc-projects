@@ -4,13 +4,17 @@
 package controllers
 
 import (
+	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"wallet-backend/internal/apperrors"
+	"wallet-backend/internal/cache"
 	"wallet-backend/internal/components/users/services"
 	"wallet-backend/internal/middleware"
+	"wallet-backend/internal/network"
 	"wallet-backend/internal/sharedconfig"
 )
 
@@ -19,7 +23,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
 	svc := services.New(gc.DB, gc.Mailer, gc.RecoveryAuthoritySalt, gc.RecoveryOTPTTL)
 
 	public := router.Group("/v1/users")
-	public.GET("/:username", getUser(svc))
+	public.GET("/:username", getUser(svc, gc.Cache, gc.AddressWatcher))
 	public.GET("/security-questions", listSecurityQuestions(svc))
 
 	authed := router.Group("/v1/users")
@@ -65,12 +69,31 @@ func register(svc *services.Service) gin.HandlerFunc {
 	}
 }
 
-func getUser(svc *services.Service) gin.HandlerFunc {
+// userResponseCacheTTL is the fallback expiry for a cached GET /v1/users/:username
+// response. AddressWatcher normally invalidates the entry the moment
+// something on-chain changes for the user's address (a Transfer or
+// Approval touching it), so this TTL is only a backstop against a missed
+// or delayed poll - see PLAN.md §2's "Horizon operation streaming" row.
+const userResponseCacheTTL = 5 * time.Minute
+
+func getUser(svc *services.Service, respCache cache.Cache, watcher *network.AddressWatcher) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		user, err := svc.GetByUsername(c.Param("username"))
+		username := c.Param("username")
+		cacheKey := "users:get:" + username
+		if cached, ok := respCache.Get(cacheKey); ok {
+			c.Data(http.StatusOK, "application/json; charset=utf-8", []byte(cached))
+			return
+		}
+
+		user, err := svc.GetByUsername(username)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
+		}
+
+		if body, marshalErr := json.Marshal(user); marshalErr == nil {
+			respCache.Set(cacheKey, string(body), userResponseCacheTTL)
+			watcher.Watch(user.Address, func() { respCache.Delete(cacheKey) })
 		}
 		c.JSON(http.StatusOK, user)
 	}

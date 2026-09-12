@@ -187,6 +187,42 @@ func (c *Client) SignAndSubmitTx(ctx context.Context, signer *ecdsa.PrivateKey, 
 	return signedTx.Hash().Hex(), nil
 }
 
+// DeployContract signs and submits a contract-creation transaction
+// (constructor-encoded bytecode - see internal/contracts) from deployer,
+// returning the resulting contract's address (computed the same way the
+// EVM itself does, from the deployer's address and nonce - no need to
+// wait for and parse a receipt) and the deployment transaction's hash.
+// Ported concept: the server-signed half of PLAN.md §5's contract
+// infrastructure, using the same signing path as SignAndSubmitTx with
+// To left nil, exactly what the EVM treats as a contract creation.
+func (c *Client) DeployContract(ctx context.Context, deployer *ecdsa.PrivateKey, data []byte) (contractAddress, txHash string, err error) {
+	from := crypto.PubkeyToAddress(deployer.PublicKey)
+	params, err := c.resolveTxParams(ctx, from, nil, big.NewInt(0), data, nil)
+	if err != nil {
+		return "", "", err
+	}
+
+	tx := types.NewTx(&types.DynamicFeeTx{
+		ChainID:   c.ChainID,
+		Nonce:     params.nonce,
+		GasTipCap: params.tipCap,
+		GasFeeCap: params.feeCap,
+		Gas:       params.gasLimit,
+		To:        nil,
+		Value:     big.NewInt(0),
+		Data:      data,
+	})
+	signedTx, err := types.SignTx(tx, types.LatestSignerForChainID(c.ChainID), deployer)
+	if err != nil {
+		return "", "", fmt.Errorf("sign deployment transaction: %w", err)
+	}
+	if err := c.Eth.SendTransaction(ctx, signedTx); err != nil {
+		return "", "", fmt.Errorf("submit deployment transaction: %w", err)
+	}
+
+	return crypto.CreateAddress(from, params.nonce).Hex(), signedTx.Hash().Hex(), nil
+}
+
 // BuildNativeTransferTx builds an unsigned ETH transfer.
 func (c *Client) BuildNativeTransferTx(ctx context.Context, from, to string, amountWei *big.Int, explicitNonce *uint64) (*UnsignedTx, error) {
 	toAddr := common.HexToAddress(to)

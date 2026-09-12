@@ -116,6 +116,8 @@ func main() {
 	}
 	log.Printf("blockchain: Base chain %d (rpc=%s)", env.BaseChainID, env.BaseRPCURL)
 
+	addressWatcher := network.NewAddressWatcher(blockchain)
+
 	var mailer notify.Mailer = notify.NewConsoleMailer()
 	if !env.UseConsoleMailer && env.SMTPHost != "" {
 		mailer = notify.NewSMTPMailer(env.SMTPHost, env.SMTPPort, env.SMTPUsername, env.SMTPPassword, env.MailFrom)
@@ -150,10 +152,11 @@ func main() {
 	})
 
 	gc := &sharedconfig.GlobalConfig{
-		DB:         gormDB,
-		Cache:      appCache,
-		Blockchain: blockchain,
-		ChainID:    env.BaseChainID,
+		DB:             gormDB,
+		Cache:          appCache,
+		Blockchain:     blockchain,
+		ChainID:        env.BaseChainID,
+		AddressWatcher: addressWatcher,
 
 		Mailer:  mailer,
 		SMS:     notify.NewConsoleSMSProvider(),
@@ -248,6 +251,18 @@ func main() {
 			}
 		}()
 	}
+
+	// Roughly every two Base blocks (~4s at Base's ~2s block time) per
+	// PLAN.md §2 - the polling-based replacement for Horizon operation
+	// streaming's role in cache invalidation.
+	go func() {
+		for {
+			if err := addressWatcher.Poll(context.Background()); err != nil {
+				log.Printf("[network] address watcher poll failed: %v", err)
+			}
+			time.Sleep(4 * time.Second)
+		}
+	}()
 
 	log.Printf("%s listening on :%s", env.Organisation, env.Port)
 	if err := router.Run(":" + env.Port); err != nil {

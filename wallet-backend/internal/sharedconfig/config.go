@@ -28,6 +28,12 @@ type GlobalConfig struct {
 	Cache      cache.Cache
 	Blockchain *network.Client
 	ChainID    int64 // 8453 = Base Mainnet, 84532 = Base Sepolia - see PLAN.md §8
+	// AddressWatcher polls for Transfer/Approval logs touching addresses a
+	// component has cached a response for, so it can invalidate that cache
+	// entry - the Base substitute for Horizon operation streaming (PLAN.md
+	// §2, §5). Always non-nil; a component only needs to use it if it
+	// caches something keyed by an on-chain address.
+	AddressWatcher *network.AddressWatcher
 
 	Mailer  notify.Mailer
 	SMS     notify.SMSProvider

@@ -709,22 +709,52 @@ integration.
 
 - **A minimal Solidity ERC-20 contract** (mintable, burnable, ownable),
   used once per tokenized asset (§4.9) and, if needed, for any
-  Trovo-issued reward/utility token. Compiled ahead of time (not at
-  runtime) and embedded as ABI+bytecode; deployed via
-  `go-ethereum/accounts/abi/bind`'s `DeployContract`, with the deploying/
-  mint-authority key coming from `cryptoutil.DeriveKey` per §2.
+  Trovo-issued reward/utility token. **DONE** —
+  `internal/contracts/solidity/TokenizedAsset.sol` (OpenZeppelin
+  `ERC20Burnable`+`Ownable`, custom `decimals()`, `mint` restricted to the
+  owner), compiled ahead of time with solc 0.8.24 (never at runtime; see
+  `solidity/README.md` for the reproducible build) and embedded as
+  ABI+bytecode via `//go:embed` in `internal/contracts`. Deployed through
+  `network.Client.DeployContract`, a hand-rolled `types.DynamicFeeTx` with
+  `To: nil` built the same way every other transaction in this codebase
+  is — not `go-ethereum/accounts/abi/bind`'s generated-binding
+  `DeployContract`, which would have introduced a second, inconsistent way
+  of building transactions alongside `internal/network`'s existing
+  build/sign/submit machinery. The deploying/mint-authority key comes from
+  `cryptoutil.DeriveKey` per §2, as originally planned.
 - **A minimal `Sale.sol` contract** for atomic primary-sale purchases
   (§4.9), so a buyer's approve+buy stays a predictable two-step flow
-  instead of a bespoke multi-transaction dance per asset.
+  instead of a bespoke multi-transaction dance per asset. **DONE** —
+  `internal/contracts/solidity/Sale.sol` (`Ownable`, `buy`/`setPaused`/
+  `withdrawUnsold`), same compile/embed/deploy path as TokenizedAsset
+  above.
 - **On-chain price reading** (Uniswap V3 pool `slot0`) added to
   `internal/network`, for the assets order-book/price-discovery
-  replacement (§2).
+  replacement (§2). **DONE** — `internal/network/price.go`:
+  `GetPoolState` reads `slot0`/`token0`/`token1` via three `eth_call`s
+  against a minimal embedded pool ABI, and `PoolPrice` turns
+  `sqrtPriceX96` into a human price adjusted for both tokens' decimals.
 - **A chain-log polling worker** replacing Horizon operation streaming
-  for cache invalidation (§2).
+  for cache invalidation (§2). **DONE** —
+  `internal/network/watcher.go`'s `AddressWatcher` polls `eth_getLogs`
+  for `Transfer`/`Approval` logs over the block range since its last pass
+  (main.go runs it every ~4s, roughly two Base blocks) and fires a
+  one-shot callback for each address a matching log touches. Wired into
+  the one response this port currently caches by address —
+  `GET /v1/users/:username` (`internal/components/users/controllers`) —
+  which registers a cache-delete callback per request alongside a 5-minute
+  TTL backstop in case a poll is ever missed. Any future component that
+  caches something keyed by an on-chain address can reuse the same
+  `GlobalConfig.AddressWatcher` rather than inventing its own
+  invalidation path.
 - **An API-key auth middleware** for the servicelinks partner surface
-  (§4.11), alongside the existing SIWE/JWT middleware.
+  (§4.11), alongside the existing SIWE/JWT middleware. Deferred to Phase
+  11 (§10) — it has no caller until the servicelinks component exists, so
+  building it now would mean designing its key-scoping/rate-limit shape
+  without the concrete endpoints it needs to protect.
 - **A self-hosted shortlink + QR service** replacing Firebase Dynamic
-  Links (§4.13).
+  Links (§4.13). Deferred to Phase 13 (§10) for the same reason — it
+  belongs with the reference-data/shortlinks work it's part of.
 
 ## 6. What still carries over as-is (chain-agnostic)
 
@@ -825,13 +855,13 @@ needs, not strictly by the order features appear above.
 | 5 | Stablerail (§4.6) | Phase 3 (BVN/KYC-triggered onboarding) | **DONE** |
 | 6 | Crypto deposit/withdrawal — OneLiquidity (§4.7) | §5's contract-deployment infra (for the mint side) | **DONE** (via treasury transfer, not mint — see §4.7) |
 | 7 | Market making (§4.8) | §11's design decision | **DONE** |
-| 8 | On-chain infra: Solidity contracts + deployment helper, price reading, log polling (§5) | Needed before Phase 9 |
-| 9 | Tokenization (§4.9) | Phase 8, Phase 1 (closed-group reuse), Phase 4 (fiat purchase flow) |
-| 10 | Patron/membership (§4.10) | Phase 0 |
-| 11 | Servicelinks partner API (§4.11) | Nearly everything above, since it's a passthrough layer |
-| 12 | Admin surface (§4.12) | Whatever subsystems exist by then |
-| 13 | Reference data, shortlinks, geo-IP, Discord alerting parity (§4.13) | Can run in parallel with any phase |
-| 14 | Full integration pass: build/vet/test, smoke test against Base Sepolia, README/docs polish | Everything |
+| 8 | On-chain infra: Solidity contracts + deployment helper, price reading, log polling (§5) | Needed before Phase 9 | **DONE** |
+| 9 | Tokenization (§4.9) | Phase 8, Phase 1 (closed-group reuse), Phase 4 (fiat purchase flow) | |
+| 10 | Patron/membership (§4.10) | Phase 0 | |
+| 11 | Servicelinks partner API (§4.11), including the API-key auth middleware (§5) | Nearly everything above, since it's a passthrough layer | |
+| 12 | Admin surface (§4.12) | Whatever subsystems exist by then | |
+| 13 | Reference data, shortlinks, geo-IP, Discord alerting parity (§4.13) | Can run in parallel with any phase | |
+| 14 | Full integration pass: build/vet/test, smoke test against Base Sepolia, README/docs polish | Everything | |
 
 ## 11. Open decisions needing input before implementation proceeds
 
