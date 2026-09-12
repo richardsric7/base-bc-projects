@@ -420,7 +420,7 @@ available in this sandbox, so these calls are verified against
 Stablerail's documented contract via a mocked server rather than a live
 call.
 
-### 4.7 Crypto deposit/withdrawal — **planned**
+### 4.7 Crypto deposit/withdrawal — **DONE**
 
 Original: OneLiquidity-backed deposit-address generation, withdrawal
 network listing (cached from OneLiquidity every 800s),
@@ -428,13 +428,66 @@ withdrawal-request queueing, deposit webhook → `CallbackDepositItem` →
 background "minting initiator" loop that mints the equivalent on-chain
 asset. Models: `CryptoWalletDepositAddress`, `CryptoDeposit`,
 `CallbackDepositItem`, `WithdrawalNetwork`, `CryptoWithdrawal`,
-`WithdrawalRequest`.
+`WithdrawalRequest`. The original's minting loop always mints, for every
+currency, from a Trovo-issuer key — every curated Stellar asset in the
+original was Trovo-issued, including wrapped BTC/ETH/USDT representations,
+so there was no actual "pass-through, don't mint" path to port as-is.
 
-Base design: same OneLiquidity vendor integration (chain-agnostic — it's a
-custodial deposit/withdrawal network, not Stellar-specific); the
-deposit-to-mint bridge becomes deposit-to-**mint-or-transfer** per §2's
-asset-issuance row (mint for Trovo-issued assets, transfer from a custodial
-treasury for pass-through assets like deposited USDC).
+Implemented as `internal/components/crypto` (chain-agnostic vendor
+integration, same shape as kyc/fiat/stablerail — OneLiquidity is a
+custodial deposit/withdrawal network, not Stellar-specific). Rather than
+port the original's always-mint behavior unchanged, deposit crediting here
+is a **transfer** from a derived treasury key holding a balance of the
+matching `CuratedToken` — the deliberate Base-native choice PLAN.md
+originally flagged as "mint-or-transfer" per §2's asset-issuance row.
+Base's curated assets are ordinary already-deployed ERC-20 contracts this
+project doesn't control minting for (unlike Stellar, where Trovo was
+always the issuer by construction), so genuine on-demand minting needs a
+Trovo-deployed, mint-controlled contract — Phase 9's tokenization
+infrastructure, not yet built. An operator funds the treasury address
+(`cryptoutil.DeriveKey`-derived from `CRYPTO_TREASURY_KEY_SALT`, same
+pattern as the activation faucet and shared-access group keys) with each
+curated token ahead of time; a currency with no matching `CuratedToken` is
+recorded but left uncredited (logged) rather than failing the poll,
+matching this port's established graceful-degradation posture.
+
+One structural addition beyond a mechanical port: **withdrawal now
+requires proof of an on-chain debit before OneLiquidity is asked to pay
+out externally.** The original's "withdrawal" debited an internal Trovo
+ledger balance the platform already controlled, submitted server-side as
+part of the same request; on Base, a user's balance is a real on-chain
+balance only they can move. `RequestWithdrawal` therefore takes the
+caller's own signed transfer (to the treasury address `GetWithdrawalNetworks`
+returns) and submits it via the same generic signed-tx-submission
+primitive fiat's `SettlePendingInvoice` uses, before calling
+OneLiquidity's withdrawal endpoint — the same build/sign/submit split
+every other mutating operation in this port already follows.
+
+**Documented gap, not a silent drop:** only single-owner withdrawal is
+implemented. The original's multi-party shared-access withdrawal path
+(`postSharedAccessCryptoWithdrawalsHandler`, approve-then-submit against a
+group wallet's `PendingAuth` record) is not ported here — reconciling it
+with `sharedaccess.PendingAction`'s executor, which today only knows how
+to submit an on-chain transaction and has no notion of "then call an
+external vendor API," is a real design decision, not a mechanical port. A
+shared-access group's members can still withdraw external crypto once
+that generalization is made; nothing about this phase's design forecloses
+it. Per §9's policy on code the audit found dead upstream, the facematch/
+compliance functions in the original's `oneliquidity.go`
+(`ComplianceStartNewVerification`, `StartFacematchForX`,
+`StartGovernmentIDCheckForProofOfResidency`) are confirmed to have no
+routes calling them and are **not ported**.
+
+Verification: `go build`/`vet`/`gofmt` clean; 9 unit tests in
+`internal/components/crypto/services` against a mocked OneLiquidity HTTP
+server, covering deposit-address create/reuse, deposit crediting via
+treasury transfer, the graceful skip when no curated token matches a
+deposited currency, deposit deduplication, withdrawal-network caching,
+and withdrawal validation (min/max/unsupported-network rejection) plus a
+successful withdrawal's fee math and on-chain debit submission. No real
+OneLiquidity account was available in this sandbox, so these calls are
+verified against OneLiquidity's documented contract via a mocked server
+rather than a live call.
 
 ### 4.8 Market making (trades/offers) — **planned, needs an explicit decision**
 
@@ -726,7 +779,7 @@ needs, not strictly by the order features appear above.
 | 3 | KYC — Sumsub + Doja (§4.4) | Phase 0 | **DONE** |
 | 4 | Fiat payments & activation — Flutterwave (§4.5) | Phase 0, benefits from Phase 3 (activation often gated on KYC) | **DONE** |
 | 5 | Stablerail (§4.6) | Phase 3 (BVN/KYC-triggered onboarding) | **DONE** |
-| 6 | Crypto deposit/withdrawal — OneLiquidity (§4.7) | §5's contract-deployment infra (for the mint side) |
+| 6 | Crypto deposit/withdrawal — OneLiquidity (§4.7) | §5's contract-deployment infra (for the mint side) | **DONE** (via treasury transfer, not mint — see §4.7) |
 | 7 | Market making (§4.8) | §11's design decision |
 | 8 | On-chain infra: Solidity contracts + deployment helper, price reading, log polling (§5) | Needed before Phase 9 |
 | 9 | Tokenization (§4.9) | Phase 8, Phase 1 (closed-group reuse), Phase 4 (fiat purchase flow) |

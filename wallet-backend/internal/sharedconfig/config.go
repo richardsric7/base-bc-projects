@@ -83,6 +83,15 @@ type GlobalConfig struct {
 	StablerailAPIKey  string
 	StablerailBaseURL string
 	StablerailEnabled bool
+
+	// OneLiquidity credentials and CryptoTreasuryKeySalt for
+	// internal/components/crypto - same env-sourced-secret/derived-key
+	// rationale as every other vendor integration in this struct.
+	OneLiquidityBaseURL               string
+	OneLiquidityToken                 string
+	CryptoWalletDomain                string
+	CryptoTreasuryKeySalt             string
+	CryptoWithdrawalServiceFeePercent float64
 }
 
 // Env holds every raw environment-derived setting. Load it once in main and
@@ -137,6 +146,12 @@ type Env struct {
 	StablerailAPIKey  string
 	StablerailBaseURL string
 	StablerailEnabled bool
+
+	OneLiquidityBaseURL               string
+	OneLiquidityToken                 string
+	CryptoWalletDomain                string
+	CryptoTreasuryKeySalt             string
+	CryptoWithdrawalServiceFeePercent float64
 
 	Organisation string
 }
@@ -198,6 +213,12 @@ func LoadEnv() Env {
 		StablerailBaseURL: getEnv("STABLERAIL_BASE_URL", "https://beta.stablesrail.io/v1"),
 		StablerailEnabled: getEnvBool("STABLERAIL_ENABLED", false),
 
+		OneLiquidityBaseURL:               getEnv("ONELIQUIDITY_BASE_URL", "https://sandbox-api.oneliquidity.technology"),
+		OneLiquidityToken:                 getEnv("ONELIQUIDITY_TOKEN", ""),
+		CryptoWalletDomain:                getEnv("CRYPTO_WALLET_DOMAIN", "wallet-backend"),
+		CryptoTreasuryKeySalt:             getEnv("CRYPTO_TREASURY_KEY_SALT", "dev-only-change-me"),
+		CryptoWithdrawalServiceFeePercent: getEnvFloat64("CRYPTO_WITHDRAWAL_SERVICE_FEE_PERCENT", 1.0),
+
 		Organisation: getEnv("ORGANISATION", "wallet-backend"),
 	}
 }
@@ -243,4 +264,16 @@ func getEnvInt64(key string, fallback int64) int64 {
 		return fallback
 	}
 	return i
+}
+
+func getEnvFloat64(key string, fallback float64) float64 {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fallback
+	}
+	return f
 }

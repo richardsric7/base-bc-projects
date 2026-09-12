@@ -272,6 +272,41 @@ Set `STABLERAIL_ENABLED=true` and `STABLERAIL_API_KEY` to turn this on;
 every route and the KYC-triggered hook return a `202` "not enabled"
 response otherwise.
 
+## Crypto deposit/withdrawal (OneLiquidity)
+
+External-crypto deposit addresses and withdrawal, backed by OneLiquidity -
+see `PLAN.md` §4.7 for the full design, including the deliberate
+deposit-crediting choice (a treasury **transfer**, not the original's
+Stellar **mint** - Base's curated assets are ordinary ERC-20 contracts
+this project doesn't control minting for) and the one documented gap
+(shared-access multi-party withdrawal isn't wired up yet).
+
+1. `GET /v1/crypto/deposit-address/:currency` (authed) returns the
+   caller's deposit addresses, requesting a new OneLiquidity subwallet on
+   first call.
+2. A background poller checks OneLiquidity's deposit list every 60
+   seconds; a newly completed deposit is credited automatically by
+   transferring the matching `CuratedToken` from a derived treasury
+   address (`CRYPTO_TREASURY_KEY_SALT`) to the depositing user - an
+   operator funds that address with each curated token ahead of time. A
+   deposit in a currency with no curated token is recorded but left
+   uncredited rather than failing.
+3. `GET /v1/crypto/deposit-history` (authed) lists the caller's deposits
+   and their crediting status.
+4. `GET /v1/crypto/withdrawal-networks/:currency` (authed) returns cached
+   per-network min/max/fee limits plus the treasury address a withdrawal
+   must transfer to (see the next step).
+5. `POST /v1/crypto/withdrawals` (authed) with
+   `{"currency", "network", "toAddress", "amount", "signedTreasuryTransferTx"}` -
+   the client first builds and signs a transfer of `amount` from their own
+   Base address to the treasury address, then this backend submits that
+   transaction as proof of the debit before asking OneLiquidity to pay the
+   external network. Only single-owner withdrawal is implemented; a
+   shared-access group withdrawing external crypto is a documented gap,
+   not a silent drop (see `PLAN.md` §4.7).
+6. `GET /v1/crypto/withdrawal-history` (authed) lists the caller's
+   withdrawal requests and their status.
+
 ## Adding a real integration
 
 The `notify`, `storage`, `kyc`, `fiat`, `rates`, and `alerting` packages are

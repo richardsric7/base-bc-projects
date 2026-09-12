@@ -19,6 +19,7 @@ import (
 	"wallet-backend/internal/cache"
 	announcementsModels "wallet-backend/internal/components/announcements/models"
 	assetsModels "wallet-backend/internal/components/assets/models"
+	cryptoModels "wallet-backend/internal/components/crypto/models"
 	fiatModels "wallet-backend/internal/components/fiat/models"
 	kycModels "wallet-backend/internal/components/kyc/models"
 	paymentsModels "wallet-backend/internal/components/payments/models"
@@ -28,6 +29,7 @@ import (
 	assetsControllers "wallet-backend/internal/components/assets/controllers"
 	authControllers "wallet-backend/internal/components/auth/controllers"
 	callbacksControllers "wallet-backend/internal/components/callbacks/controllers"
+	cryptoControllers "wallet-backend/internal/components/crypto/controllers"
 	fiatControllers "wallet-backend/internal/components/fiat/controllers"
 	kycControllers "wallet-backend/internal/components/kyc/controllers"
 	paymentsControllers "wallet-backend/internal/components/payments/controllers"
@@ -64,6 +66,7 @@ func allModels() []interface{} {
 	models = append(models, kycModels.Models...)
 	models = append(models, fiatModels.Models...)
 	models = append(models, stablerailModels.Models...)
+	models = append(models, cryptoModels.Models...)
 	return models
 }
 
@@ -179,6 +182,12 @@ func main() {
 		StablerailAPIKey:  env.StablerailAPIKey,
 		StablerailBaseURL: env.StablerailBaseURL,
 		StablerailEnabled: env.StablerailEnabled,
+
+		OneLiquidityBaseURL:               env.OneLiquidityBaseURL,
+		OneLiquidityToken:                 env.OneLiquidityToken,
+		CryptoWalletDomain:                env.CryptoWalletDomain,
+		CryptoTreasuryKeySalt:             env.CryptoTreasuryKeySalt,
+		CryptoWithdrawalServiceFeePercent: env.CryptoWithdrawalServiceFeePercent,
 	}
 
 	router := gin.Default()
@@ -198,6 +207,7 @@ func main() {
 	kycSvc := kycControllers.Init(router, gc)
 	fiatControllers.Init(router, gc)
 	stablerailSvc := stablerailControllers.Init(router, gc)
+	cryptoSvc := cryptoControllers.Init(router, gc)
 
 	// Wire the KYC component's Doja BVN-completion hook to Stablerail
 	// onboarding - see kyc/services.Service.OnBVNVerified's doc comment
@@ -220,6 +230,15 @@ func main() {
 					log.Printf("[stablerail] error syncing supported banks: %v", err)
 				}
 				time.Sleep(10 * time.Minute)
+			}
+		}()
+	}
+
+	if env.OneLiquidityToken != "" {
+		go func() {
+			for {
+				cryptoSvc.PollNewDeposits()
+				time.Sleep(60 * time.Second)
 			}
 		}()
 	}
