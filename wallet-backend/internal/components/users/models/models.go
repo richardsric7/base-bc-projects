@@ -8,11 +8,17 @@ import "time"
 // internal/components/auth) - the server never sees, let alone stores, the
 // matching private key.
 type User struct {
-	ID                     uint      `gorm:"primaryKey" json:"id"`
-	Username               string    `gorm:"uniqueIndex;size:32;not null" json:"username"`
-	Email                  string    `gorm:"uniqueIndex;size:255;not null" json:"email"`
-	Address                string    `gorm:"uniqueIndex;size:42;not null" json:"address"`
-	KYCStatus              string    `gorm:"size:32;default:pending" json:"kycStatus"`
+	ID        uint   `gorm:"primaryKey" json:"id"`
+	Username  string `gorm:"uniqueIndex;size:32;not null" json:"username"`
+	Email     string `gorm:"uniqueIndex;size:255;not null" json:"email"`
+	Address   string `gorm:"uniqueIndex;size:42;not null" json:"address"`
+	KYCStatus string `gorm:"size:32;default:pending" json:"kycStatus"`
+	// KYCVerifiedLevel is the highest identity-verification level this user
+	// has completed with either vendor (see internal/components/kyc) - 0
+	// means unverified. Ported from the original's User.KYCVerified; other
+	// phases (fiat activation limits, tokenization purchase limits) gate on
+	// this field, exactly as they did upstream.
+	KYCVerifiedLevel       int       `gorm:"default:0" json:"kycVerifiedLevel"`
 	AccountRecoveryEnabled bool      `gorm:"default:false" json:"accountRecoveryEnabled"`
 	CreatedAt              time.Time `json:"createdAt"`
 	UpdatedAt              time.Time `json:"updatedAt"`

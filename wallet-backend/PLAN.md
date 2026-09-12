@@ -197,7 +197,7 @@ matching the original's anti-enumeration posture. Implemented, unit-tested
 forged new-address signatures, invalid addresses, and reserved-username
 registration), and documented in the README's "Account recovery" section.
 
-### 4.4 KYC — **planned**
+### 4.4 KYC — **DONE**
 
 Original: Sumsub (outbound applicant-creation/SDK-token API + HMAC-verified
 webhook, levels 1-3) and Doja/Dojah (webhook-only, BVN-centric, levels 1-4,
@@ -205,14 +205,74 @@ IP-allowlisted). Models: `KYCConfig`, `KYCLevel`, `SumSubReviewResult`,
 `UserKYCProgress`, `DojaWidget`, `UserDojaKYCProgress`.
 
 Base design: **entirely chain-agnostic** — these vendor integrations don't
-touch the blockchain at all. Ports as real, working integration code
-against the same vendor APIs (Sumsub's actual REST endpoints, Doja's actual
-webhook payload shape), slotted behind the `internal/kyc.Provider` interface
-already defined in this codebase (replacing the placeholder
-`ManualKYCProvider` default with `SumsubProvider`/`DojaProvider`
-implementations). The legacy OneLiquidity facematch/compliance path found
-in the audit is **dead code upstream** (implemented, never routed, not
-migrated) — see §9 for whether to port it at all.
+touch the blockchain at all, so this ported close to line-for-line rather
+than being redesigned for Base. Implemented as a new
+`internal/components/kyc` component (models/services/controllers, same
+shape as every other component) rather than forcing both vendors behind
+the pre-existing `internal/kyc.Provider` interface: that interface's
+single-level start/webhook/status shape can't represent Sumsub's and
+Doja's actual mechanics (ordered multi-level progress, per-vendor webhook
+payloads, Doja's widget-ID-to-level lookup) without losing real business
+logic, so `internal/kyc.Provider`/`ManualKYCProvider` remains available
+as a separate, simpler opt-in for a project that hasn't picked a vendor,
+while `GlobalConfig.KYC` stays wired to it by default.
+
+Ported: real Sumsub REST client (create applicant, fetch applicant info,
+generate SDK access token, all with the documented
+X-App-Token/X-App-Access-Sig/X-App-Access-Ts request signing) gated by the
+original's level-ordering rule (levels 1-3 must be completed in order);
+Doja webhook processing with widget-ID → level/type lookup and per-level
+Submitted/Completed progress tracking. `User.KYCVerifiedLevel` (ported from
+the original's `User.KYCVerified`) is the single source of truth both
+vendors raise (never lower) — future phases gating on KYC level (fiat
+activation limits, tokenization purchase limits) read this one field
+regardless of which vendor a user verified through.
+
+Three deliberate deviations from the original, each because the original's
+actual behavior was either a security bug or dependent on infrastructure
+this port doesn't have yet:
+
+1. **Dropped the client-callable "complete level" endpoint.** The original
+   exposed `POST /v1/users/kyc/sumsub/complete/:levelName`, which let any
+   authenticated caller mark their own KYC level done directly — no server
+   verification at all, a straightforward self-approval bypass. This port
+   only advances `KYCVerifiedLevel`/progress from the vendor's own
+   signature-verified webhook.
+2. **Fixed both webhooks' signature verification.** The original computed
+   an HMAC digest for both Sumsub's `x-payload-digest` and Doja's
+   `x-dojah-signature` headers but never actually compared it against the
+   incoming value before trusting the payload — Doja's handler additionally
+   checked the caller's source IP against one hardcoded address, but its
+   failure branch had no `return`, so an unrecognized IP was only logged,
+   never rejected. Net effect: neither webhook endpoint verified its caller
+   at all. This port requires a valid signature on both and rejects the
+   request otherwise (`Service.VerifySumsubWebhookSignature`,
+   `Service.VerifyDojaWebhookSignature`).
+3. **No seeded Dojah widget IDs, no push notifications, no Stablerail
+   trigger.** Dojah widget IDs are specific to whichever Dojah dashboard
+   account a deployer owns, so shipping the original's actual widget IDs in
+   a base template would be meaningless to anyone else (and a minor
+   information leak of the upstream account's config) — an operator
+   configures their own via the `DojaWidget` table. Push notifications on
+   KYC progress changes are commented hook points rather than implemented,
+   since no device-token subsystem exists yet in this port (see §4.13);
+   likewise the original's BVN-triggered Stablerail onboarding call on
+   Doja level-1 completion is a hook point for Phase 5, not yet built.
+
+The legacy OneLiquidity facematch/compliance path found in the audit
+remains **dead code upstream** (implemented, never routed, not migrated) —
+per §9, skipped rather than ported.
+
+Verification: `go build`/`vet`/`gofmt` clean; 12 unit tests in
+`internal/components/kyc/services` covering level-ordering enforcement, a
+mocked Sumsub REST round-trip (applicant creation → SDK token), both
+webhooks' signature verification (valid/forged/tampered/wrong-algorithm),
+GREEN/RED Sumsub outcomes, and Doja's Pending/Completed/Failed transitions
+including the never-lower-KYCVerifiedLevel rule. Real HMAC signing logic is
+exercised directly (both this port's and the original's use the same
+scheme), but an actual Sumsub/Doja account's credentials were not
+available in this sandbox, so the live vendor API calls themselves are
+unverified beyond matching their documented contract.
 
 ### 4.5 Fiat payments & activation — **planned**
 
@@ -549,7 +609,7 @@ needs, not strictly by the order features appear above.
 | 0 | Core wallet/auth/payments/swaps/assets (§4.1) | — | **DONE** |
 | 1 | Shared/multi-party wallet access (§4.2) | Phase 0 | **DONE** |
 | 2 | Account security & recovery (§4.3) | Phase 0 | **DONE** |
-| 3 | KYC — Sumsub + Doja (§4.4) | Phase 0 |
+| 3 | KYC — Sumsub + Doja (§4.4) | Phase 0 | **DONE** |
 | 4 | Fiat payments & activation — Flutterwave (§4.5) | Phase 0, benefits from Phase 3 (activation often gated on KYC) |
 | 5 | Stablerail (§4.6) | Phase 3 (BVN/KYC-triggered onboarding) |
 | 6 | Crypto deposit/withdrawal — OneLiquidity (§4.7) | §5's contract-deployment infra (for the mint side) |

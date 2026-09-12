@@ -54,6 +54,16 @@ type GlobalConfig struct {
 	// caution as GroupKeySalt.
 	RecoveryAuthoritySalt string
 	RecoveryOTPTTL        time.Duration
+
+	// Sumsub/Doja credentials for internal/components/kyc. The upstream
+	// project stored these in a database KYCConfig table; this port keeps
+	// them as env-sourced secrets instead, consistent with every other
+	// credential in this struct, and to avoid an API secret sitting in
+	// plaintext in the same database as user data.
+	SumsubBaseURL   string
+	SumsubToken     string
+	SumsubSecretKey string
+	DojaSecretKey   string
 }
 
 // Env holds every raw environment-derived setting. Load it once in main and
@@ -93,6 +103,11 @@ type Env struct {
 
 	RecoveryAuthoritySalt string
 	RecoveryOTPTTLMinutes int
+
+	SumsubBaseURL   string
+	SumsubToken     string
+	SumsubSecretKey string
+	DojaSecretKey   string
 
 	Organisation string
 }
@@ -138,6 +153,11 @@ func LoadEnv() Env {
 
 		RecoveryAuthoritySalt: getEnv("RECOVERY_AUTHORITY_SALT", "dev-only-change-me"),
 		RecoveryOTPTTLMinutes: getEnvInt("RECOVERY_OTP_TTL_MINUTES", 15),
+
+		SumsubBaseURL:   getEnv("SUMSUB_BASE_URL", "https://api.sumsub.com"),
+		SumsubToken:     getEnv("SUMSUB_TOKEN", ""),
+		SumsubSecretKey: getEnv("SUMSUB_SECRET_KEY", ""),
+		DojaSecretKey:   getEnv("DOJA_SECRET_KEY", ""),
 
 		Organisation: getEnv("ORGANISATION", "wallet-backend"),
 	}

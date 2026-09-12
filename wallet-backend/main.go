@@ -19,6 +19,7 @@ import (
 	"wallet-backend/internal/cache"
 	announcementsModels "wallet-backend/internal/components/announcements/models"
 	assetsModels "wallet-backend/internal/components/assets/models"
+	kycModels "wallet-backend/internal/components/kyc/models"
 	paymentsModels "wallet-backend/internal/components/payments/models"
 	usersModels "wallet-backend/internal/components/users/models"
 
@@ -26,6 +27,7 @@ import (
 	assetsControllers "wallet-backend/internal/components/assets/controllers"
 	authControllers "wallet-backend/internal/components/auth/controllers"
 	callbacksControllers "wallet-backend/internal/components/callbacks/controllers"
+	kycControllers "wallet-backend/internal/components/kyc/controllers"
 	paymentsControllers "wallet-backend/internal/components/payments/controllers"
 	ratesControllers "wallet-backend/internal/components/rates/controllers"
 	rootControllers "wallet-backend/internal/components/root/controllers"
@@ -53,6 +55,7 @@ func allModels() []interface{} {
 	models = append(models, paymentsModels.Models...)
 	models = append(models, announcementsModels.Models...)
 	models = append(models, sharedaccessModels.Models...)
+	models = append(models, kycModels.Models...)
 	return models
 }
 
@@ -78,6 +81,7 @@ func main() {
 
 	seedSecurityQuestions(gormDB)
 	seedReservedNames(gormDB)
+	seedSumsubLevels(gormDB)
 
 	appCache := cache.NewNoopCache()
 	if env.CacheEnabled {
@@ -145,6 +149,11 @@ func main() {
 
 		RecoveryAuthoritySalt: env.RecoveryAuthoritySalt,
 		RecoveryOTPTTL:        durationFromMinutes(env.RecoveryOTPTTLMinutes),
+
+		SumsubBaseURL:   env.SumsubBaseURL,
+		SumsubToken:     env.SumsubToken,
+		SumsubSecretKey: env.SumsubSecretKey,
+		DojaSecretKey:   env.DojaSecretKey,
 	}
 
 	router := gin.Default()
@@ -161,6 +170,7 @@ func main() {
 	ratesControllers.Init(router, gc)
 	announcementsControllers.Init(router, gc)
 	callbacksControllers.Init(router, gc)
+	kycControllers.Init(router, gc)
 
 	log.Printf("%s listening on :%s", env.Organisation, env.Port)
 	if err := router.Run(":" + env.Port); err != nil {
@@ -213,5 +223,27 @@ func seedReservedNames(gormDB *gorm.DB) {
 	}
 	if err := gormDB.Create(&defaults).Error; err != nil {
 		log.Printf("warning: failed to seed default reserved names: %v", err)
+	}
+}
+
+// seedSumsubLevels inserts a small default catalog of Sumsub level names on
+// first boot. These match Sumsub's own placeholder level-naming convention
+// so InitiateSumsubLevel has something valid to request out of the box;
+// an operator's actual Sumsub dashboard levels can be configured by editing
+// this table directly (see PLAN.md §4.4 for why widget/level catalogs
+// aren't hardcoded further than this).
+func seedSumsubLevels(gormDB *gorm.DB) {
+	var count int64
+	gormDB.Model(&kycModels.SumsubLevel{}).Count(&count)
+	if count > 0 {
+		return
+	}
+	defaults := []kycModels.SumsubLevel{
+		{Name: "id-and-liveness-level-1", Description: "Level 1: ID document and liveness check"},
+		{Name: "id-and-liveness-level-2", Description: "Level 2: additional proof of address"},
+		{Name: "id-and-liveness-level-3", Description: "Level 3: enhanced due diligence"},
+	}
+	if err := gormDB.Create(&defaults).Error; err != nil {
+		log.Printf("warning: failed to seed default Sumsub levels: %v", err)
 	}
 }

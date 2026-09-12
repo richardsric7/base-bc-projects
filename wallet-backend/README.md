@@ -175,6 +175,44 @@ A small blocklist of reserved usernames (`ReservedName`, seeded on first
 boot) is checked at registration so no one can register `admin`, `support`,
 and similar staff/brand-impersonating handles.
 
+## KYC
+
+Identity verification against the same two vendors the original project
+used - Sumsub and Dojah - entirely chain-agnostic, so this is close to a
+line-for-line port; see `PLAN.md` §4.4 for the three deliberate deviations
+from the original (dropped client-self-approval endpoint, fixed both
+webhooks' signature verification, deferred push/Stablerail hooks).
+
+- **Sumsub** (levels enforced in order 1 → 2 → 3):
+  1. `GET /v1/kyc/sumsub/levels` lists the configured level names.
+  2. `POST /v1/kyc/sumsub/initiate/:levelName` creates a Sumsub applicant
+     and returns `{"applicantToken", "applicant"}` - the client hands
+     `applicantToken` to Sumsub's own mobile/web SDK to run document and
+     liveness capture.
+  3. `GET /v1/kyc/sumsub/progress` returns the caller's per-level
+     initiated/done flags.
+  4. Sumsub reports the outcome asynchronously to
+     `POST /v1/callbacks/kyc/sumsub/webhook` (HMAC-SHA256-verified via the
+     `x-payload-digest`/`x-payload-digest-alg` headers against
+     `SUMSUB_SECRET_KEY`); a `GREEN` review marks that level done and
+     raises `User.KYCVerifiedLevel`, a `RED` review resets it for retry.
+- **Dojah** (widget-based, BVN-centric, up to 4 levels):
+  1. `GET /v1/kyc/doja/widgets` lists widget IDs configured in the
+     `DojaWidget` table (an operator's own Dojah-dashboard widget IDs -
+     none are seeded, since they're specific to whoever owns the account).
+  2. `GET /v1/kyc/doja/progress` returns the caller's per-level
+     submitted/completed flags.
+  3. Dojah posts progress to `POST /v1/callbacks/kyc/doja/webhook`
+     (HMAC-SHA256-verified via the `x-dojah-signature` header against
+     `DOJA_SECRET_KEY`); `Completed` raises `User.KYCVerifiedLevel` to that
+     widget's level (never lowering a level already granted by the other
+     vendor), `Failed` resets that level's progress.
+
+`User.KYCVerifiedLevel` is the single field either vendor raises - a future
+phase gating a feature on KYC (fiat activation limits, tokenization
+purchase limits) should read this field regardless of which vendor a given
+user verified through.
+
 ## Adding a real integration
 
 The `notify`, `storage`, `kyc`, `fiat`, `rates`, and `alerting` packages are
