@@ -870,32 +870,235 @@ membership renewing instantly, an existing lifetime membership always
 activating instantly), pending-subscription rejection, and the activation
 worker's due-vs-future selection.
 
-### 4.11 Servicelinks partner API — **planned**
+### 4.11 Servicelinks partner API — **DONE**
 
-Original: ~30 routes across two prefixes (`/v1/servicelinks/...`,
+Original: ~40 routes across two prefixes (`/v1/servicelinks/...`,
 `/v1/trovo-api/...`), API-key-authenticated, covering login delegation
 (request/approve/verify → issues the partner a JWT for that user), a
-generic "authorize" 2FA-style deep-link flow, an "events" registration flow,
-tokenized-asset info lookup, user-directory lookup, push-notification
-relay, partner-driven user onboarding, KYC-status override (scoped to
-partner-created users), partner-driven minting, sub-wallet creation,
-balance/payment-history lookup, and a full tokenization-management
-passthrough (apply, upload logo/documents, confirm application, confirm/ack
-fees, admin/marketplace listing, primary-sale execution, deletion) plus a
-separate private stakeholder-document store. `ServiceLink` model carries a
-capability bitset (`LoginPermission`, `PaymentPermission`,
-`TokenInfoPermission`, `AuthorizationPermission`, `EventPermission`,
-`PushNotificationPermission`, `TokenizedAssetAuthorizationPermission`,
-`CreateUsersPermission`, plus data-sharing flags).
+generic "authorize" 2FA-style deep-link flow, an "events" registration
+flow, tokenized-asset info lookup, user-directory lookup, push-notification
+relay, partner-driven user onboarding, KYC-status override, partner-driven
+asset minting, sub-wallet creation, balance/payment-history lookup, a full
+tokenization-management passthrough, and a separate private
+stakeholder-document store. `ServiceLink` carries a capability bitset
+(`LoginPermission`, `PaymentPermission`, `TokenInfoPermission`,
+`AuthorizationPermission`, `EventPermission`, `PushNotificationPermission`,
+`TokenizedAssetAuthorizationPermission`, `CreateUsersPermission`, plus
+data-sharing flags).
 
-Base design: entirely chain-agnostic as an API-key/permission-bitset
-authorization layer sitting in front of the same underlying
-users/payments/tokenization services this plan already covers — no new
-blockchain design needed here, just the permission-gated routing layer
-itself, reusing the API-key middleware pattern from the original
-(`internal/middleware`, currently only SIWE+JWT — add an `APIKeyAuth`
-middleware alongside it) and each underlying capability's Base
-implementation from the sections above.
+**A full read of the original (`servicelinks/models`, `services`,
+`controllers/main.go`, and all 4,969 lines of `controllers/
+handlers_impl.go`) surfaced a cluster of real authorization bugs — this
+section documents each one and how the Base port fixes it, since "port the
+bug faithfully" is not an option for an auth/money-movement surface.**
+
+**Bugs found and fixed (not reproduced):**
+
+1. **API keys are stored and compared in plaintext** (`db.Where("api_key =
+   ?", apiKey)`), no hashing anywhere. A single DB leak compromises every
+   partner's credential. **Fixed**: `ServiceLink.APIKeyHash` stores only a
+   SHA-256 hash; the raw key is shown to the partner exactly once, at
+   creation, and never persisted.
+2. **The API-key middleware attaches nothing to context** — every handler
+   independently re-fetches the `ServiceLink` by re-extracting the header,
+   and each hand-rolls its own permission/status checks (inconsistently —
+   see next two findings). **Fixed**: `middleware.APIKeyAuth` resolves the
+   `ServiceLink` once and attaches it to `gin.Context`; every handler reads
+   it from there.
+3. **Suspended/inactive/unverified service links are not blocked** by the
+   primary auth path — only three stakeholder-document routes got a
+   correct active/verified/non-suspended gate via a bespoke second
+   middleware; the one function that implements the check correctly
+   (`services.GetService`) is dead code, never called by any route.
+   **Fixed**: `middleware.APIKeyAuth` itself rejects
+   `Inactive`/`Suspended`/`!Verified` unconditionally, for every route,
+   deny-by-default.
+4. **`CreateUsersPermission` is a single flag gating the entire
+   `/v1/trovo-api/*` surface** — onboarding, KYC override, minting,
+   balance/history reads, payments, sub-wallets, and all tokenization-
+   management routes share one boolean named for something else entirely.
+   **Fixed**: split into granular capabilities — `CanCreateUsers`,
+   `CanUpdateKYC`, `CanSendPayments`, `CanReadBalances`,
+   `CanManageTokenization` — each independently grantable.
+5. **No wallet-ownership scoping on money-moving/asset-moving routes.**
+   The balance/history lookups correctly require
+   `walletOwner.CreatedByServiceLinkID == callingServiceLink.ID`, but the
+   payment-send, asset-mint, and primary-sale-purchase routes resolve the
+   acting wallet from **unverified request headers/body fields** with no
+   such check — any partner holding a valid API key with the (overloaded)
+   permission could build/submit value-moving transactions against a
+   wallet it doesn't own. Real signature verification deeper in the
+   Stellar submission path stops actual fund loss, but the authorization
+   boundary itself is the wrong shape to carry forward. **Fixed**: every
+   route that acts on a specific user's wallet — payment, KYC override,
+   tokenization actions — requires `wallet.CreatedByServiceLinkID ==
+   serviceLink.ID`, checked once, centrally, before any service call.
+6. **The KYC-override handler has a copy-paste bug** (`Username(kycData.
+   KycStatus)` — casting the status *int* into the username lookup instead
+   of the actual target-username field) **and**, independent of that bug,
+   its ownership check only fires when `CreatedByServiceLinkID` is
+   non-nil — skipping the check entirely for organically-registered users,
+   so any partner could target arbitrary non-partner-created accounts.
+   **Fixed**: look up by the real target identifier; reject unless
+   `CreatedByServiceLinkID != nil && *CreatedByServiceLinkID ==
+   serviceLink.ID` — deny-by-default, not deny-only-on-mismatch.
+7. **The stakeholder-document store has no per-tenant ownership record** —
+   any active, verified service link can read or delete *any other
+   partner's* documents by GUID (an IDOR), since object identity is a bare
+   UUID with no owning-service-link column. **Fixed**: every stored
+   document row carries the uploading `ServiceLinkID`, checked on every
+   read/delete.
+8. **Three near-identical state machines** (login-delegation,
+   generic-authorize, event-registration — each its own model, each its
+   own request/approve/verify handler trio) exist upstream purely because
+   they were built separately over time, not because the flows differ in
+   any structural way. **Simplified, not just fixed**: one
+   `ServiceLinkApproval` model with a `Kind` (`LOGIN`/`AUTHORIZE`/`EVENT`)
+   discriminator and one set of request/approve/verify handlers serves all
+   three — see below.
+9. **The approval step's proof-of-authorization** (upstream: a fresh
+   per-request Ed25519 signature over `path+signerPubkey+timestamp`,
+   matched against the user's stored primary-signer key) has a direct,
+   *simpler* equivalent already built into this port: every other route in
+   this codebase replaced "sign every request" with SIWE-once-then-session-
+   JWT (§2's very first substitution row). Reinventing a bespoke per-request
+   signature scheme for just this one flow would be inconsistent with that
+   decision for no security benefit. **The approval endpoint requires the
+   user's own existing wallet-session JWT** (`middleware.JWTAuth(...,
+   AudienceWalletSession)`) instead — the user must already be logged into
+   their own wallet (exactly the state they're in when scanning a partner's
+   QR code from within the wallet app) and the JWT's subject (their
+   address) must match the pending approval's target address.
+10. **Dead code, not ported**: `ServiceLinkApiKeyLog` (migrated, never
+    read or written), the `IncludePhoneNumbers`/`IncludeUserBalances` flags
+    (declared, never consulted anywhere — `ToServiceLinkUser()` always
+    includes phone/email regardless), the duplicate payment-request route
+    (`/v1/servicelinks/payment/request` and `/v1/trovo-api/payment/request`
+    were byte-for-byte identical handlers), and the unauthenticated
+    `token/refresh`/`token/verify` routes (no API-key check upstream
+    either — not genuinely servicelinks-specific, and this port's session
+    model has no refresh-token concept to begin with, per §2's SIWE→JWT
+    row).
+
+**Dropped outright, no Base equivalent (documented, not silently
+skipped):**
+
+- **`TokenizedAssetAuthorizationPermission`'s issuer-co-signs-a-client-XDR
+  flow** (server co-signs a trustline/`AUTH_REQUIRED` authorization with
+  the platform's Stellar issuer key). `TokenizedAsset.sol` (§4.9) has no
+  on-chain compliance/authorization-required concept at all by design —
+  "the chain enforces supply and ownership, the backend enforces who is
+  allowed to end up holding it" — so there is nothing on-chain left for a
+  partner to request authorization for.
+- **The generic single-account asset-mint primitive**
+  (`/v1/trovo-api/tokens/mint`, where any account holding an asset's
+  issuer keypair could pay out unlimited credit of that asset). Base
+  tokenized assets mint only through the ≥4-approver multisig workflow
+  built in §4.9 — there is no "an account decides to mint" primitive to
+  carry forward. Partner-driven minting in this port means participating
+  in that same workflow via API key (`CanManageTokenization` gates calling
+  `tokenization.Service.RequestMint`/`SignMintApproval` on the service
+  link's own owner account), not a standalone mint call.
+
+**What ports directly, chain-agnostically, as thin API-key-gated
+passthroughs to services this plan already built:**
+
+- Tokenized-asset info lookup, user-directory lookup (`userinfo`),
+  push-notification relay.
+- Partner-driven user onboarding (`CanCreateUsers`) — creates a
+  `users.User` row exactly like normal registration, stamped
+  `CreatedByServiceLinkID`.
+- KYC-status override (`CanUpdateKYC`, fixed per finding 6 above).
+- Balance / payment-history lookup (`CanReadBalances`) — the one part of
+  the original that already scoped correctly; ported as-is.
+- Partner-initiated payment (`CanSendPayments`) — reuses the existing
+  payments Build/Submit pattern (§4.1), with ownership scoping added per
+  finding 5.
+- Sub-wallet registration — maps directly onto `users.UserWallet`
+  (already-built "additional address" model, §4.1), registered for the
+  service link's own owner account.
+- The tokenization-management passthrough (apply, upload logo/documents,
+  confirm application, confirm/acknowledge fees, admin/marketplace
+  listing, deletion, primary-sale purchase) — thin wrappers over the
+  already-built tokenization services (§4.9), with the service link's own
+  owner user as the acting initiator/purchaser throughout, and
+  ownership-scoping enforced uniformly per finding 5 rather than only on
+  some routes.
+- Stakeholder document store — separate object storage from tokenization's
+  own document uploads, scoped by uploading `ServiceLinkID` per finding 7.
+
+Implementation notes (what actually shipped, beyond the design above):
+
+- `internal/components/servicelinks/models`: `ServiceLink` (the eleven
+  granular `Can*` capability booleans from finding 4, plus
+  `Verified`/`Inactive`/`Suspended`/`SuspensionReason`), `ServiceLinkApproval`
+  (the `Kind`-discriminated login/authorize/event model from finding 8),
+  `StakeholderDocument` (carrying `ServiceLinkID` per finding 7).
+- `internal/middleware/api_key_auth.go`: `APIKeyAuth(db)` resolves the
+  `ServiceLink` by `SHA256(rawKey)` once, attaches it to `gin.Context`
+  under `CtxServiceLink`, and rejects `Inactive`/`Suspended`/`!Verified`
+  centrally, for every route — findings 1–3.
+- `internal/storage.Blob` gained a `Delete(key)` method (previously
+  `Put`/`Get` only) so the stakeholder-document store can actually remove a
+  deleted document's content, not just its DB row.
+- `users.Service` gained three things this component needed:
+  `RegisterInput.CreatedByServiceLinkID` (threaded into `models.User` at
+  creation), `GetByID` (every `requireOwnedUser` check starts here), and
+  `SetKYCVerifiedLevel`/`RegisterWallet` (the KYC-override and sub-wallet
+  passthroughs). `payments`/`users`/`assets` controllers' `Init` functions
+  now all return their `*services.Service`, matching the pattern
+  tokenization/patron's controllers already established, so `main.go` can
+  wire them into servicelinks without a cross-component import cycle.
+- Unlike every other cross-component link in this port (KYC→Stablerail's
+  `OnBVNVerified`, fiat→tokenization's `CreateFiatInvoiceFunc` — function-
+  field callbacks, used specifically so two *peer* components never import
+  each other), `servicelinks/services.Service` imports
+  `users`/`payments`/`assets`/`tokenization`'s services packages directly.
+  This is a deliberate departure, documented in the package's own doc
+  comment: servicelinks is architecturally a facade/gateway in front of
+  all four, not a peer of any of them, so a callback hook for every one of
+  the dozen calls it needs would add indirection with no benefit.
+- `requireOwnedUser(serviceLinkID, userID)` is the one deny-by-default
+  check every route touching a specific user's wallet goes through
+  (finding 5/6): it rejects unless `user.CreatedByServiceLinkID != nil &&
+  *user.CreatedByServiceLinkID == serviceLinkID` — a nil value is *always*
+  rejected, never treated as "skip the check" the way the original's
+  KYC-override handler did.
+- The consolidated `ServiceLinkApproval` flow (finding 8) splits across the
+  API-key-authenticated partner side (`RequestApproval`, gated per `Kind`
+  by `CanLogin`/`CanRequestAuthorization`/`CanRegisterEvents`; `VerifyApproval`,
+  single-use — the approval row is deleted on redemption, closing off
+  replaying the same approval ID for a second session token) and the
+  wallet-session-JWT-authenticated user side (`GetApproval`, `Approve` —
+  both require the caller's verified session address to match the
+  approval's target user, per finding 9's SIWE-session substitution rather
+  than a bespoke signature scheme). A `LOGIN`-kind approval's `VerifyApproval`
+  mints a wallet-session JWT for the target user via the existing
+  `middleware.IssueToken`; `AUTHORIZE`/`EVENT` approvals return no token —
+  the partner's next call still goes through `requireOwnedUser` regardless
+  of what was approved.
+- Partner-onboarded users (`OnboardUser`) are a documented, deliberate
+  exception to `users.Service.Register`'s normal SIWE-proof-of-address-
+  ownership rule: the address comes from the partner's request body, not a
+  verified session, because a partner-onboarded user's wallet is
+  provisioned and held by the partner's own embedded-wallet
+  infrastructure — there is no SIWE session with this API to prove
+  ownership with. The trust boundary is `CanCreateUsers` plus the calling
+  service link being `Verified`, not a wallet signature.
+- `sharedconfig.GlobalConfig` gained `ServiceLinkApprovalTTL`
+  (`SERVICELINK_APPROVAL_TTL_MINUTES`, default 10) for how long a pending
+  approval stays actionable before it expires unredeemed.
+- Verification: `go build`/`vet`/`gofmt` clean across the whole module; 16
+  unit tests in `internal/components/servicelinks/services` (service-link
+  provisioning and its unique-short-name conflict, `requireOwnedUser`'s
+  three cases — organic user, wrong owner, correct owner — the KYC-override
+  ownership fix, the full login-approval flow end-to-end including the
+  minted JWT's subject and single-use redemption, wrong-caller and
+  wrong-service-link rejection, and the stakeholder-document store's
+  per-tenant isolation on both read and delete) plus 7 in
+  `internal/middleware` covering `APIKeyAuth`'s missing/unknown/unverified/
+  inactive/suspended rejection paths and that the raw key never equals its
+  stored hash.
 
 ### 4.12 Admin surface ("Trovo Manager" equivalent) — **planned**
 
@@ -1085,7 +1288,7 @@ needs, not strictly by the order features appear above.
 | 8 | On-chain infra: Solidity contracts + deployment helper, price reading, log polling (§5) | Needed before Phase 9 | **DONE** |
 | 9 | Tokenization (§4.9) | Phase 8, Phase 1 (closed-group reuse), Phase 4 (fiat purchase flow) | **DONE** (partner-API passthrough deferred to Phase 11 — see §4.9) |
 | 10 | Patron/membership (§4.10) | Phase 0 | **DONE** |
-| 11 | Servicelinks partner API (§4.11), including the API-key auth middleware (§5) | Nearly everything above, since it's a passthrough layer | |
+| 11 | Servicelinks partner API (§4.11), including the API-key auth middleware (§5) | Nearly everything above, since it's a passthrough layer | **DONE** |
 | 12 | Admin surface (§4.12) | Whatever subsystems exist by then | |
 | 13 | Reference data, shortlinks, geo-IP, Discord alerting parity (§4.13) | Can run in parallel with any phase | |
 | 14 | Full integration pass: build/vet/test, smoke test against Base Sepolia, README/docs polish | Everything | |

@@ -20,6 +20,9 @@ type Blob interface {
 	Put(key string, data io.Reader) (string, error)
 	// Get retrieves previously stored data.
 	Get(key string) (io.ReadCloser, error)
+	// Delete removes previously stored data. Deleting a key that doesn't
+	// exist is not an error.
+	Delete(key string) error
 }
 
 // LocalDiskBlob stores files under a local directory - fine for development
@@ -57,4 +60,12 @@ func (b *LocalDiskBlob) Put(key string, data io.Reader) (string, error) {
 func (b *LocalDiskBlob) Get(key string) (io.ReadCloser, error) {
 	fullPath := filepath.Join(b.baseDir, filepath.Clean("/"+key))
 	return os.Open(fullPath)
+}
+
+func (b *LocalDiskBlob) Delete(key string) error {
+	fullPath := filepath.Join(b.baseDir, filepath.Clean("/"+key))
+	if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }

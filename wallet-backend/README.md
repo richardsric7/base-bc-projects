@@ -497,6 +497,61 @@ reproduced.
 - A background worker (main.go, 30s poll) promotes queued upgrades once
   their effective date arrives.
 
+## Servicelinks partner API
+
+An API-key-authenticated surface letting a third-party service act on
+behalf of wallet users with scoped permissions. See `PLAN.md` §4.11 for the
+full design and a cluster of authorization bugs found in the original and
+fixed here (plaintext API keys, missing status checks, an overloaded
+permission flag, missing wallet-ownership scoping, a broken KYC-override
+check, and an unscoped document store).
+
+Admin (`POST /v1/admin/servicelinks`, JWT `AudienceAdmin`) provisions a
+service link with eleven independently-grantable capabilities
+(`canLogin`, `canRequestAuthorization`, `canRegisterEvents`,
+`canViewUserInfo`, `canSendPushNotifications`, `canLookupTokenInfo`,
+`canCreateUsers`, `canUpdateKyc`, `canSendPayments`, `canReadBalances`,
+`canManageTokenization`) and returns the raw API key exactly once — only
+its SHA-256 hash is ever stored. A new service link starts unverified;
+`POST /v1/admin/servicelinks/:id/verify` (and `/suspend`, `/reactivate`)
+manage its lifecycle. Every partner-facing route requires
+`X-API-Key: <raw key>` and is rejected centrally if the service link is
+inactive, suspended, or not yet verified.
+
+Partner routes (`/v1/partner/...`, each gated by its own capability):
+
+- `POST /users` (`canCreateUsers`) onboards a user on the partner's behalf.
+- `GET /users/:userId` (`canViewUserInfo`), `PUT /users/:userId/kyc`
+  (`canUpdateKyc`), `POST /users/:userId/push` (`canSendPushNotifications`),
+  `GET /tokens/:symbol` (`canLookupTokenInfo`).
+- `POST /users/:userId/payments/build` and `/submit`, `GET
+  /users/:userId/payments`, `GET /users/:userId/balance`, `POST
+  /users/:userId/wallets` (`canSendPayments`/`canReadBalances`).
+- `GET /tokenization/:assetId`, `POST
+  /users/:userId/tokenization/:assetId/purchase/build` and `/record`, `GET
+  /users/:userId/tokenization/subscriptions` (`canManageTokenization`,
+  thin passthroughs onto the tokenization component).
+- `POST /approvals`, `GET /approvals/:id/verify` — the consolidated
+  login/authorize/event consent flow (one `ServiceLinkApproval` model with
+  a `Kind` discriminator replaces three near-identical flows upstream). A
+  `LOGIN`-kind approval, once the named user approves it, redeems into a
+  wallet-session JWT for that user.
+- `POST /documents`, `GET /documents/:id`, `DELETE /documents/:id` — a
+  stakeholder-document store scoped to the calling service link's own
+  tenant (no ownership record at all upstream — an IDOR).
+
+The end-user side of the approval flow is wallet-session-JWT-authenticated,
+not API-key: `GET /v1/approvals/:id` and `POST /v1/approvals/:id/approve`
+require the caller to already be signed into their own wallet (the state
+they're in when scanning a partner's QR/deep link) and match the
+approval's target user.
+
+Every route that names a specific user enforces
+`user.CreatedByServiceLinkID == callingServiceLink.ID` before acting on
+that user's wallet — deny-by-default, including when the field is `nil`
+(an organically-registered user), fixing the original's KYC-override check
+which skipped this check entirely on `nil`.
+
 ## Adding a real integration
 
 The `notify`, `storage`, `kyc`, `fiat`, `rates`, and `alerting` packages are

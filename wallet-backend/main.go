@@ -25,6 +25,7 @@ import (
 	marketModels "wallet-backend/internal/components/market/models"
 	patronModels "wallet-backend/internal/components/patron/models"
 	paymentsModels "wallet-backend/internal/components/payments/models"
+	servicelinksModels "wallet-backend/internal/components/servicelinks/models"
 	tokenizationModels "wallet-backend/internal/components/tokenization/models"
 	usersModels "wallet-backend/internal/components/users/models"
 
@@ -40,6 +41,7 @@ import (
 	paymentsControllers "wallet-backend/internal/components/payments/controllers"
 	ratesControllers "wallet-backend/internal/components/rates/controllers"
 	rootControllers "wallet-backend/internal/components/root/controllers"
+	servicelinksControllers "wallet-backend/internal/components/servicelinks/controllers"
 	sharedaccessControllers "wallet-backend/internal/components/sharedaccess/controllers"
 	sharedaccessModels "wallet-backend/internal/components/sharedaccess/models"
 	stablerailControllers "wallet-backend/internal/components/stablerail/controllers"
@@ -76,6 +78,7 @@ func allModels() []interface{} {
 	models = append(models, marketModels.Models...)
 	models = append(models, tokenizationModels.Models...)
 	models = append(models, patronModels.Models...)
+	models = append(models, servicelinksModels.Models...)
 	return models
 }
 
@@ -210,6 +213,8 @@ func main() {
 
 		PatronFeeWalletSalt: env.PatronFeeWalletSalt,
 		PatronVATPercent:    env.PatronVATPercent,
+
+		ServiceLinkApprovalTTL: durationFromMinutes(env.ServiceLinkApprovalTTLMinutes),
 	}
 
 	router := gin.Default()
@@ -218,9 +223,9 @@ func main() {
 
 	rootControllers.Init(router, gc)
 	authControllers.Init(router, gc)
-	usersControllers.Init(router, gc)
-	assetsControllers.Init(router, gc)
-	paymentsControllers.Init(router, gc)
+	usersSvc := usersControllers.Init(router, gc)
+	assetsSvc := assetsControllers.Init(router, gc)
+	paymentsSvc := paymentsControllers.Init(router, gc)
 	swapsControllers.Init(router, gc)
 	sharedaccessControllers.Init(router, gc)
 	ratesControllers.Init(router, gc)
@@ -233,6 +238,7 @@ func main() {
 	marketControllers.Init(router, gc)
 	tokenizationSvc := tokenizationControllers.Init(router, gc)
 	patronSvc := patronControllers.Init(router, gc)
+	servicelinksControllers.Init(router, gc, usersSvc, paymentsSvc, assetsSvc, tokenizationSvc)
 
 	// Wire the KYC component's Doja BVN-completion hook to Stablerail
 	// onboarding - see kyc/services.Service.OnBVNVerified's doc comment

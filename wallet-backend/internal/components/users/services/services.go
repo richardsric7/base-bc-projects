@@ -33,6 +33,10 @@ type RegisterInput struct {
 	Username string
 	Email    string
 	Address  string
+	// CreatedByServiceLinkID is nil for a normal self-registration; a
+	// servicelinks partner onboarding one of its own users sets it to
+	// their own ServiceLink.ID (see internal/components/servicelinks).
+	CreatedByServiceLinkID *uint
 }
 
 // Register creates a new user profile around an address that has already
@@ -70,10 +74,11 @@ func (s *Service) Register(input RegisterInput) (*models.User, error) {
 	}
 
 	user := models.User{
-		Username:  input.Username,
-		Email:     input.Email,
-		Address:   input.Address,
-		KYCStatus: "pending",
+		Username:               input.Username,
+		Email:                  input.Email,
+		Address:                input.Address,
+		KYCStatus:              "pending",
+		CreatedByServiceLinkID: input.CreatedByServiceLinkID,
 	}
 
 	txErr := s.DB.Transaction(func(tx *gorm.DB) error {
@@ -119,6 +124,44 @@ func (s *Service) GetByAddress(address string) (*models.User, error) {
 		return nil, apperrors.Internal("failed to load user")
 	}
 	return &user, nil
+}
+
+// GetByID fetches a user profile by primary key.
+func (s *Service) GetByID(userID uint) (*models.User, error) {
+	var user models.User
+	if err := s.DB.First(&user, userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperrors.NotFound("user not found")
+		}
+		return nil, apperrors.Internal("failed to load user")
+	}
+	return &user, nil
+}
+
+// RegisterWallet adds an additional EVM address a user controls (e.g. a
+// hardware-wallet address, or a sub-wallet a servicelinks partner has the
+// user provision) alongside their primary wallet.
+func (s *Service) RegisterWallet(userID uint, address, label string) (*models.UserWallet, error) {
+	if !validators.IsValidAddress(address) {
+		return nil, apperrors.BadRequest("invalid EVM address")
+	}
+	wallet := models.UserWallet{UserID: userID, Address: address, Label: label}
+	if err := s.DB.Create(&wallet).Error; err != nil {
+		return nil, apperrors.Conflict("this address is already registered")
+	}
+	return &wallet, nil
+}
+
+// SetKYCVerifiedLevel directly sets a user's KYC verification level -
+// used by internal/components/kyc's own vendor webhook flow and by
+// internal/components/servicelinks' partner-driven KYC-status override
+// (see PLAN.md §4.11 finding 6 for the ownership check callers must apply
+// before calling this - this method itself trusts the caller entirely).
+func (s *Service) SetKYCVerifiedLevel(userID uint, level int) error {
+	if err := s.DB.Model(&models.User{}).Where("id = ?", userID).Update("kyc_verified_level", level).Error; err != nil {
+		return apperrors.Internal("failed to update KYC status")
+	}
+	return nil
 }
 
 // Delete removes a user account. Only the account owner (verified by the

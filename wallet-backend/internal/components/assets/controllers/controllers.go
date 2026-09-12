@@ -11,8 +11,10 @@ import (
 	"wallet-backend/internal/sharedconfig"
 )
 
-// Init registers the assets component's routes on router.
-func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
+// Init registers the assets component's routes on router and returns the
+// underlying Service so main.go can wire it into other components that
+// need curated-token/balance lookups (see servicelinks).
+func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	svc := services.New(gc.DB, gc.Blockchain)
 
 	router.GET("/v1/assets", listCurated(svc))
@@ -22,6 +24,8 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
 	authed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
 	authed.POST("/approve/build", buildApprove(svc))
 	authed.POST("/approve/submit", submit(svc))
+
+	return svc
 }
 
 func listCurated(svc *services.Service) gin.HandlerFunc {

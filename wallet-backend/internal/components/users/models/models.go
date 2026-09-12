@@ -28,6 +28,16 @@ type User struct {
 	Activated bool      `gorm:"default:false" json:"activated"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+	// CreatedByServiceLinkID marks an account onboarded by a servicelinks
+	// partner (see internal/components/servicelinks) rather than
+	// self-registered - nil for an organic registration. Every servicelinks
+	// route that acts on a specific user's wallet (payments, KYC overrides,
+	// tokenization actions) requires this to equal the calling service
+	// link's own ID, checked centrally rather than per-route (PLAN.md
+	// §4.11 findings 5 and 6 - the original had this scoping only on some
+	// routes, and its KYC-override check treated a nil value here as "skip
+	// the check" instead of "deny").
+	CreatedByServiceLinkID *uint `gorm:"index" json:"createdByServiceLinkId,omitempty"`
 }
 
 // UserWallet lets a user register additional EVM addresses they control

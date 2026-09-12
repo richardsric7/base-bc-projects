@@ -18,8 +18,10 @@ import (
 	"wallet-backend/internal/sharedconfig"
 )
 
-// Init registers the users component's routes on router.
-func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
+// Init registers the users component's routes on router and returns the
+// underlying Service so main.go can wire it into other components that
+// need to look up or register users (see servicelinks).
+func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	svc := services.New(gc.DB, gc.Mailer, gc.RecoveryAuthoritySalt, gc.RecoveryOTPTTL)
 
 	public := router.Group("/v1/users")
@@ -41,6 +43,8 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
 	recovery := router.Group("/v1/account-recovery")
 	recovery.POST("/:username/request-otp", requestRecoveryOTP(svc))
 	recovery.POST("/:username/recover", recoverAccount(svc))
+
+	return svc
 }
 
 type registerRequest struct {

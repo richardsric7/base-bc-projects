@@ -11,8 +11,10 @@ import (
 	"wallet-backend/internal/sharedconfig"
 )
 
-// Init registers the payments component's routes on router.
-func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
+// Init registers the payments component's routes on router and returns
+// the underlying Service so main.go can wire it into other components
+// that build/submit payments on a user's behalf (see servicelinks).
+func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	svc := services.New(gc.DB, gc.Blockchain)
 
 	authed := router.Group("/v1/payments")
@@ -20,6 +22,8 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
 	authed.POST("/build", buildPayment(svc))
 	authed.POST("/submit", submitPayment(svc))
 	authed.GET("/history/:address", history(svc))
+
+	return svc
 }
 
 type buildPaymentRequest struct {

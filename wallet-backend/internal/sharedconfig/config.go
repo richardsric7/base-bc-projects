@@ -123,6 +123,11 @@ type GlobalConfig struct {
 	// caution as every other derived fee-collection address in this port.
 	PatronFeeWalletSalt string
 	PatronVATPercent    float64
+
+	// ServiceLinkApprovalTTL is how long a partner's login/authorize/event
+	// consent request (see internal/components/servicelinks) stays pending
+	// before it expires unactioned.
+	ServiceLinkApprovalTTL time.Duration
 }
 
 // Env holds every raw environment-derived setting. Load it once in main and
@@ -192,6 +197,8 @@ type Env struct {
 
 	PatronFeeWalletSalt string
 	PatronVATPercent    float64
+
+	ServiceLinkApprovalTTLMinutes int
 
 	Organisation string
 }
@@ -267,6 +274,8 @@ func LoadEnv() Env {
 
 		PatronFeeWalletSalt: getEnv("PATRON_FEE_WALLET_SALT", "dev-only-change-me"),
 		PatronVATPercent:    getEnvFloat64("PATRON_VAT_PERCENT", 0),
+
+		ServiceLinkApprovalTTLMinutes: getEnvInt("SERVICELINK_APPROVAL_TTL_MINUTES", 10),
 
 		Organisation: getEnv("ORGANISATION", "wallet-backend"),
 	}
