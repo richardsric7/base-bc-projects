@@ -12,10 +12,11 @@
 > (every route, every model, every background worker — see §4 for the
 > full inventory this plan is checked against).
 >
-> **Current implementation status**: only §4.1 (core wallet: auth, users,
-> assets, payments, swaps, announcements, root, callbacks) is built and
-> pushed. Everything else in §4 is planned but not yet implemented — this
-> document is the checklist and design for that remaining work, sequenced
+> **Current implementation status**: §4.1 (core wallet: auth, users,
+> assets, payments, swaps, announcements, root, callbacks) and §4.2
+> (shared/multi-party wallet access) are built and pushed. Everything else
+> in §4 is planned but not yet implemented — this document is the checklist
+> and design for that remaining work, sequenced
 > in §10.
 
 ## Purpose
@@ -123,7 +124,7 @@ announcements (public read + JWT-admin write), generic webhook stub, health
 check. See the codebase itself and the v2 plan content preserved in git
 history for the detailed original-vs-Base mapping table.
 
-### 4.2 Shared/multi-party wallet access — **planned**
+### 4.2 Shared/multi-party wallet access — **DONE**
 
 Original: `PendingAuth`, `PendingTransactionSignature`, `ClosedGroup`,
 `UserClosedGroup`, `WalletPermission`; routes under `/v1/shared-access/...`
@@ -522,10 +523,10 @@ route/wiring that upstream itself never finished, unless told otherwise.
 Sequenced by dependency and by how much new infrastructure each phase
 needs, not strictly by the order features appear above.
 
-| Phase | Scope | Depends on |
-|---|---|---|
+| Phase | Scope | Depends on | Status |
+|---|---|---|---|
 | 0 | Core wallet/auth/payments/swaps/assets (§4.1) | — | **DONE** |
-| 1 | Shared/multi-party wallet access (§4.2) | Phase 0 |
+| 1 | Shared/multi-party wallet access (§4.2) | Phase 0 | **DONE** |
 | 2 | Account security & recovery (§4.3) | Phase 0 |
 | 3 | KYC — Sumsub + Doja (§4.4) | Phase 0 |
 | 4 | Fiat payments & activation — Flutterwave (§4.5) | Phase 0, benefits from Phase 3 (activation often gated on KYC) |

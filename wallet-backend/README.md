@@ -1,8 +1,10 @@
 # wallet-backend
 
-A base, brand-agnostic wallet backend for **Base** (Coinbase's OP-Stack
+A full port of the Trovo Wallet API to **Base** (Coinbase's OP-Stack
 Ethereum L2). See [`PLAN.md`](./PLAN.md) for the full architecture
-rationale - this README is the practical "how do I run it" companion.
+rationale, the subsystem-by-subsystem port plan, and what's implemented so
+far vs. still planned - this README is the practical "how do I run it"
+companion for what exists today.
 
 Wallets in this template are **non-custodial**: the server only ever handles
 a user's EVM *address*. Every action that touches a user's own account (a
@@ -71,9 +73,15 @@ internal/
     ├── assets/         curated-token catalog, balance lookup, allowance build/submit
     ├── payments/       build/submit native or ERC-20 transfer, payment history
     ├── swaps/          generic, router-address-configurable DEX call builder
+    ├── sharedaccess/   multi-party wallet access: propose/approve/execute by threshold
     ├── announcements/  in-app announcements (public read, JWT-admin write)
     └── callbacks/      generic webhook receiver stub
 ```
+
+Everything else in `PLAN.md` §4 (account recovery, KYC, fiat rails,
+crypto deposit/withdrawal, market making, tokenization, patron
+memberships, the servicelinks partner API, the admin surface) is planned
+but not yet implemented - see the roadmap in `PLAN.md` §10.
 
 ## Auth
 
@@ -97,6 +105,32 @@ internal/
   is included in the base template). A wallet-session token can never be
   used against an admin route or vice versa - see the `Audience*` constants
   in `internal/middleware/jwt_auth.go`.
+
+## Shared/multi-party wallet access
+
+A group of members controls one Base wallet via a threshold of off-chain
+approvals rather than any single private key - see `PLAN.md` §2 and §4.2
+for the full design and its tradeoffs versus a smart-contract wallet.
+
+1. `POST /v1/shared-access/groups` with `{"name", "threshold", "members": [{"address", "role"}]}`
+   (`role` is `INITIATOR`, `APPROVER`, or `VIEW_ONLY`) → creates the group
+   and derives its Base address.
+2. An `INITIATOR` proposes an action: `POST /v1/shared-access/actions` with
+   either `{"groupId", "kind": "payment", "recipient", "tokenAddress", "amount"}`
+   or `{"groupId", "kind": "swap"|"contract_call", "to", "valueWei", "data"}`.
+3. Any `APPROVER` fetches `GET /v1/shared-access/actions/:id` to get the
+   exact `messageToSign`, signs it with `personal_sign`, and calls
+   `POST /v1/shared-access/actions/:id/approve` with `{"signature"}`.
+4. Once the group's `threshold` of distinct approvers has signed, the
+   server automatically derives the group's key and executes the
+   transaction - no further action needed. If execution fails (e.g. a
+   transient RPC error), approving again with the same signature retries it.
+5. An `APPROVER` may instead `POST /v1/shared-access/actions/:id/reject`
+   with `{"reason"}`.
+
+`GET /v1/shared-access/actions` lists pending actions for the caller's
+groups; `GET /v1/shared-access/balance/:groupId` (optional `?token=`)
+checks the group wallet's balance.
 
 ## Adding a real integration
 
