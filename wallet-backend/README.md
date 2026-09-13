@@ -41,6 +41,7 @@ docker compose up
 - [go-ethereum](https://github.com/ethereum/go-ethereum) for all Base/EVM interaction - Base speaks standard Ethereum JSON-RPC, so no chain-specific SDK is needed
 - [siwe-go](https://github.com/spruceid/siwe-go) for Sign-In With Ethereum (EIP-4361)
 - Redis for optional response/data caching
+- [go-qrcode](https://github.com/skip2/go-qrcode) for shortlink QR code generation
 
 ## Project layout
 
@@ -53,19 +54,21 @@ see `internal/sharedconfig/config.go`.
 ```
 internal/
 ├── sharedconfig/   GlobalConfig (DI struct) + Env loader
-├── db/             OpenDB (postgres/sqlite), MigrateDB
+├── db/             OpenDB (postgres/sqlite), MigrateDB, connection-pool limits/stats
 ├── cache/          Cache interface + Redis impl + no-op
 ├── network/        Base/EVM integration - the only package importing go-ethereum
-├── middleware/      CORS, SIWE-session + admin JWT auth
+├── middleware/      CORS, SIWE-session + admin JWT auth, servicelinks API-key auth
 ├── cryptoutil/       secp256k1 key derivation, AES-GCM, bcrypt, hashing
 ├── apperrors/        GenericError + typed constructors
 ├── validators/       format validators (EIP-55 address checks, etc.)
 ├── notify/           Mailer / SMSProvider / PushProvider + default impls
-├── storage/          Blob interface + local-disk impl
+├── storage/          Blob interface (Put/Get/Delete) + local-disk impl
 ├── kyc/              Provider interface + ManualKYCProvider stub
 ├── fiat/             Processor interface (no default impl - see doc comment)
 ├── rates/            Provider interface + static/fixture impl
 ├── alerting/         Notifier interface + Discord webhook impl
+├── geoip/            Provider interface + NoopProvider + ipapi.co impl
+├── contracts/        embedded Solidity ABI/bytecode + deployment helpers
 └── components/
     ├── root/          health check reporting the configured chain ID
     ├── auth/           SIWE nonce issuance + verification -> session JWT
@@ -75,17 +78,30 @@ internal/
     ├── swaps/          generic, router-address-configurable DEX call builder
     ├── sharedaccess/   multi-party wallet access: propose/approve/execute by threshold
     ├── announcements/  in-app announcements (public read, JWT-admin write)
-    └── callbacks/      generic webhook receiver stub
+    ├── callbacks/      generic webhook receiver stub
+    ├── kyc/            Sumsub + Doja identity verification
+    ├── fiat/           fiat payment invoices + starter-gas/reward-token activation
+    ├── stablerail/     NGN on/off-ramp onboarding, virtual accounts, withdrawals
+    ├── crypto/         OneLiquidity-backed crypto deposit crediting/withdrawal
+    ├── market/         off-chain order-book market making with escrow settlement
+    ├── tokenization/   real-world-asset tokenization: apply, vet, mint, buy, exit
+    ├── patron/         subscription/membership tiers
+    ├── servicelinks/   API-key-authenticated third-party partner surface
+    ├── reference/      country catalog/config, dynamic client-form definitions
+    └── shortlink/      self-hosted short links + QR codes
 ```
 
-Everything else in `PLAN.md` §4 (account recovery, KYC, fiat rails,
-crypto deposit/withdrawal, market making, tokenization, patron
-memberships, the servicelinks partner API, the admin surface) is planned
-but not yet implemented - see the roadmap in `PLAN.md` §10.
+See `PLAN.md` §4 for the full design rationale behind each component and
+§10 for the phase-by-phase build roadmap (every phase through 14 is
+**DONE**).
 
 ## Auth
 
-- **Primary API** (`/v1/users`, `/v1/assets`, `/v1/payments`, `/v1/swaps`):
+Three independent auth mechanisms, each scoped to its own surface so a
+credential for one can never be replayed against another:
+
+- **Primary API** (most `/v1/...` routes across every component - users,
+  assets, payments, swaps, shared-access, tokenization, patron, and more):
   Sign-In With Ethereum (SIWE, EIP-4361) exchanged for a session JWT.
 
   1. `GET /v1/auth/nonce` → `{"nonce": "..."}`
@@ -99,12 +115,18 @@ but not yet implemented - see the roadmap in `PLAN.md` §10.
   See `internal/components/auth/services` for the verification flow and
   `internal/middleware/jwt_auth.go` for the session-JWT mechanics.
 
-- **Admin surface** (`POST /v1/admin/announcements`): a separate-audience
-  Bearer JWT issued via `middleware.IssueToken(..., middleware.AudienceAdmin, ...)`
-  (wire up a real admin login flow before shipping this to production - none
-  is included in the base template). A wallet-session token can never be
-  used against an admin route or vice versa - see the `Audience*` constants
-  in `internal/middleware/jwt_auth.go`.
+- **Admin surface** (`/v1/admin/...` across every component - see
+  "Admin surface" below): a separate-audience Bearer JWT issued via
+  `middleware.IssueToken(..., middleware.AudienceAdmin, ...)` (wire up a
+  real admin login flow before shipping this to production - none is
+  included in the base template). A wallet-session token can never be used
+  against an admin route or vice versa - see the `Audience*` constants in
+  `internal/middleware/jwt_auth.go`.
+
+- **Servicelinks partner API** (`/v1/partner/...` - see "Servicelinks
+  partner API" below): a SHA-256-hashed API key sent as `X-API-Key`,
+  resolved and status-checked once by `middleware.APIKeyAuth` and scoped
+  per-route by eleven granular capability flags.
 
 ## Shared/multi-party wallet access
 

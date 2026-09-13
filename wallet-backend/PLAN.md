@@ -12,12 +12,11 @@
 > (every route, every model, every background worker — see §4 for the
 > full inventory this plan is checked against).
 >
-> **Current implementation status**: §4.1 (core wallet: auth, users,
-> assets, payments, swaps, announcements, root, callbacks) and §4.2
-> (shared/multi-party wallet access) are built and pushed. Everything else
-> in §4 is planned but not yet implemented — this document is the checklist
-> and design for that remaining work, sequenced
-> in §10.
+> **Current implementation status**: every subsystem in §4 (§4.1 through
+> §4.13) is built, tested, and pushed — the full 14-phase roadmap in §10 is
+> **DONE**. This document remains the design record and rationale for every
+> port decision (what changed, what was substituted, what was dropped and
+> why), not a pending checklist.
 
 ## Purpose
 
@@ -1338,34 +1337,42 @@ integration this revision adds:
 
 ## 7. Target module layout (revised for full scope)
 
+**As actually built** (see README's "Project layout" for the reader-facing
+version of this same tree). A few names changed from the original plan
+below during implementation: `recovery` was folded into `users` (§4.3),
+`marketmaking` shipped as `market` (§4.8), and there is no standalone
+`admin` component — each subsystem's admin routes live in that
+subsystem's own `controllers` package under `/v1/admin/...`, gated by
+`middleware.AudienceAdmin` (§4.12).
+
 ```
 wallet-backend/
 ├── main.go
 ├── contracts/                      # Solidity sources + compiled ABI/bytecode (§5)
-│   ├── MintableToken.sol
+│   ├── TokenizedAsset.sol
 │   └── Sale.sol
 ├── internal/
-│   ├── sharedconfig/  db/  cache/  apperrors/  cryptoutil/  validators/   # unchanged
+│   ├── sharedconfig/  db/  cache/  apperrors/  cryptoutil/  validators/
 │   ├── network/                     # + on-chain price reads, log polling, SignAndSubmitTx
 │   ├── middleware/                   # + APIKeyAuth for servicelinks
-│   ├── notify/ storage/ rates/ alerting/          # unchanged interfaces
-│   ├── kyc/                          # + SumsubProvider, DojaProvider
-│   ├── fiat/                         # + FlutterwaveProcessor, StablerailProcessor
-│   ├── shortlink/                    # NEW: self-hosted dynamic-link + QR replacement
+│   ├── notify/ storage/ rates/ alerting/          # + geoip (§4.13)
+│   ├── kyc/                          # SumsubProvider-shaped REST client, DojaProvider webhook processing
+│   ├── fiat/                         # Processor interface; FlutterwaveProcessor implements it
+│   ├── contracts/                    # embedded Solidity ABI/bytecode + deployment helpers (§5)
 │   └── components/
-│       ├── root/ announcements/ callbacks/                  # unchanged
-│       ├── auth/ users/ assets/ payments/ swaps/             # done (§4.1)
-│       ├── sharedaccess/             # NEW (§4.2)
-│       ├── recovery/                 # NEW (§4.3) — or folded into users, TBD during implementation
-│       ├── kyc/                      # NEW (§4.4) — HTTP layer over internal/kyc
-│       ├── fiat/                     # NEW (§4.5) — HTTP layer over internal/fiat
-│       ├── stablerail/               # NEW (§4.6)
-│       ├── crypto/                   # NEW (§4.7) — deposit/withdrawal
-│       ├── marketmaking/             # NEW (§4.8, pending the design decision)
-│       ├── tokenization/             # NEW (§4.9) — the big one
-│       ├── patron/                   # NEW (§4.10)
-│       ├── servicelinks/             # NEW (§4.11)
-│       └── admin/                    # NEW (§4.12)
+│       ├── root/ announcements/ callbacks/
+│       ├── auth/ users/ assets/ payments/ swaps/             # §4.1
+│       ├── sharedaccess/             # §4.2
+│       ├── kyc/                      # §4.4 — HTTP layer over internal/kyc
+│       ├── fiat/                     # §4.5 — HTTP layer over internal/fiat
+│       ├── stablerail/               # §4.6
+│       ├── crypto/                   # §4.7 — deposit/withdrawal
+│       ├── market/                   # §4.8
+│       ├── tokenization/             # §4.9 — the big one
+│       ├── patron/                   # §4.10
+│       ├── servicelinks/             # §4.11
+│       ├── reference/                # §4.13 — country catalog/config, dynamic forms
+│       └── shortlink/                # §4.13 — self-hosted dynamic-link + QR replacement
 └── docs/
 ```
 
@@ -1426,7 +1433,21 @@ needs, not strictly by the order features appear above.
 | 11 | Servicelinks partner API (§4.11), including the API-key auth middleware (§5) | Nearly everything above, since it's a passthrough layer | **DONE** |
 | 12 | Admin surface (§4.12) | Whatever subsystems exist by then | **DONE** |
 | 13 | Reference data, shortlinks, geo-IP, Discord alerting parity (§4.13) | Can run in parallel with any phase | **DONE** |
-| 14 | Full integration pass: build/vet/test, smoke test against Base Sepolia, README/docs polish | Everything | |
+| 14 | Full integration pass: build/vet/test, smoke test against Base Sepolia, README/docs polish | Everything | **DONE** |
+
+Phase 14 verification: `gofmt`/`go build`/`go vet`/`go mod tidy` clean
+across the whole module; `go test ./... -race` passes with no failures
+(the `covdata` warnings some no-test-file packages emit under
+`-coverprofile` are a sandbox toolchain quirk, not a test failure - every
+package that has tests reports `ok`). The full binary was booted against
+the live public Base Sepolia RPC end-to-end: `GET /` reported
+`{"status":"ok","chainId":84532}` (live chain connectivity), SIWE nonce
+issuance, the patron/reference and country-catalog public routes, and
+every admin/API-key/wallet-session-gated route checked all rejected an
+unauthenticated request with 401 as expected. README's project layout,
+auth section, and component list were brought up to date to list every
+component actually built (previously stale from the very first, much
+smaller revision of this plan).
 
 ## 11. Open decisions needing input before implementation proceeds
 
