@@ -25,6 +25,14 @@ In the common case these are the same mnemonic (self-custody, one wallet
 app also supports them being two *different* mnemonics, which requires a
 small `wallet-backend` contract change identified in §6 below.
 
+**Connectivity model**: unlocking the local vault and viewing
+already-known wallet data (addresses, last-fetched balances/history) both
+work fully offline — neither touches `wallet-backend`. Every
+transaction (payment or swap, from building the unsigned tx through
+submitting the signed one) requires a live, verified connection and is
+not offered at all while offline. §6.4 covers the connectivity-status
+architecture and the online/offline indicator this requires.
+
 ## 1. Audit: what already exists to build on and what not to repeat
 
 ### 1.1 Theme source: `trovo-wallet-monorepo/web`
@@ -92,7 +100,7 @@ entire job is to replace them with something stronger:
    most developer browsers, and not reliably absent in a compromised
    user's browser either) can inspect the entire state tree, and Redux
    state has no secrecy boundary from any script running on the page —
-   including an XSS payload. §5.1/§7.2 draw a hard line: no key material,
+   including an XSS payload. §5.1/§6.2 draw a hard line: no key material,
    decrypted or encrypted, ever enters Redux, React state, `localStorage`,
    or any other main-thread-readable store.
 4. **A layered, home-grown key hierarchy** — the "password" itself is
@@ -365,16 +373,20 @@ wallet-web/
         ├── core/
         │   └── walletCoreClient.ts # typed postMessage wrapper the rest of the app calls - never touches WASM directly
         ├── api/                    # wallet-backend REST client: auth, users, payments, assets, swaps
-        ├── store/                  # Redux Toolkit - UI/app state ONLY (see §7.2 for the hard boundary)
-        ├── components/             # Button, ButtonSecondary, TextInput, Brand - ported theme (§1.1)
+        ├── connectivity/
+        │   └── connectivityMonitor.ts # navigator.onLine + active health-ping against GET / (§6.4)
+        ├── cache/
+        │   └── offlineCache.ts     # IndexedDB store for last-known-good balances/tokens/history (§6.4) - non-secret, separate from the vault
+        ├── store/                  # Redux Toolkit - UI/app state ONLY (see §6.2 for the hard boundary); includes connectivity status (§6.4)
+        ├── components/             # Button, ButtonSecondary, TextInput, Brand, ConnectivityIndicator - ported theme (§1.1)
         └── pages/
             ├── onboarding/          # create new wallet vs. import existing
             ├── importSigner/        # signer mnemonic import + password set
             ├── importPrimaryWallet/ # primary wallet mnemonic import (§3 mode 2) or "same as signer" (mode 1)
-            ├── unlock/               # password-gated unlock screen (shown on every fresh session)
-            ├── dashboard/            # balances, curated tokens, payment history (via wallet-payment-history-engine)
-            ├── send/                 # build → sign (via worker) → submit payment flow
-            ├── swap/                 # build → sign → submit approval + swap flow
+            ├── unlock/               # password-gated unlock screen (shown on every fresh session) - works fully offline
+            ├── dashboard/            # balances, curated tokens, payment history - live when online, cached-with-timestamp when offline (§6.4)
+            ├── send/                 # build → sign (via worker) → submit payment flow - disabled while offline (§6.4)
+            ├── swap/                 # build → sign → submit approval + swap flow - disabled while offline (§6.4)
             └── settings/             # lock timeout, export/rotate, remove wallet (wipe)
 ```
 
@@ -409,6 +421,75 @@ At no point does any signed-transaction payload, mnemonic, or private key
 touch `wallet-backend` — only addresses, unsigned tx requests, and signed
 tx hex ever cross the network boundary, in either direction.
 
+### 6.4 Connectivity awareness: offline login/view, online-only transactions
+
+Three distinct capabilities need three distinct network requirements, and
+conflating them is exactly the kind of ambiguity that leads to either a
+frustrating "can't do anything without internet" wallet or an unsafe
+"builds a transaction against stale data while offline" one:
+
+| Capability | Network required? | Why |
+|---|---|---|
+| Unlock (decrypt a role's vault) | No | Pure local Argon2id + AES-GCM operation inside the Worker (§5) — no call to `wallet-backend` at all. |
+| View wallets (addresses, last-fetched balances/tokens/history) | No | Rendered from `cache/offlineCache.ts` (below) when offline; refreshed from `wallet-backend`/`wallet-payment-history-engine` when online. |
+| Any transaction (payment build/sign/submit, swap approve/build/sign/submit) | **Yes, verified** | Building a tx needs a fresh server-resolved nonce and current EIP-1559 gas fees (§2's `/payments/build`); submitting needs to broadcast. Signing an unsigned tx offline against stale gas/nonce data would silently risk a failed or stuck transaction, so the whole flow — not just the network calls inside it — is gated on confirmed connectivity, per this plan's opening requirement (§0). |
+
+**Detecting connectivity** (`connectivity/connectivityMonitor.ts`):
+`navigator.onLine`/the browser's `online`/`offline` events are a fast
+*passive* signal but only reflect the network interface's state, not
+whether `wallet-backend` is actually reachable (a captive portal, a VPN
+with no route to the backend, or the backend itself being down all leave
+`navigator.onLine` reporting `true`). So this module layers an *active*
+check on top: a lightweight `GET /` against `wallet-backend`'s existing
+health endpoint (`internal/components/root/controllers.go`, already
+returns `{service, status, chainId}` with no auth required), polled on an
+interval, re-checked immediately whenever the passive signal flips to
+`online` or the tab regains focus/visibility, and backed off
+(exponentially, capped) while it keeps failing so a prolonged outage
+doesn't mean constant background requests. The result is a single
+tri-state `ConnectivityStatus` (`"online" | "offline" | "checking"`)
+held in Redux — connectivity is not secret, so it lives alongside the
+rest of the app's non-sensitive UI state (§6.2) without conflict.
+
+**The indicator**: a small, always-visible status chip (topbar, next to
+the account/brand area) — a colored dot plus a one-word label, in the
+existing theme's idiom: `trovored.primary` (already the app's alert/
+negative color) for "Offline", a new `positive`/`success` green token for
+"Online" (the current theme has no positive-state color defined —
+one plain addition to `tailwind.config.js`'s color scale, decided at
+implementation time), and a neutral `primary-300` pulse for "Checking…".
+Hovering/tapping it shows when the last successful check was.
+
+**Enforcement, not just display**:
+- The Send and Swap pages (and their entry points from the dashboard)
+  read `ConnectivityStatus` and render their primary action disabled with
+  an explanatory tooltip ("Connect to the internet to send a payment")
+  whenever it is not `"online"` — checked again, authoritatively, by the
+  API client immediately before the `/build` call itself, so a status
+  flip during the brief window after render can't let a stale "online"
+  render start a doomed request.
+- `wallet-core`'s signing functions (§4.2) are not themselves
+  network-aware — they'll happily sign whatever unsigned tx JSON they're
+  given, offline or on. The online requirement is enforced at the app
+  layer (the UI won't reach the build step, and the build step itself
+  physically cannot succeed offline since it's a `wallet-backend` call),
+  not inside `wallet-core` — keeping `wallet-core`'s API surface (§4.2)
+  free of a connectivity concept it doesn't need to know about.
+
+**Offline read cache** (`cache/offlineCache.ts`): a separate IndexedDB
+store from the encrypted vault (§5.1) — this one holds plain, non-secret
+data: the last-fetched curated token list, balances, and payment-history
+page(s), each stamped with the timestamp of that fetch. Every successful
+online read through `api/` writes through to this cache; the dashboard
+reads from it directly whenever `ConnectivityStatus` is not `"online"`,
+and always renders a visible "as of {timestamp}" note on cached data so a
+user offline is never left thinking they're looking at a live balance.
+Nothing in this cache is sensitive enough to need the vault's Argon2id/
+AES-GCM treatment — addresses and public on-chain data are not secrets —
+but it is still scoped per-signer (keyed by the signer's address) so
+switching wallets doesn't briefly flash the previous wallet's cached
+numbers.
+
 ## 7. Threat model and hardening checklist
 
 | Threat | Mitigation |
@@ -424,6 +505,8 @@ tx hex ever cross the network boundary, in either direction.
 | Compromised CDN serving a tampered WASM binary | Self-hosted, same-origin `wallet-core.wasm` (matching the existing `web` app's own nginx/Docker self-hosting pattern, `web/Dockerfile`, `nginx.conf.template`) rather than a third-party CDN; reproducible build in CI |
 | Inline-script injection | Strict CSP (`script-src 'self'`, no `unsafe-inline`, no `unsafe-eval` — WASM instantiation via `instantiateStreaming` does not require `unsafe-eval`) |
 | Clipboard-based mnemonic exfiltration during import | Paste is allowed (blocking it is often more theater than defense and hurts recovery-phrase-restore UX), but the app clears the OS clipboard automatically a short time after any of its own copy-to-clipboard actions and never programmatically reads the clipboard itself |
+| A user acting on stale offline data (e.g. believing a cached balance is current) | Offline-rendered data is always timestamped ("as of …", §6.4); no transaction can be built or signed while offline at all, so stale data can influence a *decision* to transact later but never the transaction's actual parameters (those are always re-resolved fresh at build time) |
+| Spoofed "online" status tricking the app into attempting a transaction | The connectivity indicator (§6.4) is advisory for the UI, not authoritative for the network call — the API client independently verifies reachability immediately before `/build`, so a stale or manipulated client-side status flag can at most cause a build request that then fails cleanly, never a transaction signed against assumptions that were never actually verified |
 
 ## 8. Explicitly out of scope for `wallet-web` v1
 
@@ -453,11 +536,12 @@ tx hex ever cross the network boundary, in either direction.
 | 5 | App scaffold: Vite/React/TS/Redux Toolkit, ported theme (Tailwind config, fonts, `Button`/`TextInput`/brand components) (§1.1, §6.1) | — (parallel with 1-4) |
 | 6 | Onboarding + import flows: create new wallet, import signer, import primary wallet (same-mnemonic and separate-mnemonic modes per §3), unlock screen, idle-lock wiring | Phases 4, 5 |
 | 7 | `wallet-backend` API client: SIWE login, registration, `/users/wallets/link-primary` (calls the endpoint from §3 once it exists; degrades to same-mnemonic-only mode until then) | Phase 6 |
-| 8 | Dashboard: balances/curated tokens (`/assets`), payment history (`/payments/history/:address`) | Phase 7 |
-| 9 | Send flow: build → sign (worker) → submit (§6.3) | Phase 7 |
-| 10 | Swap flow: approve build/sign/submit → swap build/sign/submit | Phase 9 |
-| 11 | Hardening pass: CSP, failed-unlock backoff, cross-tab lock sync, clipboard auto-clear, security-focused code review against §7's checklist | Everything above |
-| 12 | Full integration pass: build/lint/test, a live Base Sepolia smoke test (import a real testnet mnemonic, send a real testnet payment end-to-end), README, this file's own "Implementation notes" section | Phase 11 |
+| 8 | Connectivity module: passive + active (health-ping) detection, `ConnectivityStatus` in Redux, the online/offline/checking indicator component (§6.4) | Phase 5 |
+| 9 | Dashboard: balances/curated tokens (`/assets`), payment history (`/payments/history/:address`), offline read cache with "as of" timestamps (§6.4) | Phases 7, 8 |
+| 10 | Send flow: build → sign (worker) → submit (§6.3), gated on `ConnectivityStatus` end-to-end (§6.4) | Phases 7, 8 |
+| 11 | Swap flow: approve build/sign/submit → swap build/sign/submit, same connectivity gating | Phase 10 |
+| 12 | Hardening pass: CSP, failed-unlock backoff, cross-tab lock sync, clipboard auto-clear, security-focused code review against §7's checklist | Everything above |
+| 13 | Full integration pass: build/lint/test, a live Base Sepolia smoke test (import a real testnet mnemonic, send a real testnet payment end-to-end, then verify offline login/view and blocked transactions under simulated offline conditions), README, this file's own "Implementation notes" section | Phase 12 |
 
 Each phase, when implementation is authorized, follows this project
 family's established discipline: build clean → test → document in this
