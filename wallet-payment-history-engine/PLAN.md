@@ -486,3 +486,54 @@ raise it as its own follow-up when implementation of this engine begins.
 Each phase, when implementation is authorized, follows this project's
 established discipline: build → `go build`/`vet`/`gofmt`/`test` clean →
 document in this file's own "Implementation notes" → commit and push.
+
+## 8. Implementation notes
+
+Phases 1-8 are implemented as designed above, with the following notes:
+
+- **Wallet-tracking topic filter** (§3.2): implemented as
+  `network.Client.TransferLogsTouchingWallets`, which issues two
+  `eth_getLogs` calls per tracked-address batch (one with the batch in
+  topic1/`from`, one in topic2/`to`) and merges/dedupes by
+  `(TxHash, LogIndex)`, since a single `eth_getLogs` call ORs *within* one
+  topic position but ANDs *across* positions - there is no single-query
+  way to express "`from` in set OR `to` in set". Address batches are
+  capped at 200 per call (`trackedAddressBatchSize`) to stay under RPC
+  topic-array size limits.
+- **Swap classification** (§3.3): implemented as the router-agnostic
+  "two Transfer events in one tx, same tracked wallet outbound on one
+  token and inbound on another" heuristic. The "belt and suspenders"
+  authoritative Uniswap-V3-style `Swap` event decode mentioned in §3.3 as
+  a secondary signal is **not implemented** in this pass - the heuristic
+  alone satisfies the classification requirement, and decoding a specific
+  router's `Swap` event shape is deferred until a specific router is
+  chosen for the wallet app, rather than guessed at here.
+- **Live watcher poll range cap**: `RunOnce` caps each poll to
+  `maxBlocksPerPoll` (2000) blocks, so a long gap since the last saved
+  cursor (e.g. a restart after extended downtime) catches up in bounded
+  chunks across successive polls rather than one unbounded
+  `eth_getLogs`/block-scan call.
+- **Test coverage**: `main_test.go` covers `SavePaymentHistory`'s
+  idempotency (the property the whole crash-safe restart design leans
+  on) and that two distinct log indexes in the same transaction hash are
+  both kept (the swap case). `internal/engine/tracking/tracking_test.go`
+  covers the upsert fix itself (§1.2/§4 finding 4): sweeping the same
+  `UserWallet` row twice upserts in place and reports it as newly tracked
+  only once.
+- **Live Base Sepolia smoke test**: this development sandbox's egress
+  policy blocks outbound connections to `sepolia.base.org` (confirmed via
+  a 403 at the egress gateway), so the live RPC path itself could not be
+  exercised end-to-end here. What *was* verified in this environment: the
+  engine builds/vets/tests clean, boots, opens and migrates its own three
+  tables against SQLite, and runs both background loops indefinitely
+  without crashing when the RPC endpoint is unreachable (exponential
+  backoff with jitter, alerting via the configured `Notifier`, no panic).
+  Verify the live `eth_getLogs`/block-scan path against real Base Sepolia
+  traffic in an environment with outbound RPC access before deploying.
+- **Real-time push hook** (§3.5, Phase 7): `notify.Provider` and
+  `NoopProvider` are implemented and wired into `SavePaymentHistory`,
+  which notifies whichever tracked side(s) of a newly-recorded transfer
+  are known. `main.go` wires the `NoopProvider` by default, matching
+  §3.5's "planned, not required for v1" tag - swapping in a real
+  provider (a push vendor, or a callback into `wallet-backend`) is a
+  deliberate later decision, not assumed here.

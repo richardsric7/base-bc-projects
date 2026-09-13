@@ -1,0 +1,5 @@
+.env
+*.sqlite
+*.sqlite-journal
+/coverage.out
+/wallet-payment-history-engine
