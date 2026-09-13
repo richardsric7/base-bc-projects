@@ -1,0 +1,15 @@
+# golangci-lint config - intentionally minimal, mirroring the upstream
+# project this template is derived from: only govet enabled today. Add
+# errcheck/staticcheck/ineffassign incrementally as the codebase grows,
+# rather than turning everything on at once and drowning in findings.
+run:
+  timeout: 5m
+
+linters:
+  disable-all: true
+  enable:
+    - govet
+    # Candidate additions:
+    # - errcheck
+    # - ineffassign
+    # - staticcheck

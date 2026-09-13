@@ -1,0 +1,6 @@
+.env
+*.sqlite
+*.sqlite-journal
+/data/
+/coverage.out
+/wallet-backend
