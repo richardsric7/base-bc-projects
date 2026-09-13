@@ -547,3 +547,88 @@ Each phase, when implementation is authorized, follows this project
 family's established discipline: build clean → test → document in this
 file's own "Implementation notes" → commit and push. Implementation does
 not begin until explicitly authorized.
+
+## 10. Implementation notes
+
+Phases 1-13 are implemented as designed above, with the following notes:
+
+- **BIP-32/44 HD derivation is hand-rolled** (`wallet-core/src/mnemonic.rs`)
+  against the raw spec (HMAC-SHA512 + `k256` scalar/point arithmetic)
+  rather than pulling in a third-party HD-wallet crate, per §4.3's
+  dependency-minimization call. Verified against the standard BIP-39 test
+  mnemonic ("abandon ... about"), which derives the exact well-known
+  `m/44'/60'/0'/0/0` address every other tool derives for it - confirming
+  §4.4's "same path everyone else uses" requirement is actually met, not
+  just intended.
+- **The EIP-1559 RLP encoder is also hand-rolled** (`rlp.rs`), for the
+  same reason. Its test suite includes a full round-trip: sign a
+  transaction, RLP-decode the result back out, recompute the unsigned
+  payload hash independently, and confirm the embedded signature actually
+  recovers to the signing key's address - not just that the output "looks
+  like" a transaction. This test caught a real bug in itself during
+  development (the test's own re-encoding of decoded RLP items, not a
+  bug in the signing code), which is exactly the kind of mistake a
+  weaker "does it look plausible" test would have missed.
+- **`wallet-core`'s wasm-bindgen surface deviates from §4.2's illustrative
+  API in one respect**: storage (writing/reading a `VaultRecord` to/from
+  IndexedDB) is NOT done inside the WASM module - it stays in the
+  Worker's own TypeScript (`worker/vaultStorage.ts`). WASM has no
+  IndexedDB binding without pulling in extra web-sys/idb dependencies for
+  a concern that has nothing to do with cryptography; keeping storage in
+  the Worker's TS instead means `wallet-core` only ever produces/consumes
+  plain JSON strings, and stays portable to a native Rust test build with
+  zero browser API surface.
+- **`encrypt_vault` unlocks immediately after creating a vault**, using
+  the password already in hand, rather than requiring a second UNLOCK
+  round trip with the same password moments later (e.g. right before the
+  SIWE sign-in that follows signer creation in the onboarding wizard).
+  Not a new capability - creating a vault already required the plaintext
+  phrase - just avoids asking the user for a password they just typed a
+  second time in the same flow.
+- **Failed-unlock backoff (§5.3) lives in the Worker**, not in
+  `wallet-core` itself: `failedAttempts`/`lastFailureAt` maps keyed by
+  role, in the Worker's own memory, checked before every UNLOCK call and
+  reset on success. Kept out of the WASM module since it's session
+  bookkeeping, not cryptography.
+- **A real bug was caught by live browser testing, not just unit tests**:
+  the initial router guard redirected away from the onboarding wizard the
+  moment the *signer* vault existed, before the wizard reached
+  primary-wallet setup - because creating the signer vault immediately
+  set `wallet.signer.hasVault = true` in Redux, and the guard was keyed
+  on that alone. Fixed by keying "onboarding complete" on **both** roles
+  having a vault, not just the signer - which also correctly resumes
+  onboarding (rather than dead-ending at the Unlock screen) if a user
+  reloads mid-flow having created a signer vault but not yet a primary
+  one. Caught via a headless-browser smoke test (Playwright) that
+  actually clicked through wallet creation end-to-end against a running
+  `vite preview` server - a pure type-check would never have caught it,
+  since every individual piece was correctly typed.
+- **Verified live in a real browser** (Playwright + Chromium against
+  `vite preview`, no mocking): mnemonic generation and the confirm-by-
+  retyping step render and validate correctly; vault creation produces a
+  real IndexedDB record (role, checksummed address, Argon2id params,
+  random salt/nonce, ciphertext) confirmed by reading it back directly
+  from the browser's IndexedDB; a SIWE sign-in attempt against an
+  unreachable `wallet-backend` fails cleanly with a caught, displayed
+  error and zero uncaught page errors - exercising the exact WASM →
+  Worker → IndexedDB → network pipeline the whole security architecture
+  depends on, not just its Rust-side unit tests in isolation.
+- **Not verified live**: the actual round trip against a running
+  `wallet-backend` instance (registration, a real Base Sepolia payment
+  build/sign/submit, `/users/wallets/link-primary` once it exists) - this
+  sandbox has no `wallet-backend` instance running to test against.
+  Recommend running the full onboarding → send flow against a real
+  deployment before shipping.
+- **Two known, non-blocking dependency advisories** (`npm audit`):
+  `react-router-dom`'s and Vite's transitive `esbuild`'s currently-open
+  CVEs both require a major-version bump to fully resolve and have
+  minimal exploitability in this app's actual usage (no SSR, no
+  user-controlled navigation targets, dev-server-only `esbuild` issue) -
+  tracked in `README.md` rather than silently ignored.
+- **Deliberate scope reduction**: the onboarding wizard's step state is
+  component-local, not persisted - a user who abandons the flow after
+  creating a signer wallet but before finishing primary-wallet setup
+  resumes at step 1 on reload rather than exactly where they left off
+  (their signer vault is preserved, not lost). A UX polish item, not a
+  security gap, left for a later pass given this plan's already-large
+  scope.
