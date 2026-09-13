@@ -11,14 +11,18 @@ import (
 	"wallet-backend/internal/sharedconfig"
 )
 
-// Init registers the swaps component's routes on router.
-func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
+// Init registers the swaps component's routes on router and returns the
+// underlying Service so main.go can wire in the real alerting.Notifier
+// (see Service.Alerts's doc comment, PLAN.md §4.13).
+func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	svc := services.New(gc.Blockchain)
 
 	authed := router.Group("/v1/swaps")
 	authed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
 	authed.POST("/build", buildSwap(svc))
 	authed.POST("/submit", submitSwap(svc))
+
+	return svc
 }
 
 type buildSwapRequest struct {

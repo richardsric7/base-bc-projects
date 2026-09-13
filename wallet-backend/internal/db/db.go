@@ -5,7 +5,9 @@
 package db
 
 import (
+	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/driver/postgres"
@@ -39,4 +41,30 @@ func MigrateDB(gormDB *gorm.DB, models ...interface{}) error {
 		return fmt.Errorf("migrate database: %w", err)
 	}
 	return nil
+}
+
+// SetPoolLimits configures the underlying *sql.DB's connection pool -
+// unset previously, meaning an unbounded (driver-default) pool with no
+// exhaustion signal to alert on at all. Call once at boot, right after
+// OpenDB (see PLAN.md §4.13 - "DB pool warnings").
+func SetPoolLimits(gormDB *gorm.DB, maxOpenConns, maxIdleConns int, connMaxLifetime time.Duration) error {
+	sqlDB, err := gormDB.DB()
+	if err != nil {
+		return fmt.Errorf("get underlying sql.DB: %w", err)
+	}
+	sqlDB.SetMaxOpenConns(maxOpenConns)
+	sqlDB.SetMaxIdleConns(maxIdleConns)
+	sqlDB.SetConnMaxLifetime(connMaxLifetime)
+	return nil
+}
+
+// PoolStats returns the underlying *sql.DB's current connection-pool
+// stats, for a periodic caller to check for exhaustion (see main.go's
+// pool-monitor worker).
+func PoolStats(gormDB *gorm.DB) (sql.DBStats, error) {
+	sqlDB, err := gormDB.DB()
+	if err != nil {
+		return sql.DBStats{}, fmt.Errorf("get underlying sql.DB: %w", err)
+	}
+	return sqlDB.Stats(), nil
 }

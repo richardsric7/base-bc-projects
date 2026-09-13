@@ -576,6 +576,38 @@ vice versa). See `PLAN.md` §4.12.
   address's native/ERC-20 balance (the same `assets.Service.Balance` the
   public/authed balance routes use, without the per-caller address
   restriction).
+- Reference data — `PUT /v1/admin/reference/countries/:code[/config]` and
+  `PUT`/`DELETE /v1/admin/reference/forms/:id` manage the country catalog
+  and dynamic client-form definitions (Phase 13, §4.13).
+
+## Reference data, geo-IP risk, and shortlinks
+
+See `PLAN.md` §4.13.
+
+- `GET /v1/reference/countries`, `GET /v1/reference/countries/:code/config`,
+  `GET /v1/reference/forms[/:id]` (all public) expose the country catalog,
+  per-country config (fiat activation pricing, regulator info, a
+  `highRisk` flag), and versioned dynamic form definitions a client can
+  render without an app-store release.
+- Registration risk: if `GEOIP_BASE_URL` is set, every `POST /v1/users`
+  registration resolves the caller's IP to a country via
+  `internal/geoip.IPAPIProvider` and records `registrationCountryCode` /
+  `registrationHighRisk` (true only if that country has a
+  `reference.CountryConfig` row with `highRisk: true`) on the new user -
+  purely advisory fields for downstream review; a lookup failure never
+  blocks registration. Unset (the default), registration behaves
+  identically via `geoip.NoopProvider`.
+- Discord alerting (`DISCORD_WEBHOOK_URL`) now also fires on a rejected
+  payment/swap submission, a failed or low-balance activation-faucet
+  dispense (`FAUCET_LOW_BALANCE_THRESHOLD_ETH`, checked every 30 minutes
+  when set), and a saturated/exhausted database connection pool (checked
+  every minute against `DB_MAX_OPEN_CONNS`).
+- Shortlinks (`internal/components/shortlink`) replace the original's
+  Firebase Dynamic Links dependency with a self-hosted table and a Go
+  QR-code library: `POST /v1/shortlinks` (authed) mints a short link for
+  any target URL; `GET /s/:code` (public) redirects and records a click;
+  `GET /s/:code/qr` (public) serves its QR code as a PNG. Set
+  `SHORTLINK_BASE_URL` to the domain a generated QR code should point at.
 
 ## Adding a real integration
 

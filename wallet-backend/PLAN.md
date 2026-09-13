@@ -1161,7 +1161,7 @@ Implementation notes (what actually shipped):
   rejection and create-then-reprice-in-place, and payment-asset
   create-then-toggle).
 
-### 4.13 Reference data & misc — **planned**
+### 4.13 Reference data & misc — **DONE**
 
 Banks (`Bank`), dynamic JSON forms (`JsonForm`), country/country-config
 (`Country`/`CountryConfig` — per-country fee percentages, activation
@@ -1182,6 +1182,93 @@ TargetURL, Metadata}`) plus a Go QR-code library — same feature, one fewer
 required third-party account, consistent with this codebase's existing
 "free/local default, real vendor optional" pattern for every other
 integration.
+
+Implementation notes (what actually shipped):
+
+- **Banks**: already ported under a different name in Phase 5 —
+  `stablerail.StablerailBank`, synced from the Stablerail API
+  (`SyncSupportedBanks`). Nothing further needed here; upstream's generic
+  `Bank` table and Stablerail's own bank list were the same concept
+  duplicated, and this port only carries the one it actually uses.
+- **Reserved usernames**: already ported in Phase 2 (`users.ReservedName`).
+  Nothing further needed.
+- `internal/components/reference` (new): `Country`/`CountryConfig` (the
+  per-country fee/activation/regulator/high-risk config `fiat.
+  ActivationConfig`'s own doc comment deferred to this phase) and
+  `JsonForm` (a versioned, client-rendered form definition, `UpsertForm`
+  bumping `Version` on every update so a client can detect a stale cached
+  copy). Public read routes (`/v1/reference/...`) plus an admin CRUD
+  surface (`/v1/admin/reference/...`), the same public-read/admin-write
+  split as `announcements`.
+- `internal/geoip` (new): a `Provider` interface (`Lookup(ctx, ip)
+  (countryCode, err)`) with `NoopProvider` as the default and
+  `IPAPIProvider` hitting ipapi.co's free plain-text endpoint as the real
+  implementation — same "free/local default, real vendor optional"
+  pattern as `kyc.Provider`/`fiat.Processor`. `users.Service` gained a
+  `GeoIP` field (defaulting to `NoopProvider`) and
+  `RegisterInput.RegistrationIP`; `Register` now sets
+  `User.RegistrationCountryCode` and, if that country has a
+  `reference.CountryConfig` row marked `HighRisk`, `RegistrationHighRisk`
+  — both purely advisory (a lookup failure never blocks registration) and
+  read via a direct query against `reference`'s `CountryConfig` table
+  (the same shared-DB cross-component pattern tokenization's own
+  `curatedToken()` helper uses against `assets.CuratedToken`, rather than
+  a new cross-component hook). `users.Service.Register` reads the caller's
+  IP from `RegisterInput.RegistrationIP`, which `controllers.register`
+  wires to `c.ClientIP()` — never a client-supplied header.
+- Discord alerting parity: `payments.Service` and `swaps.Service` both
+  gained an `Alerts alerting.Notifier` field (defaulting to
+  `NoopNotifier`, wired to the real one post-construction in `main.go` -
+  same pattern as `users.Service.GeoIP`, chosen so every existing
+  `New(...)` call site keeps working unchanged) and now alert on every
+  rejected submission. This deliberately does not try to distinguish a
+  user error (bad nonce, insufficient balance) from an infra failure (RPC
+  unreachable) - matching the original's own behavior of alerting on every
+  rejected submission, and there being no reliable way to tell the two
+  apart from `SubmitSignedTransaction`'s single wrapped error string
+  without deeper geth-error-code inspection that was out of scope here.
+  `fiat.Service` gained the same `Alerts` field (alerting on a failed
+  faucet dispense) plus `FaucetAddress()` and a separate proactive
+  `CheckFaucetBalance` (opt-in via `FAUCET_LOW_BALANCE_THRESHOLD_ETH`,
+  polled every 30 minutes from `main.go` only when configured) - a
+  low-balance warning is a different signal from a dispense actually
+  failing, so it's a second alert path, not a reuse of the first.
+  `internal/db` gained `SetPoolLimits`/`PoolStats` (the pool was
+  previously unbounded with no exhaustion signal at all); `main.go` polls
+  `PoolStats` every minute and alerts if `InUse` saturates
+  `DB_MAX_OPEN_CONNS` or `WaitCount` has grown since the last check
+  (callers had to wait for a connection).
+- `internal/components/shortlink` (new): `DynamicLink{ID, ShortCode,
+  TargetURL, Metadata, ClickCount}`, an 8-character Crockford-base32 short
+  code (unambiguous characters, easy to retype from a printed QR code),
+  `github.com/skip2/go-qrcode` for PNG rendering. `POST /v1/shortlinks`
+  (wallet-session-authenticated - minting a link is an authenticated
+  action) creates a link; `GET /s/:code` (public) redirects and records a
+  click; `GET /s/:code/qr` (public) serves its QR code as a PNG, looked up
+  via a separate non-click-counting `GetLink` so viewing a QR image is
+  never itself counted as a visit to the link.
+- One real bug caught by this phase's own test suite: `Resolve`'s
+  click-increment used GORM's `UpdateColumn` with a raw `click_count + 1`
+  SQL expression, which updates the database row correctly but does *not*
+  write the resulting value back into the Go struct - the method was
+  returning the pre-increment count to its caller. Fixed by reloading the
+  row after the update; caught by
+  `TestResolve_IncrementsClickCount` expecting `2` after two resolves and
+  getting `1`.
+- Verification: `go build`/`vet`/`gofmt` clean across the whole module; 7
+  new unit tests in `internal/components/reference/services` (country
+  upsert/validation, nil-config-means-not-high-risk, form
+  version-bumping and deactivation), 5 in `internal/geoip` (noop, a real
+  HTTP round-trip against an `httptest.Server`, private-address
+  short-circuiting, a non-code vendor response treated as unknown, HTTP
+  error propagation), 3 in `internal/components/users/services`
+  (country-code/high-risk field population, and that a geo-IP failure
+  never blocks registration), 5 in `internal/components/fiat/services`
+  (dispense-failure alerting, the faucet low-balance check's three cases,
+  `FaucetAddress` determinism), 1 in `internal/db` (pool limits actually
+  take effect), and 7 in `internal/components/shortlink/services`
+  (short-code uniqueness/length, click counting vs. non-counting lookup,
+  unknown-code rejection, short-URL construction, PNG output).
 
 ## 5. New infrastructure this port requires that didn't exist before
 
@@ -1338,7 +1425,7 @@ needs, not strictly by the order features appear above.
 | 10 | Patron/membership (§4.10) | Phase 0 | **DONE** |
 | 11 | Servicelinks partner API (§4.11), including the API-key auth middleware (§5) | Nearly everything above, since it's a passthrough layer | **DONE** |
 | 12 | Admin surface (§4.12) | Whatever subsystems exist by then | **DONE** |
-| 13 | Reference data, shortlinks, geo-IP, Discord alerting parity (§4.13) | Can run in parallel with any phase | |
+| 13 | Reference data, shortlinks, geo-IP, Discord alerting parity (§4.13) | Can run in parallel with any phase | **DONE** |
 | 14 | Full integration pass: build/vet/test, smoke test against Base Sepolia, README/docs polish | Everything | |
 
 ## 11. Open decisions needing input before implementation proceeds

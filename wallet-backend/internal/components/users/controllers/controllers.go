@@ -64,7 +64,7 @@ func register(svc *services.Service) gin.HandlerFunc {
 			return
 		}
 		address := c.GetString(middleware.CtxSubject)
-		user, err := svc.Register(services.RegisterInput{Username: req.Username, Email: req.Email, Address: address})
+		user, err := svc.Register(services.RegisterInput{Username: req.Username, Email: req.Email, Address: address, RegistrationIP: c.ClientIP()})
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return

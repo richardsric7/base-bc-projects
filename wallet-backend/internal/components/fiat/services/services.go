@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 
+	"wallet-backend/internal/alerting"
 	"wallet-backend/internal/apperrors"
 	assetsModels "wallet-backend/internal/components/assets/models"
 	"wallet-backend/internal/components/fiat/models"
@@ -31,6 +33,7 @@ import (
 type BlockchainClient interface {
 	SignAndSubmitTx(ctx context.Context, signer *ecdsa.PrivateKey, to *common.Address, value *big.Int, data []byte, explicitNonce *uint64) (string, error)
 	SubmitSignedTransaction(ctx context.Context, rawTxHex string) (string, error)
+	NativeBalance(ctx context.Context, address string) (*big.Int, error)
 }
 
 type Service struct {
@@ -39,6 +42,15 @@ type Service struct {
 	Rates             rates.Provider
 	FaucetKeySalt     string
 	RewardTokenSymbol string // empty disables the reward-token half of activation
+	// Alerts reports a rejected dispense or a low faucet balance to an
+	// operational channel - defaults to alerting.NoopNotifier; main.go
+	// wires the real one in post-construction. See PLAN.md §4.13.
+	Alerts alerting.Notifier
+	// FaucetLowBalanceThresholdWei triggers a CheckFaucetBalance alert
+	// once the faucet's native balance drops at or below it; nil disables
+	// the check entirely (the default - an operator opts in via
+	// FAUCET_LOW_BALANCE_THRESHOLD_ETH).
+	FaucetLowBalanceThresholdWei *big.Int
 }
 
 func New(db *gorm.DB, blockchain BlockchainClient, ratesProvider rates.Provider, faucetKeySalt, rewardTokenSymbol string) *Service {
@@ -48,7 +60,43 @@ func New(db *gorm.DB, blockchain BlockchainClient, ratesProvider rates.Provider,
 		Rates:             ratesProvider,
 		FaucetKeySalt:     faucetKeySalt,
 		RewardTokenSymbol: rewardTokenSymbol,
+		Alerts:            alerting.NewNoopNotifier(),
 	}
+}
+
+// FaucetAddress returns the activation faucet's public address (see
+// deriveFaucetKey) - useful for an operator to know where to send funding,
+// and for CheckFaucetBalance to know what to read.
+func (s *Service) FaucetAddress() (string, error) {
+	key, err := s.deriveFaucetKey()
+	if err != nil {
+		return "", apperrors.Internal("failed to derive the activation faucet key")
+	}
+	return crypto.PubkeyToAddress(key.PublicKey).Hex(), nil
+}
+
+// CheckFaucetBalance reads the faucet's current native balance and alerts
+// once if it's at or below FaucetLowBalanceThresholdWei - a proactive
+// low-balance warning (PLAN.md §4.13), distinct from ProcessActivation's
+// own alert on an actual dispense failure. A nil threshold (the default)
+// makes this a no-op; main.go calls it from a periodic worker only when
+// an operator has configured one.
+func (s *Service) CheckFaucetBalance(ctx context.Context) error {
+	if s.FaucetLowBalanceThresholdWei == nil {
+		return nil
+	}
+	address, err := s.FaucetAddress()
+	if err != nil {
+		return err
+	}
+	balance, err := s.Blockchain.NativeBalance(ctx, address)
+	if err != nil {
+		return apperrors.Internal("failed to read activation faucet balance: " + err.Error())
+	}
+	if balance.Cmp(s.FaucetLowBalanceThresholdWei) <= 0 {
+		_ = s.Alerts.Notify("activation faucet balance is low: " + balance.String() + " wei at " + address)
+	}
+	return nil
 }
 
 // deriveFaucetKey derives the single server-controlled key that funds
@@ -235,6 +283,7 @@ func (s *Service) ProcessActivation(ctx context.Context, username, providerRefer
 	}
 	gasWei := toBaseUnits(gasFiatAmount.Mul(gasRate), 18)
 	if _, err := s.Blockchain.SignAndSubmitTx(ctx, faucetKey, &toAddr, gasWei, nil, nil); err != nil {
+		_ = s.Alerts.Notify("activation faucet failed to dispense gas: " + err.Error())
 		return apperrors.Internal("failed to dispense activation gas: " + err.Error())
 	}
 
@@ -248,6 +297,7 @@ func (s *Service) ProcessActivation(ctx context.Context, username, providerRefer
 				if encodeErr == nil {
 					tokenAddr := common.HexToAddress(token.ContractAddress)
 					if _, err := s.Blockchain.SignAndSubmitTx(ctx, faucetKey, &tokenAddr, big.NewInt(0), data, nil); err != nil {
+						_ = s.Alerts.Notify("activation faucet failed to dispense reward token: " + err.Error())
 						return apperrors.Internal("failed to dispense activation reward token: " + err.Error())
 					}
 				}

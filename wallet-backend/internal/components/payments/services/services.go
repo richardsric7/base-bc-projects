@@ -7,6 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"wallet-backend/internal/alerting"
 	"wallet-backend/internal/apperrors"
 	"wallet-backend/internal/components/payments/models"
 	"wallet-backend/internal/network"
@@ -16,10 +17,16 @@ import (
 type Service struct {
 	DB         *gorm.DB
 	Blockchain *network.Client
+	// Alerts reports a rejected submission to an operational channel -
+	// defaults to alerting.NoopNotifier (see New); main.go wires the real
+	// one in post-construction, the same pattern users.Service.GeoIP uses,
+	// so every existing New(db, blockchain) call site keeps working
+	// unchanged. See PLAN.md §4.13.
+	Alerts alerting.Notifier
 }
 
 func New(db *gorm.DB, blockchain *network.Client) *Service {
-	return &Service{DB: db, Blockchain: blockchain}
+	return &Service{DB: db, Blockchain: blockchain, Alerts: alerting.NewNoopNotifier()}
 }
 
 // BuildPaymentTx returns an unsigned native-ETH or ERC-20 transfer for the
@@ -72,6 +79,11 @@ func (s *Service) SubmitPayment(ctx context.Context, idempotencyKey, signedTx, f
 
 	hash, err := s.Blockchain.SubmitSignedTransaction(ctx, signedTx)
 	if err != nil {
+		// Best-effort operational alert, matching the original's behavior
+		// of alerting on every rejected submission rather than trying to
+		// distinguish user error (bad nonce, insufficient balance) from an
+		// infra failure (RPC unreachable) - see PLAN.md §4.13.
+		_ = s.Alerts.Notify("payment submission rejected by the network: " + err.Error())
 		return nil, apperrors.BadRequest("transaction rejected by the network: " + err.Error())
 	}
 

@@ -38,6 +38,15 @@ type User struct {
 	// routes, and its KYC-override check treated a nil value here as "skip
 	// the check" instead of "deny").
 	CreatedByServiceLinkID *uint `gorm:"index" json:"createdByServiceLinkId,omitempty"`
+	// RegistrationCountryCode/RegistrationHighRisk are a best-effort
+	// signal captured at registration time via internal/geoip resolving
+	// the caller's IP, and reference.CountryConfig.HighRisk for that
+	// country (see internal/components/reference, PLAN.md §4.13). Empty/
+	// false whenever no geo-IP provider is configured or the lookup
+	// fails - registration never blocks on this, it's a review flag, not
+	// a gate.
+	RegistrationCountryCode string `gorm:"size:2" json:"registrationCountryCode,omitempty"`
+	RegistrationHighRisk    bool   `gorm:"default:false" json:"registrationHighRisk,omitempty"`
 }
 
 // UserWallet lets a user register additional EVM addresses they control

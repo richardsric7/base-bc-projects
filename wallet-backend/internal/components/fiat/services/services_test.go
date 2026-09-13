@@ -22,12 +22,14 @@ import (
 // recording every call so tests can assert on what was dispensed/submitted -
 // same pattern as sharedaccess's fakeBlockchain.
 type fakeBlockchain struct {
-	sentTo    []common.Address
-	sentValue []*big.Int
-	sentData  [][]byte
-	submitted []string
-	submitErr error
-	sendErr   error
+	sentTo       []common.Address
+	sentValue    []*big.Int
+	sentData     [][]byte
+	submitted    []string
+	submitErr    error
+	sendErr      error
+	nativeBal    *big.Int
+	nativeBalErr error
 }
 
 func (f *fakeBlockchain) SignAndSubmitTx(_ context.Context, _ *ecdsa.PrivateKey, to *common.Address, value *big.Int, data []byte, _ *uint64) (string, error) {
@@ -46,6 +48,16 @@ func (f *fakeBlockchain) SubmitSignedTransaction(_ context.Context, rawTxHex str
 	}
 	f.submitted = append(f.submitted, rawTxHex)
 	return "0xsubmittedhash", nil
+}
+
+func (f *fakeBlockchain) NativeBalance(context.Context, string) (*big.Int, error) {
+	if f.nativeBalErr != nil {
+		return nil, f.nativeBalErr
+	}
+	if f.nativeBal != nil {
+		return f.nativeBal, nil
+	}
+	return big.NewInt(0), nil
 }
 
 func newTestDB(t *testing.T) *gorm.DB {

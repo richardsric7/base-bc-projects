@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -25,7 +26,9 @@ import (
 	marketModels "wallet-backend/internal/components/market/models"
 	patronModels "wallet-backend/internal/components/patron/models"
 	paymentsModels "wallet-backend/internal/components/payments/models"
+	referenceModels "wallet-backend/internal/components/reference/models"
 	servicelinksModels "wallet-backend/internal/components/servicelinks/models"
+	shortlinkModels "wallet-backend/internal/components/shortlink/models"
 	tokenizationModels "wallet-backend/internal/components/tokenization/models"
 	usersModels "wallet-backend/internal/components/users/models"
 
@@ -40,10 +43,12 @@ import (
 	patronControllers "wallet-backend/internal/components/patron/controllers"
 	paymentsControllers "wallet-backend/internal/components/payments/controllers"
 	ratesControllers "wallet-backend/internal/components/rates/controllers"
+	referenceControllers "wallet-backend/internal/components/reference/controllers"
 	rootControllers "wallet-backend/internal/components/root/controllers"
 	servicelinksControllers "wallet-backend/internal/components/servicelinks/controllers"
 	sharedaccessControllers "wallet-backend/internal/components/sharedaccess/controllers"
 	sharedaccessModels "wallet-backend/internal/components/sharedaccess/models"
+	shortlinkControllers "wallet-backend/internal/components/shortlink/controllers"
 	stablerailControllers "wallet-backend/internal/components/stablerail/controllers"
 	stablerailModels "wallet-backend/internal/components/stablerail/models"
 	swapsControllers "wallet-backend/internal/components/swaps/controllers"
@@ -53,6 +58,7 @@ import (
 	"wallet-backend/internal/db"
 	"wallet-backend/internal/fiat"
 	"wallet-backend/internal/fiat/flutterwave"
+	"wallet-backend/internal/geoip"
 	"wallet-backend/internal/kyc"
 	"wallet-backend/internal/middleware"
 	"wallet-backend/internal/network"
@@ -79,6 +85,8 @@ func allModels() []interface{} {
 	models = append(models, tokenizationModels.Models...)
 	models = append(models, patronModels.Models...)
 	models = append(models, servicelinksModels.Models...)
+	models = append(models, referenceModels.Models...)
+	models = append(models, shortlinkModels.Models...)
 	return models
 }
 
@@ -94,6 +102,9 @@ func main() {
 	gormDB, err := db.OpenDB(env.DBType, env.DBConnectionString)
 	if err != nil {
 		log.Fatalf("failed to open database: %v", err)
+	}
+	if err := db.SetPoolLimits(gormDB, env.DBMaxOpenConns, env.DBMaxIdleConns, time.Duration(env.DBConnMaxLifetimeMinutes)*time.Minute); err != nil {
+		log.Fatalf("failed to configure database connection pool: %v", err)
 	}
 
 	if env.DBAutoMigrate {
@@ -154,6 +165,14 @@ func main() {
 		log.Println("fiat: no processor configured (set FLUTTERWAVE_SECRET_KEY to enable Flutterwave)")
 	}
 
+	var geoIPProvider geoip.Provider = geoip.NewNoopProvider()
+	if env.GeoIPBaseURL != "" {
+		geoIPProvider = geoip.NewIPAPIProvider(env.GeoIPBaseURL)
+		log.Printf("geoip: registration risk lookup enabled via %s", env.GeoIPBaseURL)
+	} else {
+		log.Println("geoip: disabled (set GEOIP_BASE_URL to enable registration risk lookup)")
+	}
+
 	ratesProvider := rates.NewStaticProvider(map[string]decimal.Decimal{
 		// Example fixtures - replace with a live provider or DB-backed
 		// table for production use.
@@ -176,6 +195,7 @@ func main() {
 		Fiat:    fiatProcessor,
 		Rates:   ratesProvider,
 		Alerts:  alerts,
+		GeoIP:   geoIPProvider,
 
 		JWTSecret:    env.JWTSecret,
 		JWTExpiry:    durationFromMinutes(env.JWTExpiryMinutes),
@@ -224,21 +244,30 @@ func main() {
 	rootControllers.Init(router, gc)
 	authControllers.Init(router, gc)
 	usersSvc := usersControllers.Init(router, gc)
+	usersSvc.GeoIP = gc.GeoIP
 	assetsSvc := assetsControllers.Init(router, gc)
 	paymentsSvc := paymentsControllers.Init(router, gc)
-	swapsControllers.Init(router, gc)
+	paymentsSvc.Alerts = gc.Alerts
+	swapsSvc := swapsControllers.Init(router, gc)
+	swapsSvc.Alerts = gc.Alerts
 	sharedaccessControllers.Init(router, gc)
 	ratesControllers.Init(router, gc)
 	announcementsControllers.Init(router, gc)
 	callbacksControllers.Init(router, gc)
 	kycSvc := kycControllers.Init(router, gc)
 	fiatSvc := fiatControllers.Init(router, gc)
+	fiatSvc.Alerts = gc.Alerts
+	if env.FaucetLowBalanceThresholdETH > 0 {
+		fiatSvc.FaucetLowBalanceThresholdWei = decimal.NewFromFloat(env.FaucetLowBalanceThresholdETH).Mul(decimal.New(1, 18)).BigInt()
+	}
 	stablerailSvc := stablerailControllers.Init(router, gc)
 	cryptoSvc := cryptoControllers.Init(router, gc)
 	marketControllers.Init(router, gc)
 	tokenizationSvc := tokenizationControllers.Init(router, gc)
 	patronSvc := patronControllers.Init(router, gc)
 	servicelinksControllers.Init(router, gc, usersSvc, paymentsSvc, assetsSvc, tokenizationSvc)
+	referenceControllers.Init(router, gc)
+	shortlinkControllers.Init(router, gc)
 
 	// Wire the KYC component's Doja BVN-completion hook to Stablerail
 	// onboarding - see kyc/services.Service.OnBVNVerified's doc comment
@@ -284,6 +313,20 @@ func main() {
 		}()
 	}
 
+	// Proactive low-balance warning, distinct from ProcessActivation's own
+	// alert on an actual dispense failure - opt-in via
+	// FAUCET_LOW_BALANCE_THRESHOLD_ETH (PLAN.md §4.13).
+	if fiatSvc.FaucetLowBalanceThresholdWei != nil {
+		go func() {
+			for {
+				if err := fiatSvc.CheckFaucetBalance(context.Background()); err != nil {
+					log.Printf("[fiat] faucet balance check failed: %v", err)
+				}
+				time.Sleep(30 * time.Minute)
+			}
+		}()
+	}
+
 	// A single clean poll interval, replacing upstream's own accidental
 	// 15-minute-sleep-inside-a-5-second-loop stacking (PLAN.md §4.9).
 	go func() {
@@ -302,6 +345,29 @@ func main() {
 		for {
 			patronSvc.PromotePendingMemberships()
 			time.Sleep(30 * time.Second)
+		}
+	}()
+
+	// DB pool exhaustion warning: alert once InUse hits the configured
+	// ceiling, or once callers have had to wait for a connection at all
+	// (WaitCount increasing since the last check) - either means the pool
+	// is undersized for current load (PLAN.md §4.13).
+	go func() {
+		var lastWaitCount int64
+		for {
+			stats, err := db.PoolStats(gormDB)
+			if err != nil {
+				log.Printf("[db] failed to read connection pool stats: %v", err)
+			} else {
+				if stats.InUse >= env.DBMaxOpenConns {
+					_ = alerts.Notify(fmt.Sprintf("database connection pool saturated: %d/%d connections in use", stats.InUse, env.DBMaxOpenConns))
+				}
+				if stats.WaitCount > lastWaitCount {
+					_ = alerts.Notify(fmt.Sprintf("database connection pool exhausted %d time(s) since last check - callers are waiting for a connection", stats.WaitCount-lastWaitCount))
+				}
+				lastWaitCount = stats.WaitCount
+			}
+			time.Sleep(1 * time.Minute)
 		}
 	}()
 

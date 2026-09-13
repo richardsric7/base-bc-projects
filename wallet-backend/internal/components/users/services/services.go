@@ -4,6 +4,7 @@
 package services
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"time"
@@ -11,8 +12,10 @@ import (
 	"gorm.io/gorm"
 
 	"wallet-backend/internal/apperrors"
+	referenceModels "wallet-backend/internal/components/reference/models"
 	"wallet-backend/internal/components/users/models"
 	"wallet-backend/internal/cryptoutil"
+	"wallet-backend/internal/geoip"
 	"wallet-backend/internal/notify"
 	"wallet-backend/internal/validators"
 )
@@ -22,10 +25,14 @@ type Service struct {
 	Mailer                notify.Mailer
 	RecoveryAuthoritySalt string
 	RecoveryOTPTTL        time.Duration
+	// GeoIP resolves a registering caller's IP to a country code for the
+	// risk fields below - defaults to geoip.NoopProvider (see New), so
+	// registration behaves identically with or without one configured.
+	GeoIP geoip.Provider
 }
 
 func New(db *gorm.DB, mailer notify.Mailer, recoveryAuthoritySalt string, recoveryOTPTTL time.Duration) *Service {
-	return &Service{DB: db, Mailer: mailer, RecoveryAuthoritySalt: recoveryAuthoritySalt, RecoveryOTPTTL: recoveryOTPTTL}
+	return &Service{DB: db, Mailer: mailer, RecoveryAuthoritySalt: recoveryAuthoritySalt, RecoveryOTPTTL: recoveryOTPTTL, GeoIP: geoip.NewNoopProvider()}
 }
 
 // RegisterInput is the payload accepted by Register.
@@ -37,6 +44,11 @@ type RegisterInput struct {
 	// servicelinks partner onboarding one of its own users sets it to
 	// their own ServiceLink.ID (see internal/components/servicelinks).
 	CreatedByServiceLinkID *uint
+	// RegistrationIP is the caller's IP (controllers wire this to
+	// c.ClientIP(), never a client-supplied header) - used only for the
+	// best-effort geo-IP risk fields below, never to gate registration
+	// itself.
+	RegistrationIP string
 }
 
 // Register creates a new user profile around an address that has already
@@ -80,6 +92,7 @@ func (s *Service) Register(input RegisterInput) (*models.User, error) {
 		KYCStatus:              "pending",
 		CreatedByServiceLinkID: input.CreatedByServiceLinkID,
 	}
+	s.applyRegistrationRiskFields(&user, input.RegistrationIP)
 
 	txErr := s.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&user).Error; err != nil {
@@ -98,6 +111,25 @@ func (s *Service) Register(input RegisterInput) (*models.User, error) {
 	}
 
 	return &user, nil
+}
+
+// applyRegistrationRiskFields resolves registrationIP to a country code
+// via s.GeoIP and, if that country has a reference.CountryConfig row
+// marked HighRisk, sets RegistrationHighRisk - purely advisory fields for
+// downstream review, so any failure here (no provider configured, lookup
+// error, unknown IP) is swallowed rather than propagated: it must never
+// block registration itself (PLAN.md §4.13).
+func (s *Service) applyRegistrationRiskFields(user *models.User, registrationIP string) {
+	countryCode, err := s.GeoIP.Lookup(context.Background(), registrationIP)
+	if err != nil || countryCode == "" {
+		return
+	}
+	user.RegistrationCountryCode = countryCode
+
+	var config referenceModels.CountryConfig
+	if err := s.DB.Where("country_code = ?", countryCode).First(&config).Error; err == nil {
+		user.RegistrationHighRisk = config.HighRisk
+	}
 }
 
 // GetByUsername fetches a single user's public profile.

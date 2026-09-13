@@ -13,6 +13,7 @@ import (
 	"context"
 	"math/big"
 
+	"wallet-backend/internal/alerting"
 	"wallet-backend/internal/apperrors"
 	"wallet-backend/internal/network"
 	"wallet-backend/internal/validators"
@@ -20,10 +21,14 @@ import (
 
 type Service struct {
 	Blockchain *network.Client
+	// Alerts reports a rejected submission to an operational channel -
+	// defaults to alerting.NoopNotifier (see New); main.go wires the real
+	// one in post-construction. See PLAN.md §4.13.
+	Alerts alerting.Notifier
 }
 
 func New(blockchain *network.Client) *Service {
-	return &Service{Blockchain: blockchain}
+	return &Service{Blockchain: blockchain, Alerts: alerting.NewNoopNotifier()}
 }
 
 // BuildSwapInput is everything needed to encode and build a swap-router call.
@@ -75,6 +80,7 @@ func (s *Service) BuildSwapTx(ctx context.Context, input BuildSwapInput) (*netwo
 func (s *Service) SubmitSwap(ctx context.Context, signedTx string) (string, error) {
 	hash, err := s.Blockchain.SubmitSignedTransaction(ctx, signedTx)
 	if err != nil {
+		_ = s.Alerts.Notify("swap submission rejected by the network: " + err.Error())
 		return "", apperrors.BadRequest("transaction rejected by the network: " + err.Error())
 	}
 	return hash, nil

@@ -16,6 +16,7 @@ import (
 	"wallet-backend/internal/alerting"
 	"wallet-backend/internal/cache"
 	"wallet-backend/internal/fiat"
+	"wallet-backend/internal/geoip"
 	"wallet-backend/internal/kyc"
 	"wallet-backend/internal/network"
 	"wallet-backend/internal/notify"
@@ -44,6 +45,11 @@ type GlobalConfig struct {
 	Fiat    fiat.Processor // nil unless a project wires one in; see internal/fiat doc.
 	Rates   rates.Provider
 	Alerts  alerting.Notifier
+	// GeoIP resolves a registering caller's IP to a country code for the
+	// registration risk fields (see internal/geoip, PLAN.md §4.13).
+	// Always non-nil - geoip.NewNoopProvider() when no vendor is
+	// configured, so users.Service.Register behaves identically either way.
+	GeoIP geoip.Provider
 
 	JWTSecret    string
 	JWTExpiry    time.Duration
@@ -128,6 +134,11 @@ type GlobalConfig struct {
 	// consent request (see internal/components/servicelinks) stays pending
 	// before it expires unactioned.
 	ServiceLinkApprovalTTL time.Duration
+
+	// ShortlinkBaseURL is prefixed to a short code to build the public
+	// short URL a QR code encodes (see internal/components/shortlink,
+	// PLAN.md §4.13) - e.g. "https://trov.to" for "https://trov.to/s/AB12CD34".
+	ShortlinkBaseURL string
 }
 
 // Env holds every raw environment-derived setting. Load it once in main and
@@ -138,6 +149,13 @@ type Env struct {
 	DBType             string
 	DBConnectionString string
 	DBAutoMigrate      bool
+	// DBMaxOpenConns/DBMaxIdleConns/DBConnMaxLifetimeMinutes configure the
+	// connection pool (see internal/db.SetPoolLimits) - unset previously,
+	// meaning an unbounded pool with no exhaustion signal to alert on at
+	// all (PLAN.md §4.13's "DB pool warnings").
+	DBMaxOpenConns           int
+	DBMaxIdleConns           int
+	DBConnMaxLifetimeMinutes int
 
 	BaseRPCURL  string
 	BaseChainID int64
@@ -173,8 +191,9 @@ type Env struct {
 	SumsubSecretKey string
 	DojaSecretKey   string
 
-	FaucetKeySalt               string
-	ActivationRewardTokenSymbol string
+	FaucetKeySalt                string
+	ActivationRewardTokenSymbol  string
+	FaucetLowBalanceThresholdETH float64
 
 	FlutterwaveSecretKey  string
 	FlutterwaveSecretHash string
@@ -200,6 +219,13 @@ type Env struct {
 
 	ServiceLinkApprovalTTLMinutes int
 
+	// GeoIPBaseURL points at an ipapi.co-shaped free-text country lookup
+	// (GET {baseURL}/{ip}/country/); empty disables geo-IP lookup entirely
+	// (geoip.NewNoopProvider is used instead) - see PLAN.md §4.13.
+	GeoIPBaseURL string
+
+	ShortlinkBaseURL string
+
 	Organisation string
 }
 
@@ -215,6 +241,10 @@ func LoadEnv() Env {
 		DBType:             getEnv("DB_TYPE", "sqlite"),
 		DBConnectionString: getEnv("DB_CONNECTION_STRING", "wallet-backend.sqlite"),
 		DBAutoMigrate:      getEnvBool("DB_AUTOMIGRATE", true),
+
+		DBMaxOpenConns:           getEnvInt("DB_MAX_OPEN_CONNS", 25),
+		DBMaxIdleConns:           getEnvInt("DB_MAX_IDLE_CONNS", 5),
+		DBConnMaxLifetimeMinutes: getEnvInt("DB_CONN_MAX_LIFETIME_MINUTES", 30),
 
 		BaseRPCURL:  getEnv("BASE_RPC_URL", "https://sepolia.base.org"),
 		BaseChainID: getEnvInt64("BASE_CHAIN_ID", 84532),
@@ -250,8 +280,9 @@ func LoadEnv() Env {
 		SumsubSecretKey: getEnv("SUMSUB_SECRET_KEY", ""),
 		DojaSecretKey:   getEnv("DOJA_SECRET_KEY", ""),
 
-		FaucetKeySalt:               getEnv("FAUCET_KEY_SALT", "dev-only-change-me"),
-		ActivationRewardTokenSymbol: getEnv("ACTIVATION_REWARD_TOKEN_SYMBOL", ""),
+		FaucetKeySalt:                getEnv("FAUCET_KEY_SALT", "dev-only-change-me"),
+		ActivationRewardTokenSymbol:  getEnv("ACTIVATION_REWARD_TOKEN_SYMBOL", ""),
+		FaucetLowBalanceThresholdETH: getEnvFloat64("FAUCET_LOW_BALANCE_THRESHOLD_ETH", 0),
 
 		FlutterwaveSecretKey:  getEnv("FLUTTERWAVE_SECRET_KEY", ""),
 		FlutterwaveSecretHash: getEnv("FLUTTERWAVE_SECRET_HASH", ""),
@@ -276,6 +307,10 @@ func LoadEnv() Env {
 		PatronVATPercent:    getEnvFloat64("PATRON_VAT_PERCENT", 0),
 
 		ServiceLinkApprovalTTLMinutes: getEnvInt("SERVICELINK_APPROVAL_TTL_MINUTES", 10),
+
+		GeoIPBaseURL: getEnv("GEOIP_BASE_URL", ""),
+
+		ShortlinkBaseURL: getEnv("SHORTLINK_BASE_URL", "http://localhost:8080"),
 
 		Organisation: getEnv("ORGANISATION", "wallet-backend"),
 	}
