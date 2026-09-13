@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Dev-time baseline CSP (PLAN.md §7) - production behind nginx sets
+      the full policy, including connect-src pinned to the real
+      wallet-backend origin and frame-ancestors, as response headers
+      (see ../nginx.conf.template); a <meta> tag can't express either.
+      No unsafe-inline/unsafe-eval for scripts - WASM's
+      instantiateStreaming needs neither.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' http://localhost:8080; object-src 'none'; base-uri 'self'"
+    />
+    <title>Trovo Wallet</title>
+  </head>
+  <body class="bg-primary-100">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

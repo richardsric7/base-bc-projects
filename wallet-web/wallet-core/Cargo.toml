@@ -1,0 +1,35 @@
+[package]
+name = "wallet_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+
+[dependencies]
+aes-gcm = "0.11.1"
+argon2 = "0.6.0"
+base64 = "0.23.1"
+bip39 = "2.2.2"
+getrandom = { version = "0.4.3", features = ["wasm_js"] }
+hex = "0.4.3"
+hmac = "0.13.0"
+k256 = "0.14.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+sha3 = "0.12.0"
+wasm-bindgen = "0.2.128"
+zeroize = { version = "1.9.0", features = ["derive"] }
+
+[package.metadata.wasm-pack.profile.release]
+# binaryen's wasm-opt binary is fetched from a GitHub release at build
+# time; this sandbox's egress policy blocks that download. rustc's own
+# release profile (opt-level "s" + lto, above) still applies without it -
+# this only skips wasm-opt's additional post-link optimization pass.
+# Re-enable at deployment time in an environment that can reach GitHub.
+wasm-opt = false
