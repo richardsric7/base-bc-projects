@@ -41,6 +41,10 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	webhooks.POST("/sumsub/webhook", sumsubWebhook(svc))
 	webhooks.POST("/doja/webhook", dojaWebhook(svc))
 
+	admin := router.Group("/v1/admin/kyc")
+	admin.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceAdmin))
+	registerAdminRoutes(admin, svc)
+
 	return svc
 }
 

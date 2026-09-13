@@ -552,6 +552,31 @@ that user's wallet — deny-by-default, including when the field is `nil`
 (an organically-registered user), fixing the original's KYC-override check
 which skipped this check entirely on `nil`.
 
+## Admin surface
+
+Every admin route is JWT-authenticated with `middleware.AudienceAdmin` (a
+separate token audience from the wallet-session JWT users authenticate
+with, so a session token can never be replayed against an admin route or
+vice versa). See `PLAN.md` §4.12.
+
+- Tokenization vetting/minting/fee-acknowledgement/sales-date-management/
+  deletion — `/v1/admin/tokenization/...` (built in Phase 9, §4.9).
+- Servicelinks provisioning/verification/suspension —
+  `/v1/admin/servicelinks/...` (Phase 11, §4.11).
+- KYC config — `/v1/admin/kyc/sumsub/levels[/:id]` and
+  `/v1/admin/kyc/doja/widgets[/:id]` manage the Sumsub-level and
+  Doja-widget-ID catalogs an operator keeps in sync with their vendor
+  dashboards.
+- Patron config — `/v1/admin/patron/packages[/:id]`,
+  `/v1/admin/patron/tiers[/:id]`, `PUT /v1/admin/patron/grades` (create or
+  reprice a package+tier's USD price), and
+  `PUT /v1/admin/patron/payment-assets/:symbol` manage the subscription
+  package/tier/pricing catalog and payment-currency allow-list.
+- Wallet lookup — `GET /v1/admin/wallet/:address/balance` looks up any
+  address's native/ERC-20 balance (the same `assets.Service.Balance` the
+  public/authed balance routes use, without the per-caller address
+  restriction).
+
 ## Adding a real integration
 
 The `notify`, `storage`, `kyc`, `fiat`, `rates`, and `alerting` packages are

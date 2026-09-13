@@ -25,6 +25,15 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	authed.POST("/approve/build", buildApprove(svc))
 	authed.POST("/approve/submit", submit(svc))
 
+	// Admin: balance lookup for any address, e.g. support/investigation
+	// tooling - reuses the same Service.Balance the public/authed routes
+	// above use, just without a per-caller address restriction. Gated by
+	// middleware.AudienceAdmin, same as every other admin surface in this
+	// port - see PLAN.md §4.12.
+	admin := router.Group("/v1/admin/wallet")
+	admin.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceAdmin))
+	admin.GET("/:address/balance", getBalance(svc))
+
 	return svc
 }
 

@@ -1100,7 +1100,7 @@ Implementation notes (what actually shipped, beyond the design above):
   inactive/suspended rejection paths and that the raw key never equals its
   stored hash.
 
-### 4.12 Admin surface ("Trovo Manager" equivalent) — **planned**
+### 4.12 Admin surface ("Trovo Manager" equivalent) — **DONE**
 
 Original: JWT-authenticated admin routes for tokenization vetting/minting/
 fee-acknowledgement/sales-date management/deletion, wallet-balance lookup,
@@ -1112,6 +1112,54 @@ Base design: chain-agnostic — extends the existing `middleware.JWTAuth(...,
 middleware.AudienceAdmin)` pattern to a proper admin route group per
 subsystem (tokenization vetting/minting, KYC config, patron config, wallet
 lookup), rather than inventing a new auth mechanism.
+
+Implementation notes (what actually shipped):
+
+- Tokenization vetting/minting/fee-acknowledgement/sales-date-management/
+  deletion admin routes already exist under `/v1/admin/tokenization/...`,
+  built ad hoc in Phase 9 (see §4.9's "Routes" note) since that subsystem
+  had no partner-API caller yet to justify deferring them — nothing new
+  needed here beyond the `middleware.AudienceAdmin` pattern they already
+  established, which every admin route added in this phase follows too.
+- `internal/components/kyc/services/admin.go` +
+  `internal/components/kyc/controllers/admin.go`: CRUD on
+  `models.SumsubLevel` (`POST`/`PUT`/`DELETE
+  /v1/admin/kyc/sumsub/levels[/:id]`) and `models.DojaWidget`
+  (`.../doja/widgets[/:id]`) — the two vendor-dashboard-mirroring catalogs
+  an operator needs to keep in sync with their actual Sumsub/Dojah
+  configuration (see those models' doc comments for why there's no way to
+  discover them via either vendor's API).
+- `internal/components/patron/services/admin.go` +
+  `internal/components/patron/controllers/admin.go`: CRUD on
+  `PatronPackage`/`PatronTier` (create, toggle `Inactive`, delete),
+  `UpsertMembershipGrade` (create-or-reprice a package+tier's USD price,
+  rejecting an unknown package/tier id), and
+  `SetPaymentAssetAllowed` (add/disable a subscription payment-currency
+  symbol) — all under `/v1/admin/patron/...`. This replaces upstream's
+  implicit "edit the seed data / dashboard-less config" story for the
+  three fixed packages/tiers with actual admin endpoints, still built
+  around the same hardcoded three-package/three-tier catalog `main.go`
+  seeds on first boot (§4.10) rather than opening the catalog shape itself
+  up to arbitrary admin changes.
+- `internal/components/assets/controllers`: one new admin route,
+  `GET /v1/admin/wallet/:address/balance` — the wallet-balance-lookup tool
+  from the original's admin surface, reusing the exact same
+  `assets.Service.Balance` (and its request handler) the public/authed
+  balance routes already use, just gated by `AudienceAdmin` instead of a
+  per-caller address restriction, since an admin needs to look up *any*
+  address's balance, not just their own.
+- No new component or model package was needed for any of this — every
+  addition is either a new admin-only method on an existing component's
+  `Service`, or a route registered in that component's own `controllers`
+  package, consistent with how tokenization's admin routes were already
+  built in Phase 9.
+- Verification: `go build`/`vet`/`gofmt` clean across the whole module; 10
+  new unit tests (4 in `internal/components/kyc/services` covering
+  Sumsub-level/Doja-widget create-conflict, update, and delete-then-404;
+  6 in `internal/components/patron/services` covering package/tier
+  create-conflict and lifecycle, membership-grade unknown-package/tier
+  rejection and create-then-reprice-in-place, and payment-asset
+  create-then-toggle).
 
 ### 4.13 Reference data & misc — **planned**
 
@@ -1289,7 +1337,7 @@ needs, not strictly by the order features appear above.
 | 9 | Tokenization (§4.9) | Phase 8, Phase 1 (closed-group reuse), Phase 4 (fiat purchase flow) | **DONE** (partner-API passthrough deferred to Phase 11 — see §4.9) |
 | 10 | Patron/membership (§4.10) | Phase 0 | **DONE** |
 | 11 | Servicelinks partner API (§4.11), including the API-key auth middleware (§5) | Nearly everything above, since it's a passthrough layer | **DONE** |
-| 12 | Admin surface (§4.12) | Whatever subsystems exist by then | |
+| 12 | Admin surface (§4.12) | Whatever subsystems exist by then | **DONE** |
 | 13 | Reference data, shortlinks, geo-IP, Discord alerting parity (§4.13) | Can run in parallel with any phase | |
 | 14 | Full integration pass: build/vet/test, smoke test against Base Sepolia, README/docs polish | Everything | |
 

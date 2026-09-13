@@ -27,6 +27,10 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	authed.POST("/subscribe", buildSubscription(svc))
 	authed.POST("/subscribe/confirm", confirmSubscription(svc))
 
+	admin := router.Group("/v1/admin/patron")
+	admin.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceAdmin))
+	registerAdminRoutes(admin, svc)
+
 	return svc
 }
 
