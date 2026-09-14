@@ -2138,6 +2138,88 @@ half of this change.
 | 8 | Cross-wallet listing + curated-asset-filtered balance summary (§13.8) |
 | 9 | Full build/vet/test/tidy pass; a live smoke test deploying a primary wallet, creating a sub-wallet, enabling shared access, and driving one action through propose→approve→execute on Base Sepolia, including a concurrent-proposal test exercising §13.12's nonce reservation |
 
+#### Phase 1 implementation notes (done)
+
+New `internal/safe` package (no dependency on any other component - pure
+on-chain-primitive helpers, unit-testable without a running chain or
+database):
+
+- **Canonical v1.4.1 addresses** (`ProxyFactoryAddress`, `SingletonAddress`
+  = SafeL2, `CompatibilityFallbackHandlerAddress`) - fetched from
+  `safe-global/safe-deployments`' published deployment JSON and confirmed
+  identical on Base mainnet (8453) and Base Sepolia (84532), since Safe
+  ships these via a chain-agnostic deterministic deployer rather than a
+  per-chain deployment. SafeL2 (not plain Safe) is the singleton
+  deliberately: it emits per-transaction events a tracing-node-free
+  indexer (this codebase's payment-history-engine, and the existing
+  chain-log polling worker) needs to see multisig activity at all.
+- **`ComputeProxyAddress`** - reproduces `SafeProxyFactory.
+  createProxyWithNonce`'s CREATE2 formula exactly (salt =
+  `keccak256(keccak256(initializer) || saltNonce)`, init code = the
+  `SafeProxy` v1.4.1 creation bytecode - fetched from the
+  `@safe-global/safe-contracts@1.4.1` npm package's compiled artifacts,
+  not hand-derived - with the singleton address appended), via
+  `crypto.CreateAddress2`. This is what lets PLAN.md §13.11's
+  activation-order rules be enforced (a wallet's address is known and can
+  be referenced/funded before it's deployed).
+- **`EncodeSetupCalldata`/`EncodeCreateProxyWithNonceCalldata`/
+  `EncodeExecTransactionCalldata`** - ABI encoders for the three Safe/
+  SafeProxyFactory methods this codebase needs, via a small embedded ABI
+  (same pattern as `internal/network`'s `erc20ABIJSON`) rather than
+  routing through the generic JSON-arg `network.EncodeContractCall`, since
+  every caller already has concrete Go types. Every Safe this codebase
+  deploys is configured with no delegatecall, no setup-time payment, and
+  `CompatibilityFallbackHandlerAddress` installed as its fallback handler
+  (required for EIP-1271 to work via `isValidSignature` at all); every
+  `execTransaction` call always zeroes `safeTxGas`/`baseGas`/`gasPrice`/
+  `gasToken`/`refundReceiver` - the relayer pool (Phase 4, §13.12) pays
+  execution gas directly as tx sender rather than asking the Safe to
+  refund it in-band.
+- **EIP-712 hashing** (`DomainSeparator`, `SafeTxHash`,
+  `EncodeTransactionData`) and the **nested-message wrapping**
+  (`EncodeMessageDataForSafe`/`MessageHashForSafe`, reproducing
+  `CompatibilityFallbackHandler.encodeMessageDataForSafe`) that §13.3's
+  nested-ownership design needs: when a Safe is itself an owner of
+  another Safe, the outer Safe's `checkNSignatures` resolves that owner's
+  signature via EIP-1271, which - through the fallback handler - re-wraps
+  the outer transaction's pre-image bytes as a `SafeMessage` under the
+  *nested* Safe's own domain separator, recursing into the nested Safe's
+  own owner set. Getting this wrapping wrong would silently break
+  approval verification for exactly the shared-access-across-wallets case
+  this whole redesign exists to support, so all three EIP-712 typehash
+  constants (`DOMAIN_SEPARATOR_TYPEHASH`, `SAFE_TX_TYPEHASH`,
+  `SAFE_MSG_TYPEHASH`) are cross-checked in tests against a from-scratch
+  `keccak256` of their Solidity signature strings, not just copied and
+  trusted.
+- **Signature packing** (`PackSignatures`, `EOAPersonalSignSignature`,
+  `ContractSignature`) - assembles the exact packed-signature blob
+  `execTransaction`/`checkNSignatures` expects: a 65-byte-per-owner static
+  array sorted by strictly-ascending owner address (`checkNSignatures`
+  rejects any other order), EOA signatures using the "personal_sign"
+  `v+4` encoding (`v` rewritten to 31/32) so that Safe transaction
+  approvals reuse the same `personal_sign` primitive PLAN.md §12
+  standardized every other approval flow on, and contract signatures
+  (`v=0`, `r`=owner address, `s`=offset into a length-prefixed dynamic
+  tail) for the nested-Safe-as-owner case.
+- **`cryptoutil.VerifyPersonalSignBytes`** added alongside the existing
+  `VerifyPersonalSign` - verifies a `personal_sign` signature of a raw
+  byte digest (e.g. a `SafeTxHash`) rather than a UTF-8 string, needed
+  because a transaction hash is binary data, not text.
+- **Verification**: every typehash, the CREATE2 address computation, the
+  ABI-encoded `setup` calldata, the domain separator, and the final
+  `SafeTxHash` are all checked in `safe_test.go` against fixed test
+  vectors computed by an independent from-scratch Python
+  re-implementation of the same formulas (`eth_abi` + `pycryptodome`,
+  not this package or go-ethereum) - deliberately not just testing that
+  the Go code agrees with itself. Signature-packing tests cover sort
+  order, the `v+4` rewrite, duplicate-owner rejection, and the
+  contract-signature dynamic-tail layout. No network/database
+  dependency - full local `go test` coverage.
+- Not yet done (later phases): nothing in this package talks to a chain
+  or a database yet - deploying a Safe, submitting `execTransaction`, and
+  collecting real owner signatures into a `PendingAction`-style flow are
+  Phases 2-6.
+
 ### 13.11 Activation-order dependencies (user-flagged, audited against §13.1-§13.8's design)
 
 Registration itself never requires on-chain activation - the primary

@@ -65,6 +65,15 @@ func DeriveKey(seedMaterial string) (*ecdsa.PrivateKey, error) {
 // r||s||v signature most wallet libraries produce (v as 27/28 or 0/1 -
 // both are normalized).
 func VerifyPersonalSign(message string, signature []byte, expectedAddress common.Address) (bool, error) {
+	return VerifyPersonalSignBytes([]byte(message), signature, expectedAddress)
+}
+
+// VerifyPersonalSignBytes is VerifyPersonalSign for a raw byte message
+// rather than a UTF-8 string - use this when the thing being signed is
+// itself a binary digest (e.g. a Safe transaction hash, PLAN.md §13's
+// safe.SafeTxHash) rather than a human-composed message, so it is never
+// re-encoded as text first.
+func VerifyPersonalSignBytes(message []byte, signature []byte, expectedAddress common.Address) (bool, error) {
 	if len(signature) != 65 {
 		return false, fmt.Errorf("signature must be 65 bytes, got %d", len(signature))
 	}
@@ -74,7 +83,7 @@ func VerifyPersonalSign(message string, signature []byte, expectedAddress common
 		sig[64] -= 27
 	}
 
-	hash := accounts.TextHash([]byte(message))
+	hash := accounts.TextHash(message)
 	pubKey, err := crypto.SigToPub(hash, sig)
 	if err != nil {
 		return false, fmt.Errorf("recover public key: %w", err)
