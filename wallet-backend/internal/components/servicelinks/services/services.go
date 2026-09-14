@@ -27,6 +27,7 @@ import (
 	assetsServices "wallet-backend/internal/components/assets/services"
 	paymentsServices "wallet-backend/internal/components/payments/services"
 	"wallet-backend/internal/components/servicelinks/models"
+	shortlinkServices "wallet-backend/internal/components/shortlink/services"
 	tokenizationServices "wallet-backend/internal/components/tokenization/services"
 	usersModels "wallet-backend/internal/components/users/models"
 	usersServices "wallet-backend/internal/components/users/services"
@@ -46,6 +47,15 @@ type Service struct {
 	JWTSecret    string
 	JWTExpiry    time.Duration
 	ApprovalTTL  time.Duration // default validity for an authorize/event request
+
+	// Shortlink is assigned post-construction in main.go, the same
+	// pattern as paymentsSvc.Alerts/usersSvc.GeoIP - shortlink.Init runs
+	// after servicelinks.Init (main.go's existing component order), and
+	// this keeps New's signature stable rather than reordering every
+	// other call site (PLAN.md §14.2 item 2). A nil Shortlink makes
+	// mintDeepLink a no-op instead of panicking, so existing tests that
+	// don't need QR minting are unaffected.
+	Shortlink *shortlinkServices.Service
 }
 
 func New(db *gorm.DB, users *usersServices.Service, payments *paymentsServices.Service, assets *assetsServices.Service, tokenization *tokenizationServices.Service, blob storage.Blob, push notify.PushProvider, jwtSecret string, jwtExpiry, approvalTTL time.Duration) *Service {

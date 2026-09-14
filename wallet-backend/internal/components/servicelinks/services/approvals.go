@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -65,6 +66,17 @@ func (s *Service) RequestApproval(serviceLinkID uint, input RequestApprovalInput
 	if err := s.DB.Create(&approval).Error; err != nil {
 		return nil, apperrors.Internal("failed to create approval request")
 	}
+
+	link, err := s.mintDeepLink(strings.ToLower(string(input.Kind)), map[string]string{"id": approval.ID}, map[string]string{
+		"action":     strings.ToLower(string(input.Kind)),
+		"approvalId": approval.ID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	approval.ShortURL = link.ShortURL
+	approval.QRURL = link.QRURL
+
 	return &approval, nil
 }
 
@@ -112,6 +124,12 @@ func (s *Service) Approve(approvalID string, callerAddress string) (*models.Serv
 	if err := s.DB.Save(approval).Error; err != nil {
 		return nil, apperrors.Internal("failed to record approval")
 	}
+
+	// Fire-and-forget: dispatchApprovalCallback (PLAN.md §14.2 item 3)
+	// retries on its own, so Approve returns to the caller immediately
+	// rather than waiting on a partner's callback endpoint.
+	go dispatchApprovalCallback(*approval)
+
 	return approval, nil
 }
 

@@ -80,6 +80,14 @@ type ServiceLinkApproval struct {
 	CallbackURL   string       `json:"-"`
 	ExpiresAt     time.Time    `gorm:"not null" json:"expiresAt"`
 	Authorized    bool         `gorm:"default:false" json:"authorized"`
+
+	// ShortURL/QRURL are populated on RequestApproval (PLAN.md §14.2 item
+	// 2) and never persisted (gorm:"-") - they're minted fresh from the
+	// shortlink component each time and would go stale as soon as
+	// re-read from a stored row, so there is nothing to gain from
+	// storing them and a staleness bug to avoid by not doing so.
+	ShortURL string `gorm:"-" json:"shortUrl,omitempty"`
+	QRURL    string `gorm:"-" json:"qrUrl,omitempty"`
 }
 
 // StakeholderDocument is a private document upload (e.g. a partner's KYB

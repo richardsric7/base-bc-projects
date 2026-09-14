@@ -282,9 +282,14 @@ func main() {
 	marketControllers.Init(router, gc)
 	tokenizationSvc := tokenizationControllers.Init(router, gc)
 	patronSvc := patronControllers.Init(router, gc)
-	servicelinksControllers.Init(router, gc, usersSvc, paymentsSvc, assetsSvc, tokenizationSvc)
+	servicelinksSvc := servicelinksControllers.Init(router, gc, usersSvc, paymentsSvc, assetsSvc, tokenizationSvc)
 	referenceControllers.Init(router, gc)
-	shortlinkControllers.Init(router, gc)
+	shortlinkSvc := shortlinkControllers.Init(router, gc)
+	// PLAN.md §14.2 item 2's shortlink/QR minting - assigned
+	// post-construction like paymentsSvc.Alerts/usersSvc.GeoIP/
+	// sharedaccessSvc.Assets above, since shortlinkControllers.Init runs
+	// after servicelinksControllers.Init in this boot order.
+	servicelinksSvc.Shortlink = shortlinkSvc
 
 	// Wire the KYC component's Doja BVN-completion hook to Stablerail
 	// onboarding - see kyc/services.Service.OnBVNVerified's doc comment

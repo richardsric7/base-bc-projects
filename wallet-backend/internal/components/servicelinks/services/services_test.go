@@ -18,6 +18,8 @@ import (
 	paymentsModels "wallet-backend/internal/components/payments/models"
 	paymentsServices "wallet-backend/internal/components/payments/services"
 	"wallet-backend/internal/components/servicelinks/models"
+	shortlinkModels "wallet-backend/internal/components/shortlink/models"
+	shortlinkServices "wallet-backend/internal/components/shortlink/services"
 	tokenizationModels "wallet-backend/internal/components/tokenization/models"
 	tokenizationServices "wallet-backend/internal/components/tokenization/services"
 	usersModels "wallet-backend/internal/components/users/models"
@@ -59,7 +61,7 @@ func newTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}
-	for _, migrate := range [][]interface{}{models.Models, usersModels.Models, assetsModels.Models, paymentsModels.Models, tokenizationModels.Models} {
+	for _, migrate := range [][]interface{}{models.Models, usersModels.Models, assetsModels.Models, paymentsModels.Models, tokenizationModels.Models, shortlinkModels.Models} {
 		if err := db.AutoMigrate(migrate...); err != nil {
 			t.Fatalf("migrate: %v", err)
 		}
@@ -79,6 +81,7 @@ func newTestService(t *testing.T) (*Service, *gorm.DB) {
 		t.Fatalf("init local blob storage: %v", err)
 	}
 	svc := New(db, usersSvc, paymentsSvc, assetsSvc, tokenizationSvc, blob, notify.NewNoopPushProvider(), "test-jwt-secret", time.Hour, 10*time.Minute)
+	svc.Shortlink = shortlinkServices.New(db, "https://test.example")
 	return svc, db
 }
 

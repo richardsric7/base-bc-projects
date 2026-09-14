@@ -37,6 +37,13 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig, users *usersService
 	walletAuthed.GET("/:id", getApprovalForUser(svc))
 	walletAuthed.POST("/:id/approve", approveForUser(svc))
 
+	// Payment-request links (PLAN.md §14.1a) are deliberately not
+	// registered under /v1/approvals - they are not an approval at all,
+	// just a stateless QR/deep-link generator for the caller's own use.
+	paymentRequests := router.Group("/v1/payment-requests")
+	paymentRequests.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
+	paymentRequests.GET("", requestPaymentLink(svc))
+
 	// Partner-facing: API-key-authenticated, capability-gated per route.
 	partner := router.Group("/v1/partner")
 	partner.Use(middleware.APIKeyAuth(gc.DB))

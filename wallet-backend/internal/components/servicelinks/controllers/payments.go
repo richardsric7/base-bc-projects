@@ -21,6 +21,33 @@ func registerPaymentRoutes(partner *gin.RouterGroup, svc *services.Service) {
 	partner.GET("/users/:userId/payments", getPaymentHistory(svc))
 	partner.GET("/users/:userId/balance", getBalance(svc))
 	partner.POST("/users/:userId/wallets", registerSubWallet(svc))
+	partner.GET("/users/:userId/payment-request", requestPartnerPaymentLink(svc))
+}
+
+// requestPartnerPaymentLink mints a "receive payment" QR/deep-link
+// (PLAN.md §14.1a/§14.2 item 1) - the partner-side half of the
+// payment-request-link pair, mirroring the original's query-param shape
+// (to/tokenAddress/amount/memo replacing paymentDestination/assetCode/
+// assetIssuer/amount/memo) but scoped through requireOwnedUser like
+// every other route in this file, tighter than the original's own
+// ownership-blind version of this specific route.
+func requestPartnerPaymentLink(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		link := currentServiceLink(c)
+		if !requireCapability(c, link.CanSendPayments) {
+			return
+		}
+		userID, ok := uintParam(c, "userId")
+		if !ok {
+			return
+		}
+		result, err := svc.RequestPaymentLinkForOwnedUser(link.ID, userID, c.Query("to"), c.Query("tokenAddress"), c.Query("amount"), c.Query("memo"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, result)
+	}
 }
 
 type buildPartnerPaymentRequest struct {

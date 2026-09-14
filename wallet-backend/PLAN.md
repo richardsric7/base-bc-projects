@@ -3039,6 +3039,149 @@ JWT-session scheme to begin with, so nothing there moves.
 | 4 | `AudienceServiceLinkSession` rename (shared with §12.7 Phase 4) | §12.7 Phase 3 |
 | 5 | Test, document, push | 1-4 |
 
+#### Phases 1-4 implementation notes (done)
+
+All four phases were implemented together, since the payment-request-link
+handlers and `RequestApproval`'s QR minting share the same
+`mintDeepLink` helper and naturally landed as one change:
+
+- **`internal/components/servicelinks/services/deeplinks.go`** (new) -
+  `mintDeepLink(action, params, metadata)` builds a target URL of the
+  form `{ShortlinkBaseURL}/deeplink?action=<action>&<params>`, mints it
+  via `s.Shortlink.CreateLink`, and returns the resulting short URL plus
+  its QR image URL (`shortURL + "/qr"`, the existing route shape from
+  `shortlink/controllers.go`). `action` is embedded as a query parameter
+  exactly as the original's dynamic links did, since that is the only
+  field the original mobile app's deep-link dispatcher reads. If
+  `Service.Shortlink` is nil (not wired up), it is a no-op returning a
+  zero-value result rather than an error - this keeps every existing
+  test that doesn't care about QR minting unaffected, and keeps
+  `RequestApproval`'s behavior optional-but-additive rather than a hard
+  new dependency.
+- **`Service.Shortlink *shortlinkServices.Service`** (new field,
+  `services.go`) - assigned post-construction in `main.go`
+  (`servicelinksSvc.Shortlink = shortlinkSvc`, after
+  `shortlinkControllers.Init` runs), the same cross-component wiring
+  pattern as `paymentsSvc.Alerts`/`usersSvc.GeoIP`/
+  `sharedaccessSvc.Assets`. This was chosen over adding a fifth
+  constructor argument to `New` (and reordering `main.go` so `shortlink`
+  initializes first) to avoid touching every existing test's `New(...)`
+  call site for an optional, late-bound dependency - consistent with how
+  `usersSvc.GeoIP` (also optional) is wired, not with how the four
+  *required* peer services are wired as constructor args.
+- **`RequestApproval`** (`services/approvals.go`) now calls
+  `mintDeepLink` after creating the `ServiceLinkApproval` row, using
+  `action = strings.ToLower(string(input.Kind))` (`login`/`authorize`/
+  `event`) and `id = approval.ID`. The result populates two new
+  **transient** fields on `models.ServiceLinkApproval`: `ShortURL` and
+  `QRURL`, both tagged `gorm:"-"` (never persisted - they're minted
+  fresh every call and would go stale as soon as read back from a stored
+  row). The controller's existing `c.JSON(http.StatusCreated, approval)`
+  picks these up automatically since they're just additional JSON fields
+  on the same struct - no controller/response-shape change was needed.
+- **Payment-request links** (`services/payment_requests.go`, new) - a
+  deliberately stateless `PaymentRequestLink{To, TokenAddress, Amount,
+  Memo, ShortURL, QRURL}` with no `ServiceLinkApproval`-style DB row, per
+  §14.1a. Two entry points, mirroring the original's app-signed/partner-
+  API-key pair:
+  - `RequestPaymentLink(to, tokenAddress, amount, memo)` - the app-signed
+    half. **Deliberate design decision, stated explicitly since PLAN.md
+    §14.1a flagged it as worth deciding rather than silently inheriting**:
+    this has no `targetUser`/`:id` parameter and no `CanSendPayments`
+    gate at all. The original's app-signed route took a `:targetUser`
+    path parameter but its only identity check was commented-out dead
+    code (`mInfo.PublicKey != middleware.ExtractPublicKey(c)`), meaning
+    it never actually verified the caller matched the named target. Per
+    §14.1a's own framing, reviving that no-op check would add nothing;
+    instead this route only ever mints a link for the caller's own use
+    (there is no separate target to name), which is strictly tighter
+    than the original's unenforced version. It has no `CanSendPayments`
+    gate because that capability lives on a `ServiceLink`, and this
+    app-signed path carries no service-link/partner context to check it
+    against - it's an ordinary self-service wallet feature ("generate my
+    own receive-payment QR"), not a partner acting on someone's behalf.
+  - `RequestPaymentLinkForOwnedUser(serviceLinkID, userID, to,
+    tokenAddress, amount, memo)` - the partner-side half, gated on
+    `CanSendPayments` and scoped through the existing `requireOwnedUser`
+    exactly like every other route in `controllers/payments.go`. This is
+    a deliberate *tightening* versus the original, whose equivalent route
+    had no ownership check on the named target user at all - consistent
+    with this port's established "deny by default, scope to owned users"
+    posture for every other partner route (PLAN.md §4.11 findings 5/6),
+    even though PLAN.md §14.1a's audit of the original didn't specifically
+    flag this route's ownership gap (the original's real bug there was
+    the dead identity check, not this).
+  - In both cases `to`/`tokenAddress`/`amount`/`memo` are supplied
+    explicitly by the caller (mirroring the original's own
+    `paymentDestination`/`assetCode`/`assetIssuer`/`amount`/`memo` query
+    parameters) rather than derived from the named user's stored address
+    - the destination and "who this request is for" are independent, the
+    same as the original (e.g. a merchant requesting payment to its own
+    treasury address on a customer's behalf).
+  - Routes: `GET /v1/payment-requests` (new top-level group, deliberately
+    *not* nested under `/v1/approvals` since PLAN.md §14.1a is explicit
+    this "is not an approval at all", `SignatureAuth`-protected) and
+    `GET /v1/partner/users/:userId/payment-request` (added to
+    `registerPaymentRoutes` in `controllers/payments.go`, `APIKeyAuth`-
+    protected). Both take `to`/`tokenAddress`/`amount`/`memo` as query
+    parameters (a GET, not a POST-with-body, to mirror the original's own
+    query-param shape and because minting a link is naturally idempotent
+    on its inputs).
+  - **Scope cut, stated explicitly rather than silently dropped**: the
+    original cached the generated QR in Redis for 20 minutes so repeat
+    requests for the same link were free. This port has no Redis
+    dependency anywhere else (a deliberate choice made much earlier in
+    this port - see `internal/components/shortlink`'s own package doc
+    comment on "free/local default" integrations), and `DynamicLink` rows
+    are cheap, permanent, and already deduplicated by nothing needing to
+    match - re-minting a fresh short code on every call is simpler than
+    introducing a cache layer for one route, at the cost of one extra
+    small DB row per request. If this route sees enough traffic for that
+    to matter in practice, a content-addressed cache key (hash of
+    to/tokenAddress/amount/memo) could dedupe short codes later without
+    changing the public response shape.
+- **Async retried callback dispatch** (`services/callbacks.go`, new) -
+  `dispatchApprovalCallback(approval)` POSTs a small JSON payload
+  (`approvalId`/`kind`/`targetUserId`/`authorized`) to
+  `approval.CallbackURL`, retrying with a fixed backoff schedule
+  (`1s, 5s, 15s, 30s` between the 5 total attempts) on any non-2xx
+  response or transport error, and only logging (never returning an
+  error to the caller) once every attempt is exhausted. Called as
+  `go dispatchApprovalCallback(*approval)` from `Approve`, immediately
+  after the approval row is saved, so a slow or unreachable partner
+  endpoint can never block or fail the user's own approve request.
+  **Scope note, stated explicitly**: the original used a channel-based
+  `callBackRetryChan` worker; this codebase has no existing generic
+  retried-webhook dispatcher anywhere to mirror that structure against
+  (confirmed by research across `internal/notify` and
+  `internal/alerting`, both synchronous/best-effort/no-retry), so this
+  is a small fixed-attempt/fixed-backoff loop rather than a literal port
+  of the channel design - functionally equivalent (bounded retries with
+  backoff, fire-and-forget from the caller's perspective), differently
+  shaped.
+- **Tests** (`services/payment_requests_test.go`,
+  `services/callbacks_test.go`, plus two new cases folded into
+  `deeplinks`' consumer `RequestApproval`): QR/short-URL minting on
+  `RequestApproval` (and its no-op behavior when `Shortlink` is nil);
+  `RequestPaymentLink`'s required-fields validation and successful
+  minting; `RequestPaymentLinkForOwnedUser`'s ownership scoping (rejects
+  an organic user, accepts an owned one); `dispatchApprovalCallback`'s
+  successful-delivery, retry-then-succeed, and exhausted-retries paths
+  using `httptest.Server` (with `approvalCallbackBackoff` temporarily
+  shrunk to millisecond durations so the retry tests run fast); and an
+  end-to-end `Approve` test asserting the callback is actually received
+  by a real local HTTP server. `newTestService` (`services_test.go`) now
+  also constructs a real `shortlinkServices.Service` against the same
+  in-memory test DB and wires it as `svc.Shortlink`, so every existing
+  test that calls `RequestApproval` now exercises the real QR-minting
+  path rather than a stub.
+- Full module `go build ./...`, `go vet ./...`, and `go test ./...`
+  (including `-race` on the servicelinks package specifically) all pass.
+  `go mod tidy` made no changes - no new dependencies were needed.
+- **§14 Phase 4 (`AudienceServiceLinkSession` rename) was already done**
+  in an earlier session (task #133 / §12.7 Phase 4) - confirmed still
+  live in `internal/middleware/jwt_auth.go` and unaffected by this work.
+
 Implementation does not begin until explicitly authorized.
 
 ## 15. Wallet recovery: two coexisting branches, not a replacement
