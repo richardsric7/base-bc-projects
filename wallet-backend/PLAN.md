@@ -2621,6 +2621,45 @@ database):
   registration panicking. Full `go build`/`go vet`/`go test ./...` pass
   across the module.
 
+#### Phase 8 implementation notes (done)
+
+- **`ListWalletsForMember`** (new): the port's equivalent of the
+  original's `GetAllWallets` + `WalletsSharedWithUser` reverse
+  association (§13.8) - but unified into one query rather than two,
+  since PLAN.md §13.4 already made a sub-wallet just the single-member
+  case of the same `ClosedGroup`/`GroupMember` schema a genuinely shared
+  wallet uses. Returns the caller's own primary wallet (looked up in
+  `users`, `Kind: "primary"`, a synthetic `Role: "OWNER"` since a primary
+  wallet has no real `GroupMember` row at all) plus every `ClosedGroup`
+  they're a member of, own sub-wallet and wallet shared to them alike -
+  indistinguishable in the result by design, matching how the schema
+  itself doesn't distinguish them either.
+- **`CuratedBalances`** (new, genuinely new relative to the original per
+  §13.1's own finding): iterates `assets.Service.ListCurated()` and reads
+  each curated token's balance for one group wallet, ignoring anything
+  the wallet might hold that isn't on the curated list. `sharedaccess`
+  reaches `assets` through a narrow `CuratedTokenLister` interface
+  (mirroring `BlockchainClient`'s own narrowing) rather than a concrete
+  `*assets.services.Service`, wired via a post-construction field
+  assignment (`sharedaccessSvc.Assets = assetsSvc` in `main.go`) - the
+  same cross-component pattern this codebase already uses for
+  `paymentsSvc.Alerts`/`usersSvc.GeoIP`, so neither package imports the
+  other's concrete type.
+- **Routes**: `GET /v1/shared-access/wallets` (list) and
+  `GET /v1/shared-access/balance/:groupId/curated` (curated summary),
+  both gated by the same `middleware.SignatureAuth` every other route in
+  this component already requires - `ListWalletsForMember` needs no
+  additional membership check (it only ever returns what the caller is
+  already entitled to see by construction), while `CuratedBalances`
+  reuses the same `memberRole` check `Balance` already has (any member,
+  `VIEW_ONLY` included, may check a balance).
+- **Verification**: new tests cover a caller with both a primary wallet
+  and a group membership seeing both entries with the right `Kind`/
+  `Role`, a caller with no registered primary wallet seeing just their
+  group memberships, curated balances coming back only for the curated
+  catalog's entries, and a non-member being rejected. Full `go build`/
+  `go vet`/`go test ./...` pass across the module.
+
 ### 13.11 Activation-order dependencies (user-flagged, audited against §13.1-§13.8's design)
 
 Registration itself never requires on-chain activation - the primary

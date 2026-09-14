@@ -260,6 +260,10 @@ func main() {
 	swapsSvc := swapsControllers.Init(router, gc)
 	swapsSvc.Alerts = gc.Alerts
 	sharedaccessSvc := sharedaccessControllers.Init(router, gc)
+	// PLAN.md §13.10 Phase 8's curated-asset balance summary - assigned
+	// post-construction, the same cross-component wiring pattern as
+	// paymentsSvc.Alerts/usersSvc.GeoIP above.
+	sharedaccessSvc.Assets = assetsSvc
 	// Must run before the router starts serving traffic - see
 	// relayer.Pool.ReserveAtStartup's own doc comment on why it isn't
 	// safe to call once the pool is already handling concurrent Claims.

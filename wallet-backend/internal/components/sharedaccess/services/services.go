@@ -47,6 +47,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"wallet-backend/internal/apperrors"
+	assetsModels "wallet-backend/internal/components/assets/models"
 	"wallet-backend/internal/components/sharedaccess/models"
 	usersModels "wallet-backend/internal/components/users/models"
 	"wallet-backend/internal/cryptoutil"
@@ -100,6 +101,21 @@ type Service struct {
 	// domainHooks holds every registered DomainHook, keyed by domain - see
 	// RegisterDomainHook.
 	domainHooks map[string]DomainHook
+
+	// Assets is assets.Service, narrowed to CuratedTokenLister - used only
+	// by CuratedBalances (PLAN.md §13.8's curated-asset-filtered balance
+	// summary). Assigned post-construction in main.go, the same pattern
+	// this codebase already uses for cross-component wiring (e.g.
+	// paymentsSvc.Alerts) - nil until then, in which case CuratedBalances
+	// fails closed rather than panicking.
+	Assets CuratedTokenLister
+}
+
+// CuratedTokenLister is the slice of assets.Service this package needs -
+// narrowed to an interface, like BlockchainClient, so a test can supply a
+// fake catalog instead of a live assets.Service.
+type CuratedTokenLister interface {
+	ListCurated() ([]assetsModels.CuratedToken, error)
 }
 
 func New(db *gorm.DB, blockchain BlockchainClient, deployerKeySalt string, chainID int64, relayerPool *relayer.Pool) *Service {
@@ -1343,4 +1359,120 @@ func (s *Service) Balance(ctx context.Context, groupID uint, callerAddress, toke
 		return "", apperrors.Internal("failed to read balance: " + err.Error())
 	}
 	return balance.String(), nil
+}
+
+// WalletSummary is one entry in ListWalletsForMember's result - either the
+// caller's own primary wallet (Kind "primary", GroupID nil) or a
+// ClosedGroup they're a GroupMember of (Kind "group") - a sub-wallet and a
+// genuinely shared multi-party wallet are indistinguishable here by
+// design, since PLAN.md §13.4 makes a sub-wallet simply the single-member
+// case of the same schema.
+type WalletSummary struct {
+	Address string `json:"address"`
+	Kind    string `json:"kind"` // "primary" or "group"
+	// Role is "OWNER" for a primary wallet (not a real models.GroupRole -
+	// a primary wallet has no GroupMember row at all) or the caller's
+	// actual GroupRole for a "group" entry.
+	Role      string `json:"role"`
+	Threshold int    `json:"threshold"`
+	Disabled  bool   `json:"disabled"`
+	GroupID   *uint  `json:"groupId,omitempty"`
+	Name      string `json:"name,omitempty"`
+}
+
+// ListWalletsForMember returns every wallet memberAddress can see: its own
+// primary wallet (if registered) and every ClosedGroup it's a GroupMember
+// of, own or shared-to-it alike - the port's equivalent of the original's
+// GetAllWallets + WalletsSharedWithUser reverse association (PLAN.md
+// §13.8), unified into one query per PLAN.md §13.4's own schema design
+// rather than two separate ones the way the original needed.
+func (s *Service) ListWalletsForMember(memberAddress string) ([]WalletSummary, error) {
+	var summaries []WalletSummary
+
+	var user usersModels.User
+	err := s.DB.Where("LOWER(address) = LOWER(?)", memberAddress).First(&user).Error
+	if err == nil {
+		summaries = append(summaries, WalletSummary{
+			Address: user.Address, Kind: "primary", Role: "OWNER", Threshold: 1,
+		})
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, apperrors.Internal("failed to look up primary wallet")
+	}
+
+	var memberships []models.GroupMember
+	if err := s.DB.Where("member_address = ?", memberAddress).Find(&memberships).Error; err != nil {
+		return nil, apperrors.Internal("failed to load group memberships")
+	}
+	if len(memberships) == 0 {
+		return summaries, nil
+	}
+	groupIDs := make([]uint, len(memberships))
+	roleByGroup := make(map[uint]models.GroupRole, len(memberships))
+	for i, m := range memberships {
+		groupIDs[i] = m.GroupID
+		roleByGroup[m.GroupID] = m.Role
+	}
+	var groups []models.ClosedGroup
+	if err := s.DB.Where("id IN ? AND purpose = ?", groupIDs, models.PurposeWalletAccess).Find(&groups).Error; err != nil {
+		return nil, apperrors.Internal("failed to load groups")
+	}
+	for _, g := range groups {
+		addr := ""
+		if g.Address != nil {
+			addr = *g.Address
+		}
+		gid := g.ID
+		summaries = append(summaries, WalletSummary{
+			Address: addr, Kind: "group", Role: string(roleByGroup[g.ID]),
+			Threshold: g.Threshold, Disabled: g.Disabled, GroupID: &gid, Name: g.Name,
+		})
+	}
+	return summaries, nil
+}
+
+// CuratedBalance is one curated token's balance for a group wallet.
+type CuratedBalance struct {
+	Symbol          string `json:"symbol"`
+	ContractAddress string `json:"contractAddress"`
+	Decimals        uint8  `json:"decimals"`
+	Balance         string `json:"balance"`
+}
+
+// CuratedBalances returns a group wallet's balance of every active entry
+// in the curated-token catalog, ignoring any ERC-20 the group might
+// otherwise hold that isn't on that curated list (PLAN.md §13.8 - new
+// relative to the original, which has no such filtered view, but a
+// reasonable ask on its own terms). Any member (including VIEW_ONLY) may
+// check it, same as Balance.
+func (s *Service) CuratedBalances(ctx context.Context, groupID uint, callerAddress string) ([]CuratedBalance, error) {
+	if _, err := s.memberRole(groupID, callerAddress); err != nil {
+		return nil, err
+	}
+	group, err := s.GetGroup(groupID)
+	if err != nil {
+		return nil, err
+	}
+	if group.Address == nil {
+		return nil, apperrors.Internal("group has no wallet address")
+	}
+	if s.Assets == nil {
+		return nil, apperrors.Internal("curated asset catalog is not configured")
+	}
+	tokens, err := s.Assets.ListCurated()
+	if err != nil {
+		return nil, err
+	}
+
+	balances := make([]CuratedBalance, 0, len(tokens))
+	for _, token := range tokens {
+		balance, err := s.Blockchain.ERC20BalanceOf(ctx, token.ContractAddress, *group.Address)
+		if err != nil {
+			return nil, apperrors.Internal("failed to read balance for " + token.Symbol + ": " + err.Error())
+		}
+		balances = append(balances, CuratedBalance{
+			Symbol: token.Symbol, ContractAddress: token.ContractAddress,
+			Decimals: token.Decimals, Balance: balance.String(),
+		})
+	}
+	return balances, nil
 }

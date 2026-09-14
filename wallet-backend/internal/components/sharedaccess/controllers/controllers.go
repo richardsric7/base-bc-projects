@@ -28,6 +28,8 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	group.POST("/groups", createGroup(svc))
 	group.GET("/groups/:groupId", getGroup(svc))
 	group.GET("/balance/:groupId", getBalance(svc))
+	group.GET("/balance/:groupId/curated", getCuratedBalances(svc))
+	group.GET("/wallets", listWallets(svc))
 
 	group.POST("/actions", proposeAction(svc))
 	group.GET("/actions", listPending(svc))
@@ -105,6 +107,34 @@ func getBalance(svc *services.Service) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"balance": balance})
+	}
+}
+
+func getCuratedBalances(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		groupID, err := parseID(c, "groupId")
+		if err != nil {
+			return
+		}
+		caller := c.GetString(middleware.CtxSubject)
+		balances, err := svc.CuratedBalances(c.Request.Context(), groupID, caller)
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, balances)
+	}
+}
+
+func listWallets(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		caller := c.GetString(middleware.CtxSubject)
+		wallets, err := svc.ListWalletsForMember(caller)
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, wallets)
 	}
 }
 

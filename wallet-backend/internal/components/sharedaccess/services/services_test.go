@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm"
 
 	"wallet-backend/internal/apperrors"
+	assetsModels "wallet-backend/internal/components/assets/models"
 	"wallet-backend/internal/components/sharedaccess/models"
 	usersModels "wallet-backend/internal/components/users/models"
 	"wallet-backend/internal/relayer"
@@ -1097,4 +1098,140 @@ func TestDomainHook_NeverFiresForAnOrdinaryAction(t *testing.T) {
 	if fired {
 		t.Fatal("expected no domain hook to fire for an action with no domain set")
 	}
+}
+
+func TestListWalletsForMember_IncludesPrimaryAndGroupWallets(t *testing.T) {
+	db := newTestDB(t)
+	svc := New(db, newFakeBlockchain("0xdeployed"), "test-salt", 84532, mustPool(t))
+
+	signerAddr, _ := randomAddress(t)
+	primaryAddr, _ := randomAddress(t)
+	user := usersModels.User{Username: "erin", Email: "erin@example.com", Address: primaryAddr, SignerAddress: signerAddr, PrimaryWalletDeployed: true}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	group, err := svc.CreateGroup(context.Background(), "shared with erin", 1, []MemberInput{
+		{Address: primaryAddr, Role: models.RoleInitiatorApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+
+	wallets, err := svc.ListWalletsForMember(primaryAddr)
+	if err != nil {
+		t.Fatalf("ListWalletsForMember returned error: %v", err)
+	}
+	if len(wallets) != 2 {
+		t.Fatalf("expected 2 wallets (primary + group), got %d: %#v", len(wallets), wallets)
+	}
+
+	var sawPrimary, sawGroup bool
+	for _, w := range wallets {
+		switch w.Kind {
+		case "primary":
+			sawPrimary = true
+			if w.Address != primaryAddr || w.Role != "OWNER" {
+				t.Fatalf("unexpected primary wallet summary: %#v", w)
+			}
+		case "group":
+			sawGroup = true
+			if w.GroupID == nil || *w.GroupID != group.ID || w.Role != string(models.RoleInitiatorApprover) {
+				t.Fatalf("unexpected group wallet summary: %#v", w)
+			}
+		}
+	}
+	if !sawPrimary || !sawGroup {
+		t.Fatalf("expected both a primary and a group entry, got %#v", wallets)
+	}
+}
+
+func TestListWalletsForMember_NoPrimaryWalletJustGroups(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xdeployed"))
+	initiator, _ := randomAddress(t)
+	approver, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "unregistered members", 1, []MemberInput{
+		{Address: initiator, Role: models.RoleInitiator},
+		{Address: approver, Role: models.RoleApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+
+	wallets, err := svc.ListWalletsForMember(approver)
+	if err != nil {
+		t.Fatalf("ListWalletsForMember returned error: %v", err)
+	}
+	if len(wallets) != 1 || wallets[0].Kind != "group" || wallets[0].GroupID == nil || *wallets[0].GroupID != group.ID {
+		t.Fatalf("expected exactly one group wallet, got %#v", wallets)
+	}
+}
+
+func TestCuratedBalances_ReturnsOnlyCuratedTokens(t *testing.T) {
+	chain := newFakeBlockchain("0xdeployed")
+	svc := newTestService(t, chain)
+	svc.Assets = &fakeAssets{tokens: []assetsModels.CuratedToken{
+		{Symbol: "USDC", ContractAddress: "0x1111111111111111111111111111111111111111", Decimals: 6},
+		{Symbol: "WETH", ContractAddress: "0x2222222222222222222222222222222222222222", Decimals: 18},
+	}}
+	initiator, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "1-of-1", 1, []MemberInput{
+		{Address: initiator, Role: models.RoleInitiatorApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+
+	balances, err := svc.CuratedBalances(context.Background(), group.ID, initiator)
+	if err != nil {
+		t.Fatalf("CuratedBalances returned error: %v", err)
+	}
+	if len(balances) != 2 {
+		t.Fatalf("expected 2 curated balances, got %d", len(balances))
+	}
+	if balances[0].Symbol != "USDC" || balances[0].Balance != "500" {
+		t.Fatalf("unexpected first balance: %#v", balances[0])
+	}
+}
+
+func TestCuratedBalances_RejectsNonMember(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xdeployed"))
+	svc.Assets = &fakeAssets{}
+	initiator, _ := randomAddress(t)
+	outsider, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "1-of-1", 1, []MemberInput{
+		{Address: initiator, Role: models.RoleInitiatorApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+
+	if _, err := svc.CuratedBalances(context.Background(), group.ID, outsider); err == nil {
+		t.Fatal("expected a non-member to be rejected")
+	}
+}
+
+// fakeAssets is a CuratedTokenLister that never touches the database.
+type fakeAssets struct {
+	tokens []assetsModels.CuratedToken
+	err    error
+}
+
+func (f *fakeAssets) ListCurated() ([]assetsModels.CuratedToken, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.tokens, nil
+}
+
+func mustPool(t *testing.T) *relayer.Pool {
+	t.Helper()
+	pool, err := relayer.NewPool("test-relayer-salt", 2)
+	if err != nil {
+		t.Fatalf("relayer.NewPool: %v", err)
+	}
+	return pool
 }
