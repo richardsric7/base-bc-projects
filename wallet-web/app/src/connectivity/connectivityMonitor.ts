@@ -1,4 +1,4 @@
-import { BASE_URL } from '../api/httpClient';
+import { getBaseUrl } from '../api/httpClient';
 import { statusChanged } from '../store/connectivitySlice';
 import type { AppDispatch } from '../store';
 
@@ -16,7 +16,7 @@ export async function checkBackendReachable(): Promise<boolean> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_TIMEOUT_MS);
   try {
-    const response = await fetch(`${BASE_URL}/`, { method: 'GET', signal: controller.signal });
+    const response = await fetch(`${getBaseUrl()}/`, { method: 'GET', signal: controller.signal });
     return response.ok;
   } catch {
     return false;

@@ -10,7 +10,24 @@ COPY wallet-core ./wallet-core
 RUN wasm-pack build wallet-core --release --target web --out-dir /wasm-pkg
 
 # Stage 2: build the React/Vite app against the already-built wasm-pkg.
+# The four VITE_* build args become real process env vars before `vite
+# build` runs - Vite's own `loadEnv` merges process.env over anything in
+# a committed .env file, so these take effect with no .env file needed
+# (see DEPLOYMENT.md §3). VITE_WALLET_BACKEND_URL_MAINNET defaults empty,
+# same as app/.env.example, so a build that doesn't set it simply ships
+# with the in-app network switch's "Mainnet" option disabled rather than
+# pointed at nothing.
 FROM node:20-alpine AS app-builder
+ARG VITE_WALLET_BACKEND_URL_TESTNET=http://localhost:8080
+ARG VITE_CHAIN_ID_TESTNET=84532
+ARG VITE_WALLET_BACKEND_URL_MAINNET=
+ARG VITE_CHAIN_ID_MAINNET=8453
+ARG VITE_DEFAULT_NETWORK=testnet
+ENV VITE_WALLET_BACKEND_URL_TESTNET=$VITE_WALLET_BACKEND_URL_TESTNET \
+    VITE_CHAIN_ID_TESTNET=$VITE_CHAIN_ID_TESTNET \
+    VITE_WALLET_BACKEND_URL_MAINNET=$VITE_WALLET_BACKEND_URL_MAINNET \
+    VITE_CHAIN_ID_MAINNET=$VITE_CHAIN_ID_MAINNET \
+    VITE_DEFAULT_NETWORK=$VITE_DEFAULT_NETWORK
 WORKDIR /app
 COPY app/package.json app/package-lock.json* ./
 RUN npm ci

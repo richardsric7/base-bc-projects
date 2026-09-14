@@ -9,10 +9,15 @@ server {
 
   # PLAN.md §7's CSP hardening: script-src 'self' with no unsafe-inline/
   # unsafe-eval (WASM instantiation via instantiateStreaming needs
-  # neither); connect-src is the actual wallet-backend origin, templated
-  # in at container start via envsubst - same pattern as BACKEND_URL
-  # below, not a third-party CDN.
-  add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ${BACKEND_URL}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'" always;
+  # neither); connect-src lists both wallet-backend origins this build
+  # can call, templated in at container start via envsubst. Both are
+  # listed (not just whichever network is "active") because the in-app
+  # testnet/mainnet switch (src/config/network.ts) can call either one
+  # from the same running container - set BACKEND_URL_MAINNET to the
+  # same value as BACKEND_URL_TESTNET (or leave it unset, which
+  # envsubst renders as an empty connect-src entry - harmless) if this
+  # deployment only ever offers one network.
+  add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ${BACKEND_URL_TESTNET} ${BACKEND_URL_MAINNET}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'" always;
   add_header X-Content-Type-Options "nosniff" always;
   add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 

@@ -3654,3 +3654,85 @@ change (Phase 5 was deliberately not pursued - see its own note below).
   a concrete gap Branch A doesn't cover is identified.
 
 Implementation does not begin until explicitly authorized.
+
+## 16. Post-implementation documentation: testnet/mainnet, Swagger/OpenAPI, deployment config
+
+Requested after §15 landed: clear instructions for running both this
+service and the client apps against testnet and mainnet, a client-side
+network switch if one didn't already exist, API-URL configuration
+instructions per app, full Swagger/OpenAPI documentation, and a
+`DEPLOYMENT.md` with realistic sample config values and sourcing
+guidance for each. All delivered:
+
+- **`DEPLOYMENT.md` gained a new §2 "Running against testnet vs.
+  mainnet"**: explains that this service is one deployment per network
+  (not a runtime-switchable server), how to get a dedicated Base RPC
+  endpoint (Alchemy/Infura/QuickNode, with the exact dashboard steps),
+  concrete `.env` values for each network, testnet faucet links, and the
+  mainnet-specific cautions (never reuse a `*_KEY_SALT` across
+  environments, verify curated token contract addresses against an
+  authoritative source before seeding them).
+- **`DEPLOYMENT.md` §4 (env vars) rewritten from a short "what must be
+  set" table into a full reference**: every variable in `.env.example`,
+  grouped by subsystem, each with a realistic sample value and - for
+  anything sourced from a third party (Alchemy/Infura/QuickNode RPC keys,
+  Sumsub/Dojah, Flutterwave, Stablerail, OneLiquidity, Discord webhooks,
+  SMTP credentials) - exactly where to go get it.
+- **Swagger/OpenAPI** (`internal/components/docs`, new): a hand-authored
+  OpenAPI 3.0 spec (`controllers/assets/openapi.json`, embedded via
+  `go:embed`) covering all ~150 routes across all 19 components, served
+  at `GET /swagger/openapi.json`, plus an interactive Swagger UI at
+  `GET /swagger/` (assets loaded from `cdn.jsdelivr.net`, needing the
+  *browser's* internet access, not the server's - the spec itself is
+  fully self-hosted). Hand-authored rather than swaggo/handler-comment
+  generated: at this route count, per-handler annotation comments would
+  be a large ongoing maintenance surface for marginal benefit over a
+  spec written directly from reading each controller/model, and this
+  codebase already keeps its authoritative documentation in PLAN.md
+  rather than doc-comments-as-source-of-truth.
+  - **Built via five parallel research/drafting agents**, one per
+    cluster of components (users+sharedaccess+root+callbacks;
+    assets+payments+swaps+rates; crypto+fiat+stablerail+kyc;
+    market+patron+tokenization; announcements+reference+servicelinks+
+    shortlink), each instructed to read the real controller/handler/model
+    code rather than infer shapes from naming - then merged into one
+    spec by a small Python script (validated: every `$ref` resolves, zero
+    orphaned schemas, passes `openapi-spec-validator`'s full schema
+    validation). Two agents independently caught and flagged that this
+    codebase's real error envelope is `{"error": "<code>", "message":
+    "<text>"}` (`internal/apperrors`), not the simpler placeholder shape
+    the drafting instructions suggested - reconciled by documenting the
+    real shape once in the spec's top-level description and adding a
+    shared `ErrorResponse` schema, without going back to rewrite every
+    per-operation example (a cosmetic inconsistency between an example
+    and the documented canonical shape, not a correctness gap).
+  - Verified live: a boot-smoke-test against SQLite confirmed
+    `GET /swagger/openapi.json` (152 paths, 148 schemas) and
+    `GET /swagger/` both serve correctly, and `GET /swagger` redirects to
+    it.
+- **`wallet-web` gained an in-app testnet/mainnet switch** (it had none -
+  `VITE_WALLET_BACKEND_URL`/`VITE_CHAIN_ID` were single build-time-only
+  values): see `wallet-web/PLAN.md` §10's new implementation note and
+  `wallet-web/DEPLOYMENT.md` §2-4/§9 for the full design (paired
+  `_TESTNET`/`_MAINNET` build-time vars, a `localStorage`-persisted
+  runtime toggle in Settings, both origins allowlisted in the CSP either
+  way). Verified: `npm run build:app-only` succeeds cleanly with the new
+  `src/config/network.ts` module wired through `httpClient.ts`,
+  `connectivityMonitor.ts`, and `authFlow.ts`.
+- **`wallet-mobile` has no implementation yet** (still design-only per
+  its own PLAN.md §13) - added a new §5.1 to `wallet-mobile/PLAN.md`
+  designing the same switch (Flutter `--dart-define` build-time pairs +
+  a `shared_preferences`-persisted runtime toggle) for whenever that
+  build actually starts, rather than fabricating mobile app code that
+  doesn't exist.
+- **Noted, not fixed**: `wallet-web/PLAN.md` §11 already tracks (from
+  before this work) that its API client still speaks the old SIWE +
+  session-JWT scheme this service's own §12 replaced with per-request
+  SignatureAuth - confirmed still true (`api/authFlow.ts`, `api/siwe.ts`,
+  `api/authApi.ts`, and every API call site still thread a bearer
+  `token`). The network switch changes *which* backend/chain
+  `wallet-web` targets and is unaffected by this either way; actually
+  fixing the auth mismatch is a separate, substantial rewrite (a generic
+  per-request personal_sign path through the Worker, and updating every
+  page's API calls) out of scope for this documentation-focused pass -
+  left as the already-tracked §11 item, not silently patched over.

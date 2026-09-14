@@ -37,6 +37,7 @@ import (
 	assetsControllers "wallet-backend/internal/components/assets/controllers"
 	callbacksControllers "wallet-backend/internal/components/callbacks/controllers"
 	cryptoControllers "wallet-backend/internal/components/crypto/controllers"
+	docsControllers "wallet-backend/internal/components/docs/controllers"
 	fiatControllers "wallet-backend/internal/components/fiat/controllers"
 	kycControllers "wallet-backend/internal/components/kyc/controllers"
 	marketControllers "wallet-backend/internal/components/market/controllers"
@@ -257,6 +258,7 @@ func main() {
 	router.Static(env.StorageURL, env.StorageDir)
 
 	rootControllers.Init(router, gc)
+	docsControllers.Init(router)
 	usersSvc := usersControllers.Init(router, gc)
 	usersSvc.GeoIP = gc.GeoIP
 	// PLAN.md §15's wallet-recovery Branch B platform infrastructure -

@@ -678,6 +678,26 @@ Phases 1-13 are implemented as designed above, with the following notes:
   (their signer vault is preserved, not lost). A UX polish item, not a
   security gap, left for a later pass given this plan's already-large
   scope.
+- **In-app testnet/mainnet switch added** (`src/config/network.ts`,
+  a Settings-page toggle in `src/pages/settings/Settings.tsx`): both
+  networks' `wallet-backend` URL and chain ID ship in one build
+  (`VITE_WALLET_BACKEND_URL_TESTNET`/`_MAINNET`,
+  `VITE_CHAIN_ID_TESTNET`/`_MAINNET`), and the active choice is a
+  `localStorage`-persisted runtime toggle, not a rebuild - `httpClient.ts`
+  reads the active network's URL fresh on every request instead of
+  caching it at module load. Switching networks reloads the page rather
+  than trying to reconcile in-memory Redux/cache state, since testnet and
+  mainnet are separate `wallet-backend` deployments with entirely
+  separate user registrations, not just a different chain ID on one
+  shared server - there's nothing to "translate" from one to the other.
+  The toggle disables whichever network's backend URL is left empty, so
+  an unconfigured build can never silently offer a network nobody set up
+  for it. `app/nginx.conf.template`'s CSP `connect-src` and
+  `Dockerfile`'s app-builder stage were updated to carry both networks'
+  origins/build args side by side (`DEPLOYMENT.md` §2-4, §9). This is
+  orthogonal to and does not resolve §11 below - the switch changes which
+  backend/chain the app targets, not what auth scheme it speaks to that
+  backend.
 
 ## 11. Pending: `wallet-backend`'s auth redesign (tracked, not yet implemented here)
 

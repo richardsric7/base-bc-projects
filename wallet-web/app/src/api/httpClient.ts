@@ -1,6 +1,8 @@
 // A thin fetch wrapper for wallet-backend's REST API (PLAN.md §2). Every
 // call here is a plain JSON request/response - the non-custodial parts
 // (signing) never happen in this file, only in core/walletCoreClient.ts.
+import { getNetworkConfig } from '../config/network';
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -10,7 +12,12 @@ export class ApiError extends Error {
   }
 }
 
-export const BASE_URL = import.meta.env.VITE_WALLET_BACKEND_URL ?? 'http://localhost:8080';
+// Read fresh on every call (not cached at module load) so the in-app
+// testnet/mainnet switch (src/config/network.ts) takes effect without
+// needing this module to be re-imported.
+export function getBaseUrl(): string {
+  return getNetworkConfig().backendUrl;
+}
 
 interface RequestOptions {
   method?: 'GET' | 'POST' | 'DELETE';
@@ -26,7 +33,7 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
 
   let response: Response;
   try {
-    response = await fetch(`${BASE_URL}${path}`, {
+    response = await fetch(`${getBaseUrl()}${path}`, {
       method: options.method ?? 'GET',
       headers,
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,

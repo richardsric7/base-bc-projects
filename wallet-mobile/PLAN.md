@@ -172,6 +172,47 @@ original's `X-TW-*` headers. Device-ID/app-version headers
 (`functions/helpers.dart`) carry over unchanged - they're not
 chain-specific.
 
+### 5.1 Environment configuration: a testnet/mainnet switch, mirroring `wallet-web`
+
+`wallet-backend` is deployed once per network (separate services,
+separate databases - never one server for both chains, see
+`wallet-backend/DEPLOYMENT.md` §1/§9), so "switching network" here means
+"point the app at a different `wallet-backend` deployment," exactly as
+`wallet-web/PLAN.md` §10's now-implemented in-app switch
+(`src/config/network.ts`) does. Port the same design rather than
+inventing a second one:
+
+- Two named environments, each a `(backendUrl, chainId, label)` triple -
+  `Base Sepolia (Testnet)` and `Base Mainnet` - baked into the app at
+  build time via Flutter's `--dart-define` (the Dart/Flutter equivalent
+  of Vite's build-time `VITE_*` vars; there is no `.env` file read at
+  runtime in a compiled mobile app). Define both in every build:
+  `TESTNET_BACKEND_URL`/`TESTNET_CHAIN_ID` and
+  `MAINNET_BACKEND_URL`/`MAINNET_CHAIN_ID`, read via
+  `String.fromEnvironment`/`int.fromEnvironment` at startup into a single
+  `NetworkConfig` held in app state (`provider`/whatever this settles
+  on, per §12's open dependency question) - not scattered `Platform`
+  lookups at each call site.
+- The **active** network is a runtime choice persisted in local device
+  storage (`shared_preferences` is sufficient - this is a non-secret UI
+  preference, unlike the vault, which stays in `flutter_secure_storage`
+  per §4.3), defaulting to testnet for the same forgotten-config-safety
+  reason `wallet-backend`'s own `BASE_CHAIN_ID` and `wallet-web`'s
+  `VITE_DEFAULT_NETWORK` both default to Sepolia/testnet.
+- A Settings screen toggle (ported alongside the existing settings
+  screens in Phase 5/9's dashboard work) switches it, mirroring
+  `wallet-web`'s Settings-page toggle: switching networks should restart
+  the app's navigation stack back to the root/splash screen rather than
+  attempting to reconcile in-memory state, since testnet and mainnet are
+  separate `wallet-backend` deployments with entirely separate user
+  registrations - there is nothing to translate from one to the other.
+  Disable (grey out) whichever network's backend URL define was left
+  empty, so a build that only configured one network can't let someone
+  select the other into a dead endpoint.
+- This is orthogonal to §5's signature-auth header work above - the
+  network switch changes which backend/chain the app targets, not what
+  auth scheme it speaks to that backend once selected.
+
 ## 6. Sub-wallets: a simpler flow than the original's
 
 Per `wallet-backend/PLAN.md` §13.3, creating a sub-wallet on Base needs
@@ -311,7 +352,7 @@ might suggest.
 | 1 | `wallet-core`: FFI bindings (§4.1), EIP-712 signing addition (§4.2) | `wallet-web/PLAN.md`'s tracked EIP-712 item |
 | 2 | App scaffold: Flutter project, ported theme (§3, colors/fonts/`ColorNotifier`), router port | Phase 1 |
 | 3 | Vault + secure storage (§4.3), onboarding/import screens | Phase 1, 2 |
-| 4 | Networking layer with the finalized signature-auth headers (§5) | `wallet-backend` §12 shipped |
+| 4 | Networking layer with the finalized signature-auth headers (§5) and the testnet/mainnet environment switch (§5.1) | `wallet-backend` §12 shipped |
 | 5 | Dashboard, send/receive, swap - straightforward ports | Phase 4 |
 | 6 | Sub-wallets (§6), shared access (§7) | `wallet-backend` §13 shipped |
 | 7 | Servicelinks QR scanning + approval screens, including the new `EVENT` case (§8) | `wallet-backend` §14 shipped |

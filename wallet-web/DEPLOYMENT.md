@@ -21,61 +21,98 @@ configuration.
 
 ## 2. Build-time vs. runtime configuration - the one thing to get right
 
-This is a static SPA: `VITE_WALLET_BACKEND_URL` and `VITE_CHAIN_ID` (see
-`app/.env.example`) are **baked into the JS bundle at build time**, not
-read from the environment at container start. If you need to point the
-same built image at different backends per environment (dev/staging/
-prod), you must **rebuild** with different `.env` values for each - a
-`docker run -e VITE_WALLET_BACKEND_URL=...` on the finished image does
-nothing, since Vite has already inlined the previous value into the
+This is a static SPA: `VITE_WALLET_BACKEND_URL_TESTNET`/`_MAINNET` and
+`VITE_CHAIN_ID_TESTNET`/`_MAINNET` (see `app/.env.example`) are **baked
+into the JS bundle at build time**, not read from the environment at
+container start. If you need to point the same built image at different
+backends per deployment (dev/staging/prod), you must **rebuild** with
+different `--build-arg` values for each - a
+`docker run -e VITE_WALLET_BACKEND_URL_TESTNET=...` on the finished image
+does nothing, since Vite has already inlined the previous value into the
 bundle before that container ever starts.
 
-The **one exception** is the CSP header's `connect-src`, set from
-`BACKEND_URL` via nginx's `envsubst` templating (`app/nginx.conf.template`)
-at container *start*, not build time - see step 4. Don't confuse the two:
-`VITE_WALLET_BACKEND_URL` (build-time, in the JS) is what the app
-actually calls; `BACKEND_URL` (start-time, in nginx) is only what the
-browser's CSP is allowed to let it call. **They must be the same URL**,
-or the app will try to call an origin its own CSP then blocks.
+**Both networks' config ships in every build.** Since PLAN.md's
+testnet/mainnet switch, the app has an in-page Settings toggle
+(`src/config/network.ts`, `src/pages/settings/Settings.tsx`) that picks
+between them at runtime via `localStorage`, with no rebuild - so a single
+build can offer both, and `VITE_DEFAULT_NETWORK` only controls which one
+a fresh visit starts on. If a deployment should only ever offer one
+network, leave the other pair blank; the switch disables (greys out) the
+network whose backend URL is empty rather than letting someone select a
+network that was never configured.
+
+The **one exception** to "build-time only" is the CSP header's
+`connect-src`, set from `BACKEND_URL_TESTNET`/`BACKEND_URL_MAINNET` via
+nginx's `envsubst` templating (`app/nginx.conf.template`) at container
+*start*, not build time - see step 4. Don't confuse the two:
+`VITE_WALLET_BACKEND_URL_*` (build-time, in the JS) is what the app
+actually calls; `BACKEND_URL_*` (start-time, in nginx) is only what the
+browser's CSP is allowed to let it call. **Each pair must name the same
+URL** (testnet build value = testnet nginx value, same for mainnet), or
+the app will try to call an origin its own CSP then blocks.
 
 ## 3. Building
 
 ```bash
 # from the wallet-web/ directory (the build context spans both
 # wallet-core/ and app/, so it must not be run from inside app/)
+
+# A build that offers both networks (e.g. an internal/staging build):
 docker build -t wallet-web \
-  --build-arg VITE_WALLET_BACKEND_URL=https://api.your-domain.example \
-  --build-arg VITE_CHAIN_ID=8453 \
+  --build-arg VITE_WALLET_BACKEND_URL_TESTNET=https://staging-api.your-domain.example \
+  --build-arg VITE_CHAIN_ID_TESTNET=84532 \
+  --build-arg VITE_WALLET_BACKEND_URL_MAINNET=https://api.your-domain.example \
+  --build-arg VITE_CHAIN_ID_MAINNET=8453 \
+  --build-arg VITE_DEFAULT_NETWORK=testnet \
+  .
+
+# A production build that should only ever offer mainnet (recommended
+# for the actual public-facing deployment - see the pre-launch checklist,
+# step 9): leave the testnet pair pointed wherever's convenient (or at
+# the same values as dev) and set the default to mainnet, or simply never
+# surface a way to reach the testnet build in your public DNS/routing.
+docker build -t wallet-web \
+  --build-arg VITE_WALLET_BACKEND_URL_MAINNET=https://api.your-domain.example \
+  --build-arg VITE_CHAIN_ID_MAINNET=8453 \
+  --build-arg VITE_DEFAULT_NETWORK=mainnet \
   .
 ```
 
-The current `Dockerfile` doesn't yet declare `ARG`/`ENV` for these two
-build-time values - it builds `app/.env` as committed
-(`app/.env.example`'s defaults, pointing at `localhost:8080`/Sepolia).
-**Before a real deployment**, either add `ARG VITE_WALLET_BACKEND_URL`/
-`ARG VITE_CHAIN_ID` to the app-builder stage and reference them in a
-generated `.env`, or simplest: copy `app/.env.example` to `app/.env` with
-your real production values *before* running `docker build`, since Vite
-reads `.env` at its own build step inside the image regardless of how
-that file got there.
+`Dockerfile`'s app-builder stage declares `ARG`/`ENV` for all five
+values (`VITE_WALLET_BACKEND_URL_TESTNET`, `VITE_CHAIN_ID_TESTNET`,
+`VITE_WALLET_BACKEND_URL_MAINNET`, `VITE_CHAIN_ID_MAINNET`,
+`VITE_DEFAULT_NETWORK`) and promotes each to a real process env var
+before `npm run build:app-only` runs - Vite's own `loadEnv` merges
+`process.env` over `app/.env.example`'s committed defaults, so no
+generated `.env` file is needed; the `--build-arg`s above are sufficient
+on their own.
 
 ## 4. Running - the nginx image and its templated CSP
 
 ```bash
-docker run -p 8081:80 -e BACKEND_URL=https://api.your-domain.example wallet-web
+docker run -p 8081:80 \
+  -e BACKEND_URL_TESTNET=https://staging-api.your-domain.example \
+  -e BACKEND_URL_MAINNET=https://api.your-domain.example \
+  wallet-web
 ```
 
 `app/nginx.conf.template` sets a `Content-Security-Policy` header whose
-`connect-src` is `${BACKEND_URL}`, substituted by the base nginx image's
-built-in `docker-entrypoint.d` templating (`envsubst` over every
-`*.template` file in `/etc/nginx/templates/`, per the `nginx:1.27-alpine`
-image's own convention) at container start. **Set `BACKEND_URL` to the
-exact same origin as `VITE_WALLET_BACKEND_URL` was at build time** (step
-2's warning) - a mismatch here doesn't fail to build or start, it fails
-silently at runtime: every API call the app makes gets blocked by its
-own CSP, and the failure shows up only as "network request failed" in
-the browser, with a CSP violation logged to the browser console that's
-easy to miss if you're not looking for it.
+`connect-src` includes `${BACKEND_URL_TESTNET}` and
+`${BACKEND_URL_MAINNET}`, substituted by the base nginx image's built-in
+`docker-entrypoint.d` templating (`envsubst` over every `*.template` file
+in `/etc/nginx/templates/`, per the `nginx:1.27-alpine` image's own
+convention) at container start - both are allowlisted regardless of
+which network is currently active in the browser, since the in-app
+switch can call either one without a page reload from a fresh server.
+Leaving one of these two unset renders as an empty `connect-src` entry,
+which is harmless (nginx/the browser just ignore the blank token).
+**Each one must be the exact same origin as its `VITE_WALLET_BACKEND_URL_*`
+counterpart was at build time** (step 2's warning) - a mismatch here
+doesn't fail to build or start, it fails silently at runtime: every API
+call the app makes on that network gets blocked by its own CSP, and the
+failure shows up only as "network request failed" in the browser, with a
+CSP violation logged to the browser console that's easy to miss if
+you're not looking for it.
 
 ## 5. TLS
 
@@ -122,10 +159,19 @@ payment on Base Sepolia, and confirm it appears in
 
 ## 9. Pre-launch checklist
 
-- [ ] `VITE_WALLET_BACKEND_URL` (build-time) and `BACKEND_URL`
-      (container-start-time, nginx CSP) point at the exact same origin
-- [ ] `VITE_CHAIN_ID` matches `wallet-backend`'s and
-      `wallet-payment-history-engine`'s `BASE_CHAIN_ID` exactly
+- [ ] `VITE_WALLET_BACKEND_URL_TESTNET`/`_MAINNET` (build-time) and
+      `BACKEND_URL_TESTNET`/`BACKEND_URL_MAINNET`
+      (container-start-time, nginx CSP) each point at the exact same
+      origin, pair by pair
+- [ ] `VITE_CHAIN_ID_TESTNET`/`_MAINNET` matches the corresponding
+      `wallet-backend`'s and `wallet-payment-history-engine`'s
+      `BASE_CHAIN_ID` exactly
+- [ ] For the public production deployment, decide deliberately whether
+      it should offer the in-app testnet/mainnet switch at all - most
+      deployments should set `VITE_DEFAULT_NETWORK=mainnet` and leave the
+      testnet pair pointed at a real (non-empty) testnet backend only if
+      you actually want end users able to reach it from production; if
+      not, build a mainnet-only image instead (step 3's second example)
 - [ ] Served over TLS, not plain HTTP
 - [ ] The full onboarding → send flow run once, manually, end to end
       against the real `wallet-backend` deployment (step 8) - not just

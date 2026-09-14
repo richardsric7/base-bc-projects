@@ -2,8 +2,7 @@ import { getNonce, verifySiwe, type VerifyResult } from './authApi';
 import { buildSiweMessage } from './siwe';
 import { signSiweMessage } from '../core/walletCoreClient';
 import type { WalletRole } from '../worker/protocol';
-
-const CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? '84532');
+import { getNetworkConfig } from '../config/network';
 
 /**
  * The full SIWE round trip (PLAN.md §2): fetch a nonce, build the
@@ -18,7 +17,7 @@ export async function signInWithSiwe(role: WalletRole, address: string): Promise
     address,
     statement: 'Sign in to Trovo Wallet.',
     uri: window.location.origin,
-    chainId: CHAIN_ID,
+    chainId: getNetworkConfig().chainId,
     nonce,
   });
   const signature = await signSiweMessage(role, message);
