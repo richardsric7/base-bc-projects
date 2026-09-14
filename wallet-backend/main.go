@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -245,6 +246,10 @@ func main() {
 
 		ServiceLinkApprovalTTL: durationFromMinutes(env.ServiceLinkApprovalTTLMinutes),
 		PendingActionTTL:       durationFromMinutes(env.PendingActionTTLMinutes),
+
+		RecoveryOperatorKeySalts: splitAndTrim(env.RecoveryOperatorKeySaltsRaw),
+		RecoveryServiceThreshold: env.RecoveryServiceThreshold,
+		WalletRecoveryFeeWei:     decimal.NewFromFloat(env.WalletRecoveryFeeETH).Mul(decimal.New(1, 18)).BigInt(),
 	}
 
 	router := gin.Default()
@@ -254,6 +259,19 @@ func main() {
 	rootControllers.Init(router, gc)
 	usersSvc := usersControllers.Init(router, gc)
 	usersSvc.GeoIP = gc.GeoIP
+	// PLAN.md §15's wallet-recovery Branch B platform infrastructure -
+	// must run before the router starts serving traffic, the same
+	// placement as sharedaccessSvc.ReconcileRelayers below (enrollment
+	// calls need the recovery-service Safe/RecoveryGuard addresses to
+	// already be resolved). A no-op if RECOVERY_OPERATOR_KEY_SALTS was
+	// never configured - Branch B then simply stays unavailable. Logged
+	// rather than fatal on failure, the same non-blocking posture
+	// ReconcileRelayers below takes: this is one optional feature among
+	// many components this server hosts, so a transient RPC failure here
+	// must not take the whole server down.
+	if err := usersSvc.EnsureRecoveryPlatformDeployed(context.Background()); err != nil {
+		log.Printf("wallet recovery (Branch B) platform infrastructure failed to deploy, Branch B will be unavailable until this is resolved and the server restarts: %v", err)
+	}
 	assetsSvc := assetsControllers.Init(router, gc)
 	paymentsSvc := paymentsControllers.Init(router, gc)
 	paymentsSvc.Alerts = gc.Alerts
@@ -437,6 +455,20 @@ func parseDecimalOrZero(value string) decimal.Decimal {
 		return decimal.Zero
 	}
 	return parsed
+}
+
+// splitAndTrim splits a comma-separated env var into its trimmed,
+// non-empty parts - used for RecoveryOperatorKeySaltsRaw (PLAN.md §15.9
+// Phase 1), the one config value in this codebase that's a genuine list
+// of distinct secrets rather than a single derived-key salt.
+func splitAndTrim(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // seedSecurityQuestions inserts a small default catalog on first boot so the

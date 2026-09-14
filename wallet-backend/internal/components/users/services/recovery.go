@@ -30,10 +30,17 @@ import (
 )
 
 // RequestRecoveryOTP emails a one-time recovery code to username's
-// registered address, if recovery is enabled for that account. This always
-// succeeds from the caller's point of view regardless of whether username
-// exists or has recovery enabled, so the endpoint can't be used to
-// enumerate registered usernames or which accounts opted into recovery.
+// registered address, if either recovery mechanism is enabled for that
+// account - this is shared, called code for both branches (PLAN.md
+// §15.8): Branch A's Recover and Branch B's RecoverWallet both consume
+// the same OTP record via consumeValidOTP, so this must fire whenever
+// either AccountRecoveryEnabled or WalletRecoveryEnabled is set, not just
+// the former - a wallet-recovery-only account (§15.2a's whole point is
+// that a user may enable one without the other) would otherwise never be
+// able to obtain an OTP at all. This always succeeds from the caller's
+// point of view regardless of whether username exists or has any
+// recovery mechanism enabled, so the endpoint can't be used to enumerate
+// registered usernames or which accounts opted into recovery.
 func (s *Service) RequestRecoveryOTP(username string) error {
 	var user models.User
 	err := s.DB.Where("username = ?", username).First(&user).Error
@@ -43,7 +50,7 @@ func (s *Service) RequestRecoveryOTP(username string) error {
 		}
 		return apperrors.Internal("failed to look up user")
 	}
-	if !user.AccountRecoveryEnabled {
+	if !user.AccountRecoveryEnabled && !user.WalletRecoveryEnabled {
 		return nil
 	}
 

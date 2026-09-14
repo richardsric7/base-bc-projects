@@ -19,18 +19,29 @@ import (
 	"wallet-backend/internal/components/users/models"
 	"wallet-backend/internal/cryptoutil"
 	"wallet-backend/internal/geoip"
+	"wallet-backend/internal/network"
 	"wallet-backend/internal/notify"
 	"wallet-backend/internal/safe"
 	"wallet-backend/internal/validators"
 )
 
 // BlockchainClient is the narrow slice of *network.Client this component
-// needs - just enough to submit the primary-wallet Safe deployment
-// transaction (see DeployPrimaryWallet). Narrowed to an interface, same
-// pattern as every other component that talks to the chain, so it's
-// unit-testable without a live Base RPC.
+// needs: submitting the primary-wallet Safe deployment transaction (see
+// DeployPrimaryWallet), and - for wallet-recovery Branch B (PLAN.md §15) -
+// deploying the recovery-service Safe and RecoveryGuard contract as
+// platform infrastructure, reading a Safe's nonce/owners to build a
+// self-management transaction, waiting for that transaction's receipt,
+// and building the plain native-ETH fee-payment transaction Branch B's
+// enrollment fee uses. Narrowed to an interface, same pattern as every
+// other component that talks to the chain, so it's unit-testable without
+// a live Base RPC.
 type BlockchainClient interface {
 	SignAndSubmitTx(ctx context.Context, signer *ecdsa.PrivateKey, to *common.Address, value *big.Int, data []byte, explicitNonce *uint64) (string, error)
+	DeployContract(ctx context.Context, deployer *ecdsa.PrivateKey, data []byte) (contractAddress, txHash string, err error)
+	SafeNonce(ctx context.Context, safeAddress string) (*big.Int, error)
+	SafeOwners(ctx context.Context, safeAddress string) ([]common.Address, error)
+	WaitForReceipt(ctx context.Context, txHash string) (bool, error)
+	BuildNativeTransferTx(ctx context.Context, from, to string, amountWei *big.Int, explicitNonce *uint64) (*network.UnsignedTx, error)
 }
 
 type Service struct {
@@ -52,6 +63,24 @@ type Service struct {
 	// user's deployment.
 	Blockchain      BlockchainClient
 	DeployerKeySalt string
+
+	// RecoveryOperatorKeySalts/RecoveryServiceThreshold/
+	// WalletRecoveryFeeWei configure wallet-recovery Branch B (PLAN.md
+	// §15) - see recovery_platform.go and wallet_recovery.go. A nil/empty
+	// RecoveryOperatorKeySalts leaves Branch B unusable (every Branch B
+	// entry point returns an error rather than panicking) without
+	// affecting Branch A (recovery.go) at all, so a deployment that
+	// never configures these still boots and serves every other route
+	// normally.
+	RecoveryOperatorKeySalts []string
+	RecoveryServiceThreshold int
+	WalletRecoveryFeeWei     *big.Int
+
+	// ChainID is needed to compute a Safe's EIP-712 domain separator
+	// (safe.DomainSeparator) for Branch B's self-management transactions -
+	// assigned post-construction in main.go, the same pattern as
+	// sharedaccess's own Service.ChainID field.
+	ChainID int64
 }
 
 func New(db *gorm.DB, mailer notify.Mailer, recoveryAuthoritySalt string, recoveryOTPTTL time.Duration, blockchain BlockchainClient, deployerKeySalt string) *Service {
@@ -63,6 +92,7 @@ func New(db *gorm.DB, mailer notify.Mailer, recoveryAuthoritySalt string, recove
 		GeoIP:                 geoip.NewNoopProvider(),
 		Blockchain:            blockchain,
 		DeployerKeySalt:       deployerKeySalt,
+		WalletRecoveryFeeWei:  big.NewInt(0),
 	}
 }
 

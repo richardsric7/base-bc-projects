@@ -28,12 +28,24 @@ var saleABIJSON string
 //go:embed artifacts/Sale.bin
 var saleBytecodeHex string
 
+//go:embed artifacts/RecoveryGuard.abi.json
+var recoveryGuardABIJSON string
+
+//go:embed artifacts/RecoveryGuard.bin
+var recoveryGuardBytecodeHex string
+
 // TokenizedAssetABI and SaleABI are parsed once at package init - both
 // embedded JSON strings are produced by this package's own build (see
 // solidity/README.md), so a parse failure here means the checked-in
 // artifact is corrupt, not something a caller can recover from.
 var TokenizedAssetABI abi.ABI
 var SaleABI abi.ABI
+
+// RecoveryGuardABI is PLAN.md §15.3's Safe Guard contract
+// (solidity/RecoveryGuard.sol) - see EnsureRecoveryPlatformDeployed in
+// internal/components/users/services for where it's deployed and
+// installed.
+var RecoveryGuardABI abi.ABI
 
 func init() {
 	var err error
@@ -45,10 +57,29 @@ func init() {
 	if err != nil {
 		panic("contracts: invalid embedded Sale ABI: " + err.Error())
 	}
+	RecoveryGuardABI, err = abi.JSON(strings.NewReader(recoveryGuardABIJSON))
+	if err != nil {
+		panic("contracts: invalid embedded RecoveryGuard ABI: " + err.Error())
+	}
 }
 
 func tokenizedAssetBytecode() []byte { return common.FromHex(tokenizedAssetBytecodeHex) }
 func saleBytecode() []byte           { return common.FromHex(saleBytecodeHex) }
+func recoveryGuardBytecode() []byte  { return common.FromHex(recoveryGuardBytecodeHex) }
+
+// RecoveryGuardDeployData ABI-encodes RecoveryGuard's constructor
+// (recoveryServiceOwner) appended to its bytecode - what
+// network.Client.DeployContract needs as its data argument. Exactly one
+// RecoveryGuard is deployed as shared platform infrastructure (PLAN.md
+// §15.9 Phase 1/2), naming the recovery service's own Safe address as
+// the one owner slot its checkTransaction restricts.
+func RecoveryGuardDeployData(recoveryServiceOwner string) ([]byte, error) {
+	args, err := RecoveryGuardABI.Pack("", common.HexToAddress(recoveryServiceOwner))
+	if err != nil {
+		return nil, fmt.Errorf("encode RecoveryGuard constructor: %w", err)
+	}
+	return append(recoveryGuardBytecode(), args...), nil
+}
 
 // TokenizedAssetDeployData ABI-encodes TokenizedAsset's constructor
 // (name, symbol, decimals, initialOwner) appended to its bytecode -

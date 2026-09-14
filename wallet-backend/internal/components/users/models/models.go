@@ -43,6 +43,13 @@ type User struct {
 	// this field, exactly as they did upstream.
 	KYCVerifiedLevel       int  `gorm:"default:0" json:"kycVerifiedLevel"`
 	AccountRecoveryEnabled bool `gorm:"default:false" json:"accountRecoveryEnabled"`
+	// WalletRecoveryEnabled gates Branch B - true wallet-signer recovery
+	// via a Safe owner swap (PLAN.md §15) - and is deliberately
+	// independent of AccountRecoveryEnabled (§15.2a): a user may enable
+	// neither, either, or both. Requires PrimaryWalletDeployed, since
+	// enabling it means adding the recovery service as a second owner of
+	// an already-deployed Safe.
+	WalletRecoveryEnabled bool `gorm:"default:false" json:"walletRecoveryEnabled"`
 	// Activated records whether this user has completed the one-time paid
 	// activation flow (see internal/components/fiat) that dispenses
 	// starter gas and a reward token - checked so the payout can never be
@@ -137,6 +144,53 @@ type ReservedName struct {
 	Name string `gorm:"uniqueIndex;size:32;not null" json:"name"`
 }
 
+// RecoveryPlatformInfrastructure is the one persisted row (always ID 1)
+// recording wallet-recovery Branch B's platform-wide infrastructure
+// (PLAN.md §15.3/§15.9 Phases 1-2): the recovery-service Safe's
+// deployment status and the shared RecoveryGuard contract's deployed
+// address. EnsureRecoveryPlatformDeployed is the sole writer, called
+// once at server boot - the same idempotent "deploy once, remember
+// forever" pattern as User.PrimaryWalletDeployed, just as a singleton
+// row instead of a per-user flag since this infrastructure is shared by
+// every enrolled wallet rather than owned by any one of them.
+type RecoveryPlatformInfrastructure struct {
+	ID uint `gorm:"primaryKey" json:"id"`
+	// RecoveryServiceAddress is always computed deterministically from
+	// GlobalConfig.RecoveryOperatorKeySalts/RecoveryServiceThreshold
+	// (see recovery_platform.go's ComputeRecoveryServiceSafeAddress) -
+	// recorded here only so a later boot can detect if that config ever
+	// changed after deployment (a real operational hazard: it would mean
+	// every already-enrolled wallet's second owner no longer matches the
+	// currently-configured operator set), not because it can't be
+	// recomputed.
+	RecoveryServiceAddress  string `gorm:"size:42" json:"recoveryServiceAddress"`
+	RecoveryServiceDeployed bool   `gorm:"default:false" json:"recoveryServiceDeployed"`
+	// GuardAddress cannot be recomputed the way RecoveryServiceAddress
+	// can: RecoveryGuard is deployed via a plain CREATE (network.Client.
+	// DeployContract), so its address depends on the deployer key's
+	// nonce history at deployment time, not just its constructor
+	// argument - this is the one piece of Branch B infrastructure that
+	// must be persisted to be found again.
+	GuardAddress  string `gorm:"size:42" json:"guardAddress"`
+	GuardDeployed bool   `gorm:"default:false" json:"guardDeployed"`
+}
+
+// WalletRecoveryLog is Branch B's own audit trail, the wallet-signer-
+// recovery equivalent of AccountRecoveryLog above - reusing the same
+// tamper-evident cryptoutil.DeriveKey-signed-attestation pattern
+// (PLAN.md §15.8) but logging a signer swap on an unchanged address
+// rather than a change of address itself.
+type WalletRecoveryLog struct {
+	ID                 uint      `gorm:"primaryKey" json:"id"`
+	Username           string    `gorm:"index;size:32;not null" json:"username"`
+	WalletAddress      string    `gorm:"size:42;not null" json:"walletAddress"`
+	OldSignerAddress   string    `gorm:"size:42;not null" json:"oldSignerAddress"`
+	NewSignerAddress   string    `gorm:"size:42;not null" json:"newSignerAddress"`
+	TxHash             string    `gorm:"size:66;not null" json:"txHash"`
+	AuthoritySignature string    `gorm:"size:132;not null" json:"authoritySignature"`
+	CreatedAt          time.Time `json:"createdAt"`
+}
+
 // Models is every GORM model this component owns, for the central
 // migration list assembled in main.go.
 var Models = []interface{}{
@@ -147,4 +201,6 @@ var Models = []interface{}{
 	&AccountRecoveryEmailVerification{},
 	&AccountRecoveryLog{},
 	&ReservedName{},
+	&RecoveryPlatformInfrastructure{},
+	&WalletRecoveryLog{},
 }

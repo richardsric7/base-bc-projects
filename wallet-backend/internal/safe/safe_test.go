@@ -278,6 +278,37 @@ func TestOwnerManagementCalldata_EncodesExpectedSelectors(t *testing.T) {
 	}
 }
 
+func TestSwapOwnerAndSetGuardCalldata_EncodeExpectedSelectors(t *testing.T) {
+	prevOwner := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	oldOwner := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	newOwner := common.HexToAddress("0x3333333333333333333333333333333333333333")
+
+	swapData, err := EncodeSwapOwnerCalldata(prevOwner, oldOwner, newOwner)
+	if err != nil {
+		t.Fatalf("EncodeSwapOwnerCalldata: %v", err)
+	}
+	unpacked, err := safeABI.Methods["swapOwner"].Inputs.Unpack(swapData[4:])
+	if err != nil {
+		t.Fatalf("swapOwner calldata did not decode against its own ABI: %v", err)
+	}
+	if unpacked[0].(common.Address) != prevOwner || unpacked[1].(common.Address) != oldOwner || unpacked[2].(common.Address) != newOwner {
+		t.Fatalf("swapOwner args = %v, want [%s %s %s]", unpacked, prevOwner.Hex(), oldOwner.Hex(), newOwner.Hex())
+	}
+
+	guard := common.HexToAddress("0x4444444444444444444444444444444444444444")
+	guardData, err := EncodeSetGuardCalldata(guard)
+	if err != nil {
+		t.Fatalf("EncodeSetGuardCalldata: %v", err)
+	}
+	guardUnpacked, err := safeABI.Methods["setGuard"].Inputs.Unpack(guardData[4:])
+	if err != nil {
+		t.Fatalf("setGuard calldata did not decode against its own ABI: %v", err)
+	}
+	if guardUnpacked[0].(common.Address) != guard {
+		t.Fatalf("setGuard arg = %v, want %s", guardUnpacked[0], guard.Hex())
+	}
+}
+
 func TestFindPrevOwner(t *testing.T) {
 	a := common.HexToAddress("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	b := common.HexToAddress("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")

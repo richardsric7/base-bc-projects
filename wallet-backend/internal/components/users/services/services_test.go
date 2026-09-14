@@ -15,6 +15,7 @@ import (
 
 	"wallet-backend/internal/apperrors"
 	"wallet-backend/internal/components/users/models"
+	"wallet-backend/internal/network"
 	"wallet-backend/internal/notify"
 )
 
@@ -36,10 +37,28 @@ var errBoom = errors.New("boom")
 // fakeBlockchain is a no-op BlockchainClient - DeployPrimaryWallet's own
 // tests care about what it's called with, but every other test in this
 // package only needs Register/lookup behavior and never submits a
-// transaction at all.
+// transaction at all. Widened for wallet-recovery Branch B (PLAN.md §15):
+// deployContractAddr/safeNonce/safeOwners/waitReceiptFail let a test
+// steer the platform-deployment and self-management-transaction paths
+// without needing a live or simulated chain, the same fake-first posture
+// every other component's tests in this codebase already take.
 type fakeBlockchain struct {
 	submitted []fakeSubmission
 	err       error
+
+	deployContractAddr string
+	deployContractErr  error
+
+	safeNonce    *big.Int
+	safeNonceErr error
+
+	safeOwners    []common.Address
+	safeOwnersErr error
+
+	waitReceiptFail bool
+	waitReceiptErr  error
+
+	nativeTransferErr error
 }
 
 type fakeSubmission struct {
@@ -53,6 +72,49 @@ func (f *fakeBlockchain) SignAndSubmitTx(_ context.Context, _ *ecdsa.PrivateKey,
 	}
 	f.submitted = append(f.submitted, fakeSubmission{to: *to, data: append([]byte{}, data...)})
 	return "0xtxhash", nil
+}
+
+func (f *fakeBlockchain) DeployContract(_ context.Context, _ *ecdsa.PrivateKey, data []byte) (string, string, error) {
+	if f.deployContractErr != nil {
+		return "", "", f.deployContractErr
+	}
+	f.submitted = append(f.submitted, fakeSubmission{data: append([]byte{}, data...)})
+	addr := f.deployContractAddr
+	if addr == "" {
+		addr = "0x9999999999999999999999999999999999999999"
+	}
+	return addr, "0xdeploytxhash", nil
+}
+
+func (f *fakeBlockchain) SafeNonce(_ context.Context, _ string) (*big.Int, error) {
+	if f.safeNonceErr != nil {
+		return nil, f.safeNonceErr
+	}
+	if f.safeNonce != nil {
+		return f.safeNonce, nil
+	}
+	return big.NewInt(0), nil
+}
+
+func (f *fakeBlockchain) SafeOwners(_ context.Context, _ string) ([]common.Address, error) {
+	if f.safeOwnersErr != nil {
+		return nil, f.safeOwnersErr
+	}
+	return f.safeOwners, nil
+}
+
+func (f *fakeBlockchain) WaitForReceipt(_ context.Context, _ string) (bool, error) {
+	if f.waitReceiptErr != nil {
+		return false, f.waitReceiptErr
+	}
+	return !f.waitReceiptFail, nil
+}
+
+func (f *fakeBlockchain) BuildNativeTransferTx(_ context.Context, from, to string, amountWei *big.Int, _ *uint64) (*network.UnsignedTx, error) {
+	if f.nativeTransferErr != nil {
+		return nil, f.nativeTransferErr
+	}
+	return &network.UnsignedTx{To: to, Value: amountWei.String(), Type: "0x2"}, nil
 }
 
 // newTestService builds a Service backed by a fresh in-memory DB, a

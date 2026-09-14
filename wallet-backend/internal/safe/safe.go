@@ -142,7 +142,15 @@ const safeABIJSON = `[
 	{"name":"changeThreshold","type":"function","inputs":[
 		{"name":"_threshold","type":"uint256"}
 	],"outputs":[]},
-	{"name":"getOwners","type":"function","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"address[]"}]}
+	{"name":"getOwners","type":"function","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"address[]"}]},
+	{"name":"swapOwner","type":"function","inputs":[
+		{"name":"prevOwner","type":"address"},
+		{"name":"oldOwner","type":"address"},
+		{"name":"newOwner","type":"address"}
+	],"outputs":[]},
+	{"name":"setGuard","type":"function","inputs":[
+		{"name":"guard","type":"address"}
+	],"outputs":[]}
 ]`
 
 var safeABI abi.ABI
@@ -295,6 +303,31 @@ func DecodeGetOwnersResult(data []byte) ([]common.Address, error) {
 		return nil, fmt.Errorf("safe: decode getOwners: unexpected output type")
 	}
 	return owners, nil
+}
+
+// EncodeSwapOwnerCalldata ABI-encodes a call to
+// Safe.swapOwner(prevOwner, oldOwner, newOwner) - an atomic remove-and-add
+// in one OwnerManager call, exactly what PLAN.md §15.5 step 2 uses to
+// perform wallet-signer recovery (replacing a lost signer key with a new
+// one on the primary wallet's Safe, same address, same owners list
+// position) and step 4's "always remove the old signer" recommendation:
+// unlike two separate removeOwner/addOwnerWithThreshold calls, there is no
+// intermediate state where the Safe has only one signer able to act, and
+// no operational reason left to make removing the old key optional.
+// prevOwner is required by the same singly-linked-list layout
+// EncodeRemoveOwnerCalldata's doc comment explains - see FindPrevOwner.
+func EncodeSwapOwnerCalldata(prevOwner, oldOwner, newOwner common.Address) ([]byte, error) {
+	return safeABI.Pack("swapOwner", prevOwner, oldOwner, newOwner)
+}
+
+// EncodeSetGuardCalldata ABI-encodes a call to Safe.setGuard(guard) - a
+// Safe's own owner-management self-call, same shape as every other
+// EncodeXCalldata function in this file. Used to install (or, with
+// guard == address(0), remove) a Guard contract restricting what a
+// transaction co-signed by a specific owner may do (PLAN.md §15.3's
+// RecoveryGuard - see internal/contracts/solidity/RecoveryGuard.sol).
+func EncodeSetGuardCalldata(guard common.Address) ([]byte, error) {
+	return safeABI.Pack("setGuard", guard)
 }
 
 // SentinelOwner is OwnerManager's SENTINEL_OWNERS constant (address(0x1)) -

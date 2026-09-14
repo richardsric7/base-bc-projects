@@ -3455,4 +3455,202 @@ below are Branch B only, purely additive to the existing `recovery.go`:
 | 5 | Optional: a `DoInactiveAccountRecover`-equivalent for a never-yet-activated primary wallet, if wanted as a *third* path distinct from Branch A/B - worth confirming it isn't already redundant with Branch A (which already handles "no chain cost" identity recovery unconditionally, without the original's extra never-activated/fresh-account restriction) before building a third mechanism | — |
 | 6 | Test, document, push | 1-4 (5 if pursued) |
 
+#### Phases 1-4 implementation notes (done)
+
+All four phases were implemented and pushed together as one coherent
+change (Phase 5 was deliberately not pursued - see its own note below).
+
+- **Guard contract** (`internal/contracts/solidity/RecoveryGuard.sol`,
+  new) - a from-scratch Solidity contract implementing Safe's real
+  `Guard` interface (v1.4.1): `checkTransaction` reverts whenever a
+  transaction was co-signed by the recovery-service owner slot *and*
+  either targets something other than the Safe's own address, carries a
+  non-zero value, or calls a selector outside
+  `swapOwner`/`addOwnerWithThreshold`/`removeOwner`/`changeThreshold`;
+  transactions the recovery service did not co-sign are never touched.
+  "Co-signed by the recovery service" is detected by scanning the packed
+  signatures blob for a contract-signature slot (`v == 0`) whose `r`
+  equals the recovery-service address - correct without any `ecrecover`
+  because the recovery service is by design always a Safe (a contract),
+  never a raw EOA, so its contribution to another Safe's signature blob
+  is always the EIP-1271 contract-signature form (see
+  `internal/safe/signatures.go`'s `PackSignatures`).
+  - **Verified two ways, given the risk of shipping a subtly-wrong
+    security-critical contract**: (1) compiled successfully with solc
+    `0.8.24` (installed fresh in this sandbox via `npm install
+    solc@0.8.24`, confirmed network-reachable) against the exact
+    interface declared in the `.sol` file; (2) `RecoveryGuard`'s declared
+    `Guard` interface's ERC-165 `interfaceId` was independently
+    recomputed from scratch in Go (`crypto.Keccak256` over each
+    function's canonical signature string, XORed) and confirmed to match
+    Safe's real, well-known Guard interfaceId (`0xe6d7a83a`) exactly -
+    see `solidity/README.md`'s new note. This is strong evidence the
+    interface is selector-for-selector identical to Safe's real one
+    (`operation` declared as `uint8` rather than importing Safe's own
+    `Enum.Operation` type - ABI-equivalent, since Solidity canonicalizes
+    an enum parameter to `uint8` in a signature either way), which is
+    exactly what `Safe.setGuard` checks before installing a guard.
+  - **Scope note, stated explicitly**: a full simulated-EVM functional
+    test (deploying the compiled bytecode to an in-process chain and
+    calling `checkTransaction` against various inputs) was attempted
+    first, using go-ethereum's `ethclient/simulated` package - it works,
+    but pulls in a large, otherwise-unneeded transitive dependency tree
+    (go-ethereum's own beacon/catalyst simulation stack, ~180 lines of
+    new `go.mod`/`go.sum` entries) disproportionate to testing one guard
+    contract, so it was reverted in favor of the encode/decode-level
+    verification `internal/contracts/recovery_guard_test.go` actually
+    ships with - the same posture `contracts_test.go` already documents
+    for `TokenizedAsset`/`Sale` ("deploying and calling these contracts
+    end-to-end needs a real or simulated EVM, which is outside this
+    package's test scope"). Compiling with real solc plus the
+    independent interfaceId cross-check are both *stronger* verification
+    than that existing precedent had, just stopping short of a live
+    execution test.
+  - `internal/safe/safe.go` gained `EncodeSwapOwnerCalldata`/
+    `EncodeSetGuardCalldata` (Safe's own `swapOwner`/`setGuard`
+    self-calls), tested the same way as every other `Encode*Calldata`
+    helper in that file (pack, then unpack against the embedded ABI).
+- **Recovery-service Safe + platform deployment**
+  (`internal/components/users/services/recovery_platform.go`, new):
+  `RecoveryOperatorKeySalts []string`/`RecoveryServiceThreshold int` are
+  new `Service` fields (assigned post-construction in
+  `controllers.Init`, matching `usersSvc.GeoIP`'s pattern) - each salt
+  derives one platform trusted operator's key via
+  `cryptoutil.DeriveKey(salt + "|recovery-operator")`, **genuinely
+  distinct secrets**, not the same salt reused with role suffixes like
+  every other derived key in this codebase, since an N-of-M scheme
+  tracing back to one underlying secret defeats its own purpose.
+  `ComputeRecoveryServiceSafeAddress` mirrors `computePrimaryWalletAddress`'s
+  own CREATE2-address-before-deployment pattern (owners = every operator,
+  threshold = configured value or a majority default).
+  `EnsureRecoveryPlatformDeployed(ctx)` idempotently deploys the
+  recovery-service Safe (via the existing `SafeProxyFactory` path) and
+  then the `RecoveryGuard` contract (via a plain
+  `network.Client.DeployContract` CREATE, since it isn't a Safe), saving
+  progress after each step so a Guard-deployment failure never causes a
+  retry to resubmit an already-succeeded Safe deployment. State lives in
+  a new singleton row, `models.RecoveryPlatformInfrastructure` (`ID` = 1)
+  - the Guard's address genuinely cannot be recomputed the way the Safe's
+    can (plain `CREATE` depends on deployer-nonce history), so it must be
+    persisted to be found again.
+  - **Deliberately opt-in**: `RECOVERY_OPERATOR_KEY_SALTS` defaults to
+    empty (unlike every other `*_KEY_SALT` in this codebase, which
+    default to a `dev-only-change-me` placeholder) - a non-empty default
+    would silently attempt to deploy Branch B's platform infrastructure
+    for every deployment of this codebase, including ones that never
+    intend to offer wallet-signer recovery at all.
+    `EnsureRecoveryPlatformDeployed` is called at boot
+    (`main.go`, before the router serves traffic, same placement as
+    `sharedaccessSvc.ReconcileRelayers`) and is a logged no-op when
+    unconfigured. A deployment failure is logged, not fatal - the same
+    non-blocking posture `ReconcileRelayers` itself takes, since this is
+    one optional feature among many components this server hosts.
+- **Enrollment** (`internal/components/users/services/wallet_recovery.go`,
+  new): `BuildEnableWalletRecovery`/`ConfirmEnableWalletRecovery` and
+  their `Disable` mirrors. Enabling performs two sequential
+  self-management Safe transactions on the caller's own primary wallet -
+  `addOwnerWithThreshold(recoveryServiceAddress, 1)` then
+  `setGuard(guardAddress)` - each requiring the caller's own personal_sign
+  signature over its `SafeTxHash` (verified via the same
+  `cryptoutil.VerifyPersonalSignBytes` every other Safe-transaction
+  approval in this codebase uses), then submitted by a dedicated
+  server-controlled key (`deriveRecoveryPlatformDeployerKey`, a new role
+  suffix on the existing `SafeDeployerKeySalt`) - submitting a call with
+  valid signatures already attached grants the submitter no authority
+  over the Safe, the same permissionless-relay reasoning
+  `DeployPrimaryWallet` already relies on for factory deployments.
+  - **Scope decision, stated explicitly**: this does *not* reuse
+    `sharedaccess`'s relayer pool or its row-locked nonce-reservation
+    invariant (PLAN.md §13.12 Phase 6) - both exist to solve concurrent
+    multi-approver group actions, which don't apply here (a solo user
+    enrolling their own wallet, one enrollment at a time). Instead
+    `enableWalletRecoveryTxs`/`disableWalletRecoveryTxs` read the Safe's
+    current nonce fresh on every call; if it drifts between Build and
+    Confirm, the mismatch surfaces as an ordinary signature-verification
+    failure (the client just re-Builds), a smaller, accepted race
+    appropriate to this flow's much lower concurrency, not a silent gap.
+    Also: importing `sharedaccess` from `users` would create an import
+    cycle (`sharedaccess` already imports `users` to resolve members'
+    primary wallet addresses), so this had to be self-contained in
+    `users/services` regardless, built directly on the same `internal/safe`
+    primitives sharedaccess itself uses.
+  - The one-off enrollment fee (§15.7, `WalletRecoveryFeeWei`, zero by
+    default) is a plain native-ETH transfer built via
+    `BlockchainClient.BuildNativeTransferTx` to a derived fee wallet
+    (`RecoveryAuthoritySalt + "|wallet-recovery-fee-wallet"`) - the
+    caller signs and submits it themselves, and `feeTxHash` is trusted
+    once supplied, the same posture this codebase already takes for
+    every other self-submitted on-chain payment (see patron's
+    `ConfirmSubscription`).
+- **Execution** (`RecoverWallet`, same file): identity is proven with
+  the exact same three factors and the exact same called functions as
+  Branch A's `Recover` - `verifyAllSecurityAnswers`, `consumeValidOTP`,
+  `verifyNewAddressOwnership` (all reused, not duplicated) - then a
+  `swapOwner(prevOwner, oldSigner, newSigner)` call is submitted against
+  the primary wallet's own Safe instead of a DB address update.
+  `User.Address` never changes, only `User.SignerAddress`; no
+  `GroupMember` row needs revoking, since every one of them references
+  the wallet's `Address` (unchanged), exactly as PLAN.md §15.5 step 3
+  anticipated. The authorizing signature is produced entirely
+  server-side (`signAsRecoveryService`): since every recovery-operator
+  key is itself `cryptoutil.DeriveKey`-derived (server-controlled, not a
+  human's), enough of them to meet the recovery-service Safe's threshold
+  personal_sign the nested EIP-1271 digest
+  (`safe.MessageHashForSafe(recoveryServiceDomainSeparator,
+  outerTxPreImage)`, the exact nested-ownership mechanic PLAN.md §13.4
+  already established) synchronously, in one call, with no external
+  round trip - unlike a `GroupMember`'s approval, which needs a human's
+  signature over HTTP.
+  - **Real bug found and fixed while wiring this up**:
+    `RequestRecoveryOTP` (the OTP-issuing endpoint both branches share
+    per §15.8) only checked `user.AccountRecoveryEnabled` before emailing
+    a code - a wallet-recovery-only account (§15.2a's whole point is that
+    a user may enable Branch B without Branch A) could never obtain an
+    OTP to actually call `RecoverWallet` at all. Fixed to check
+    `AccountRecoveryEnabled || WalletRecoveryEnabled`, caught by
+    `TestRecoverWallet_Success_PreservesAddressAndSwapsSigner` failing
+    with "no 6-digit OTP found in mail body" before the fix.
+  - A `WalletRecoveryLog` row (new model, mirroring `AccountRecoveryLog`)
+    is written in the same DB transaction as the `SignerAddress` update
+    and OTP consumption, signed by the same recovery-authority key
+    `buildRecoveryLog` uses (`RecoveryAuthoritySalt`), per §15.8's
+    recommendation to reuse that tamper-evident attestation pattern.
+- **Routes** (`internal/components/users/controllers/wallet_recovery.go`,
+  new): `POST /v1/users/wallet-recovery/{enable,disable}` and their
+  `/confirm` counterparts under the existing authed `/v1/users` group
+  (§12's ordinary self-service model applies - the caller must already
+  be the wallet's current signer); `POST
+  /v1/account-recovery/:username/recover-wallet` alongside Branch A's
+  existing `.../recover`, unauthenticated for the same reason that route
+  is (§15.6 - the caller controls no currently-authorized key at all).
+  `recovery.go`'s existing route and `Recover` function are completely
+  untouched.
+- **Tests**: `recovery_platform_test.go` (deterministic address
+  computation, idempotent two-step deployment, failure propagation at
+  each step) and `wallet_recovery_test.go` (full enable→disable
+  round-trip with real personal_sign signatures from generated keys,
+  wrong-signature rejection, fee-required-when-configured, and a full
+  `RecoverWallet` round-trip asserting `Address` is preserved,
+  `SignerAddress` is swapped, the OTP is single-use, and wrong security
+  answers are rejected) - all against the existing `fakeBlockchain`,
+  widened with `DeployContract`/`SafeNonce`/`SafeOwners`/
+  `WaitForReceipt`/`BuildNativeTransferTx` fakes. Full module
+  `go build ./...`, `go vet ./...`, and `go test ./... -race` all pass;
+  a real boot-smoke-test against SQLite confirmed every new route
+  registers and Branch B correctly no-ops (logged, not fatal) when
+  unconfigured. Consistent with Phase 9's own precedent, a live
+  Base-Sepolia deployment of the recovery-service Safe/RecoveryGuard was
+  **not** performed in this environment (this sandbox's egress policy
+  blocks `sepolia.base.org`) - stated honestly rather than assumed to
+  work.
+- **Phase 5 (optional `DoInactiveAccountRecover`-equivalent) was not
+  pursued**, per the roadmap's own framing of it as optional and worth
+  confirming isn't redundant with Branch A first: Branch A already
+  handles "no chain cost" identity recovery unconditionally, without the
+  original's extra never-activated/fresh-account restriction, so a third
+  mechanism would add real surface area (a third recovery entry point to
+  reason about and secure) for a case Branch A already covers. Flagging
+  this as a deliberate scope decision, not an oversight - revisit only if
+  a concrete gap Branch A doesn't cover is identified.
+
 Implementation does not begin until explicitly authorized.

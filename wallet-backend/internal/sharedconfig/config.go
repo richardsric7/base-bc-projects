@@ -6,6 +6,7 @@
 package sharedconfig
 
 import (
+	"math/big"
 	"os"
 	"strconv"
 	"time"
@@ -170,6 +171,27 @@ type GlobalConfig struct {
 	// short URL a QR code encodes (see internal/components/shortlink,
 	// PLAN.md §4.13) - e.g. "https://trov.to" for "https://trov.to/s/AB12CD34".
 	ShortlinkBaseURL string
+
+	// RecoveryOperatorKeySalts/RecoveryServiceThreshold configure wallet
+	// recovery Branch B's own recovery-service Safe (PLAN.md §15.3/§15.9
+	// Phase 1) - see internal/components/users/services/
+	// recovery_platform.go. Each salt derives one platform trusted
+	// operator's key; unlike every other derived-key salt in this
+	// config, these must be genuinely distinct secrets, not the same one
+	// reused with a different role suffix, or the "N-of-M, no single
+	// point of failure" property PLAN.md §15.3 recommends is lost.
+	// RecoveryServiceThreshold is how many must co-sign; 0 means
+	// "majority of however many salts are configured".
+	RecoveryOperatorKeySalts []string
+	RecoveryServiceThreshold int
+
+	// WalletRecoveryFeeWei is Branch B's one-off enrollment fee (PLAN.md
+	// §15.7), already converted from WALLET_RECOVERY_FEE_ETH to wei.
+	// Zero (the default) makes enrollment free - the fee is this port's
+	// own choice to enforce, not a hard requirement, since the original's
+	// equivalent (ACCOUNT_RECOVERY_FEE) was itself just one deployment's
+	// configured value.
+	WalletRecoveryFeeWei *big.Int
 }
 
 // Env holds every raw environment-derived setting. Load it once in main and
@@ -268,6 +290,23 @@ type Env struct {
 
 	ShortlinkBaseURL string
 
+	// RecoveryOperatorKeySaltsRaw is a comma-separated list of distinct
+	// salts, one per platform trusted operator, deriving the recovery
+	// service Safe's own owners (PLAN.md §15.3/§15.9 Phase 1) - genuinely
+	// separate secrets, not one salt reused with different role suffixes
+	// like every other derived key in this codebase, since the entire
+	// point of an N-of-M recovery-service Safe is that no single
+	// compromised secret controls it alone. RecoveryServiceThreshold is
+	// how many of those operators must co-sign; 0 means "majority of
+	// however many salts are configured", computed once at boot.
+	RecoveryOperatorKeySaltsRaw string
+	RecoveryServiceThreshold    int
+
+	// WalletRecoveryFeeETH is Branch B's one-off enrollment fee (PLAN.md
+	// §15.7), denominated in ETH the same way FaucetLowBalanceThresholdETH
+	// is - converted to wei once in main.go.
+	WalletRecoveryFeeETH float64
+
 	Organisation string
 }
 
@@ -359,6 +398,17 @@ func LoadEnv() Env {
 		GeoIPBaseURL: getEnv("GEOIP_BASE_URL", ""),
 
 		ShortlinkBaseURL: getEnv("SHORTLINK_BASE_URL", "http://localhost:8080"),
+
+		// Empty by default, unlike every other *_KEY_SALT in this file -
+		// this one is deliberately opt-in (see
+		// EnsureRecoveryPlatformDeployed's own doc comment): a non-empty
+		// default would silently deploy Branch B's platform
+		// infrastructure for every deployment of this codebase, including
+		// ones that never intend to offer wallet-signer recovery at all.
+		RecoveryOperatorKeySaltsRaw: getEnv("RECOVERY_OPERATOR_KEY_SALTS", ""),
+		RecoveryServiceThreshold:    getEnvInt("RECOVERY_SERVICE_THRESHOLD", 0),
+
+		WalletRecoveryFeeETH: getEnvFloat64("WALLET_RECOVERY_FEE_ETH", 0),
 
 		Organisation: getEnv("ORGANISATION", "wallet-backend"),
 	}

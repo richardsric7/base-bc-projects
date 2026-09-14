@@ -23,6 +23,10 @@ import (
 // need to look up or register users (see servicelinks).
 func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	svc := services.New(gc.DB, gc.Mailer, gc.RecoveryAuthoritySalt, gc.RecoveryOTPTTL, gc.Blockchain, gc.SafeDeployerKeySalt)
+	svc.RecoveryOperatorKeySalts = gc.RecoveryOperatorKeySalts
+	svc.RecoveryServiceThreshold = gc.RecoveryServiceThreshold
+	svc.WalletRecoveryFeeWei = gc.WalletRecoveryFeeWei
+	svc.ChainID = gc.ChainID
 
 	public := router.Group("/v1/users")
 	public.GET("/:username", getUser(svc, gc.Cache, gc.AddressWatcher))
@@ -44,6 +48,8 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	recovery := router.Group("/v1/account-recovery")
 	recovery.POST("/:username/request-otp", requestRecoveryOTP(svc))
 	recovery.POST("/:username/recover", recoverAccount(svc))
+
+	registerWalletRecoveryRoutes(authed, recovery, svc)
 
 	return svc
 }

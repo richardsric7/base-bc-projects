@@ -66,6 +66,7 @@ an insecure, clearly-marked `dev-only-change-me` placeholder):
 | `MARKET_ESCROW_KEY_SALT` | Derives the market-making escrow address - rotating orphans standing maker approvals. |
 | `TOKENIZATION_ISSUER_KEY_SALT` / `TOKENIZATION_DISTRIBUTION_KEY_SALT` | Derive per-asset issuer/treasury addresses - rotating either orphans on-chain contract ownership of every already-minted asset. |
 | `PATRON_FEE_WALLET_SALT` | Derives the patron-subscription fee address. |
+| `RECOVERY_OPERATOR_KEY_SALTS` | Wallet recovery Branch B (PLAN.md §15), opt-in - empty by default, leaving Branch B unavailable. A comma-separated list of **genuinely distinct** secrets, one per platform trusted operator, deriving the recovery-service Safe's own owners. Never reuse the same value twice and never reuse another `*_KEY_SALT` from this table for one of these - an N-of-M scheme where every key traces back to one underlying secret provides no real protection against that secret leaking. `RECOVERY_SERVICE_THRESHOLD` (0 = majority) is how many must co-sign a real recovery. |
 
 Treat every `*_KEY_SALT` and `JWT_SECRET`/`RECOVERY_AUTHORITY_SALT` as a
 real secret: generate with a CSPRNG (`openssl rand -hex 32` is fine),
