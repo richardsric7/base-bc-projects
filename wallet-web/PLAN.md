@@ -744,6 +744,20 @@ This app's client code has been updated to match:
   SignatureAuth headers this app now builds, confirming the message
   format matches wallet-backend's middleware exactly and the flow
   reaches the primary-wallet step with no login step in between.
+- **Follow-up fix caught by extending that same live test through to the
+  Dashboard**: `api/paymentsApi.ts`'s `getPaymentHistory` was the one call
+  site missed in the initial pass - it called `GET
+  /v1/payments/history/:address` with no `walletAddress`, so it went out
+  unsigned. This route is under `internal/components/payments/
+  controllers`'s `authed` group (`middleware.SignatureAuth`), unlike `GET
+  /v1/assets` and `GET /v1/assets/balance/:address`, which really are
+  public - so this one silently 401'd for as long as Dashboard's own
+  try/catch-and-fall-back-to-cache masked it. Fixed by passing
+  `walletAddress: address` through; re-verified live by driving the full
+  onboarding flow through to a loaded Dashboard - the same request that
+  used to fail now returns `200 []` against a fresh account. Audited
+  every other `apiRequest` call site in the app against wallet-backend's
+  actual route groupings at the same time; nothing else was missing it.
 
 One property is traded away, not lost by oversight: SIWE's `domain`
 field lets a signing wallet show "you are signing in to

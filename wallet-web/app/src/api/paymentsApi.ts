@@ -57,6 +57,11 @@ export function submitPayment(
   });
 }
 
+// GET /v1/payments/history/:address is SignatureAuth-protected (unlike
+// GET /v1/assets and GET /v1/assets/balance/:address, which are public) -
+// internal/components/payments/controllers/controllers.go puts it in the
+// same `authed` group as build/submit. `address` is both the history
+// being requested and the wallet the signer must own/have standing on.
 export function getPaymentHistory(address: string): Promise<PaymentHistoryRecord[]> {
-  return apiRequest<PaymentHistoryRecord[]>(`/v1/payments/history/${address}`);
+  return apiRequest<PaymentHistoryRecord[]>(`/v1/payments/history/${address}`, { walletAddress: address });
 }
