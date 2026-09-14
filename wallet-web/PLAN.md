@@ -632,3 +632,42 @@ Phases 1-13 are implemented as designed above, with the following notes:
   (their signer vault is preserved, not lost). A UX polish item, not a
   security gap, left for a later pass given this plan's already-large
   scope.
+
+## 11. Pending: `wallet-backend`'s auth redesign (tracked, not yet implemented here)
+
+`wallet-backend/PLAN.md` §12 documents a decision to replace SIWE+session-
+JWT with the original Trovo app's own per-request signature model,
+restored on Base's cryptography (personal_sign/secp256k1 in place of
+ed25519, with the same two-header signer/wallet split). Once that lands
+server-side, this app's client code needs a corresponding change:
+
+- Remove `api/siwe.ts`, `api/authFlow.ts`'s SIWE-specific functions,
+  `api/authApi.ts`'s nonce/verify calls, `authSlice.ts`'s `sessionToken`,
+  and the onboarding wizard's separate "sign in" step (§3's flow moves
+  straight from vault creation to registration - no login round trip).
+- Add a per-request signing step to `api/httpClient.ts`: build
+  `fullPathWithQuery + signerAddress + timestamp`, sign it with the
+  **signer** role's key, attach it and the wallet/timestamp headers
+  (`X-Signer`/`X-Wallet`/`X-Signature`/`X-Timestamp`, or whatever
+  `wallet-backend` settles on) to every authenticated call.
+- `wallet-core`'s `sign_siwe_message` (`lib.rs`) is already
+  message-agnostic EIP-191 personal_sign despite its name - it can sign
+  this new message shape unchanged, or get renamed to
+  `sign_request_message` for clarity once SIWE-specific signing is gone
+  entirely. No change needed to `vault.rs`/`mnemonic.rs`/`signing.rs`
+  themselves - this is a client-orchestration change, not a cryptographic
+  one.
+- One property is traded away, not lost by oversight: SIWE's `domain`
+  field lets a signing wallet show "you are signing in to
+  wallet.example.com" - a real phishing signal. A generic
+  path+address+timestamp message has no such binding. This doesn't matter
+  for this app's own embedded signer (§4.1 - it already signs silently in
+  a Worker with no human-reviewed prompt either way), but would matter if
+  a browser-extension wallet (MetaMask et al.) were ever added as a second
+  client against the same API, since that class of client *does* show the
+  user what they're signing.
+
+Not implemented here - tracked as a dependency this app's own
+implementation will need once `wallet-backend`'s side lands, the same way
+`wallet-payment-history-engine/PLAN.md` §6 and this file's own §3 each
+flagged their own `wallet-backend` dependencies.

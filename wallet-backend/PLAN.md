@@ -75,7 +75,7 @@ decided once here rather than re-litigated per feature:
 
 | Stellar primitive | Where it's used | Base/EVM substitute | Why |
 |---|---|---|---|
-| Per-request keypair signature auth (`publicKey+timestamp`, signed with the Stellar key, verified on every call) | The entire non-admin API | **SIWE (EIP-4361) → session JWT** — already built (`internal/components/auth`). One sign-in, then a bearer token. | Signing every single request is not how EVM wallets/dApps interact; SIWE+session is the ecosystem standard and fixes a real replay gap the original scheme had (see v2 plan for detail). Already implemented — no change needed. |
+| Per-request keypair signature auth (`publicKey+timestamp`, signed with the Stellar key, verified on every call) | The entire non-admin API | **Superseded — see §12.** SIWE+session-JWT was tried first (`internal/components/auth`) and works, but the project's own decision is to restore the original's per-request signature model instead: personal_sign (EIP-191) over secp256k1 in place of ed25519, keeping the original's exact two-header signer/wallet split. §12 covers the design, including the one real gap in the original (no timestamp-freshness check at all) that this fixes rather than reproduces. | Per-request signing suits this port's actual client (`wallet-web`'s embedded, non-extension signer, which signs silently with no user-facing wallet popup) better than a stolen-bearer-token-vulnerable session scheme, and it's a closer match to what the original app's mobile client already expected. |
 | Trustlines (`opt-in`/`opt-out`, required before holding a non-native asset) | assets, users (asset opt-in/opt-out) | **No on-chain action needed** — any address can hold any ERC-20 with zero setup. Keep the *API shape* (opt-in/opt-out endpoints, so client code barely changes) but back it with a purely off-chain "watched tokens" table: opt-in adds a row, opt-out removes it, used only to drive the wallet's UI asset list. | Preserves the original's user-facing feature (curate which tokens show in your wallet) without inventing on-chain machinery for a permission Base doesn't require. |
 | Claimable balances (`claim-asset`/`reject-asset` — deliver an asset to someone who may not have a trustline yet) | users (claim/reject), tokenization delivery | **Server-held escrow per pending claim.** The sender's transfer goes to a per-claim address derived via `cryptoutil.DeriveKey(seed="claim:"+claimID)`; claiming triggers a server-executed transfer from that address to the claimant, rejecting refunds the sender. Recorded in a `PendingClaim` table mirroring `TransactionStatus` semantics. | A true on-chain escrow contract is the "more correct" answer but means writing, auditing, and deploying Solidity beyond the tokenized-asset contract this port already requires (§2's asset-issuance row); the derived-address escrow reuses a pattern already in this codebase (server-derived signer roles) and needs no new contract. Documented here as a deliberate, revisitable simplification — an `Escrow.sol` contract is the natural v2 upgrade. |
 | Channel accounts (a pool of alternate signer accounts used to fee-bump/sponsor transactions without contending the primary account's sequence number) | Server-sponsored transactions during account activation and shared-access/fiat-purchase flows | **Not needed as infrastructure.** EVM has no fee-bump equivalent for an already-signed transaction (only ERC-4337 paymasters do this, explicitly deferred to v2 per §11). Where the original used channel accounts to let Trovo pay for a user's activation transaction, the direct Base equivalent — already how the original's Flutterwave-activation webhook behaves — is **funding the user's own address with a small amount of ETH** so they can pay their own gas. No pool, no sequence contention, because nonce contention on Base is inherently per-address (see next row). |
@@ -1482,3 +1482,178 @@ smaller revision of this plan).
   and testing what can be tested (request construction, signature/HMAC
   verification, response parsing against recorded fixtures) without live
   credentials.
+
+## 12. Authentication redesign: header-based per-request signatures (supersedes §2's first row)
+
+**Decision**: replace SIWE+session-JWT with the original's per-request
+signature model for every genuinely user-signed operation, restoring the
+original's exact behavioral shape — one signature per request, no session
+token — on Base's cryptography.
+
+### 12.1 What the original actually does (audited directly, not assumed)
+
+`trovo-wallet-monorepo/backend/internal/middleware/authentication_middleware.go`'s
+`AuthenticationMiddlewareUsingTimestamp()`, used on essentially every route
+in that codebase:
+
+- **Headers**: `X-TW-SIGNER` (the signer's Stellar public key),
+  `X-TW-SIGNATURE` (base64 ed25519 signature), `X-TW-TIMESTAMP`. Separately,
+  `X-TW-PUBLIC-KEY` — **the wallet the request acts on** — is read directly
+  by each handler (`middleware.ExtractPublicKey(c)`), entirely outside the
+  auth check itself.
+- **Message signed**: `fullPathWithQuery + signerPublicKey + timestamp`,
+  raw concatenation, ed25519-signed (`security_checks.go`).
+- **The middleware only proves who signed.** Authorization — may this
+  signer act on this wallet — is a separate, handler-level concern:
+  self-service when `wallet == signer`, or a shared-access permission
+  record (`Permission == "INITIATOR"` etc.) when acting for someone else.
+- **Confirmed gap, not reproduced**: there is no timestamp-freshness check
+  anywhere in this code path. A captured `(path, signer, timestamp,
+  signature)` tuple is replayable **indefinitely**, not just within some
+  window — worse than the "just a timestamp, not a nonce" characterization
+  in §2's original row implied. §12.3 fixes this with a cheap, stateless
+  tolerance window.
+- **Servicelinks partner routes used the same middleware, plus a second,
+  independent check**: a service link has its own Stellar signer identity
+  *and* a separately presented `X-TW-SERVICE-LINK-API-KEY`, both required.
+  This port's existing `internal/middleware/api_key_auth.go` (hashed API
+  key, resolved `ServiceLink`, deny-by-default on
+  inactive/suspended/unverified) already covers this identification job on
+  its own terms and is **not being replaced** — see §12.5.
+
+### 12.2 Base equivalent
+
+| Original | Base | Carries |
+|---|---|---|
+| `X-TW-SIGNER` | `X-Signer` | the EVM address that produced the signature |
+| `X-TW-PUBLIC-KEY` | `X-Wallet` | the wallet address the request acts on (self, or a delegated one) |
+| `X-TW-SIGNATURE` | `X-Signature` | `0x`-prefixed EIP-191 personal_sign signature (65 bytes) |
+| `X-TW-TIMESTAMP` | `X-Timestamp` | Unix seconds |
+
+`internal/middleware/cors.go` already allowlists `X-Public-Key,
+X-Timestamp, X-Signature` — a scaffold anticipating close to this exact
+scheme that was never wired up. `X-Signer` needs adding to that list;
+`X-Wallet` is a rename of the already-allowlisted `X-Public-Key` for EVM
+accuracy (an address is a hash of a public key, not the key itself) - keep
+the old header name instead if avoiding a client-side rename matters more
+than the naming precision.
+
+**Message signed**: identical shape, `fullPathWithQuery + signerAddress +
+timestamp`, personal_sign in place of raw ed25519.
+
+**Verification**: `internal/cryptoutil.VerifyPersonalSign(message string,
+signature []byte, expectedAddress common.Address) (bool, error)` **already
+exists** (built for shared-access's off-chain approval signatures,
+`accounts.TextHash` + `crypto.SigToPub` + `crypto.PubkeyToAddress`, v-byte
+normalized) — the new middleware calls this directly, hex-decoding
+`X-Signature` into 65 raw bytes first. No new cryptographic code is
+needed, only the header extraction, timestamp check, and context wiring
+around this existing helper.
+
+### 12.3 The one deliberate deviation: timestamp tolerance
+
+New config: `REQUEST_SIGNATURE_TOLERANCE_SECONDS` (default 300). The
+middleware rejects a request if `|now - X-Timestamp| > tolerance`, checked
+*before* signature verification (cheap early exit). This is the fix for
+§12.1's confirmed unbounded-replay gap - stateless (no server-side nonce
+cache, unlike SIWE's), and small enough that a legitimate client's own
+clock skew is the only practical failure mode to size it against.
+
+### 12.4 Authorization stays handler-level, and mostly stays put
+
+The new middleware sets `middleware.CtxSubject` to the **wallet** address
+(the value every existing handler already reads via
+`c.GetString(middleware.CtxSubject)`) once it's confirmed the signer may
+act on it — self-service (`wallet == signer`) needs no further check;
+acting on a different wallet requires a `sharedaccess` `GroupMember` role
+granting it, mirroring the original's own permission check exactly. This
+keeps the ~14 files currently reading `CtxSubject`
+(`users`/`payments`/`assets`/`swaps`/`sharedaccess`/`kyc`/`fiat`/
+`stablerail`/`crypto`/`patron`/`tokenization`/`market` controllers)
+**unchanged** for the common case - only the middleware producing that
+value changes, not the handlers consuming it. A second context key
+(`CtxSigner`) is set alongside it for the delegated case, for any handler
+that needs to distinguish "acting for myself" from "acting as an approved
+delegate" (audit logging, restricting a VIEW_ONLY delegate from
+mutating routes at the handler level).
+
+### 12.5 What gets removed, what doesn't
+
+**Removed**: `internal/components/auth` (SIWE nonce/verify service +
+controller) entirely; `middleware.AudienceWalletSession`,
+`middleware.IssueToken`'s use for it, and `JWTAuth(...,
+AudienceWalletSession)` on every currently-JWT-guarded user route; the
+`siwe-go` dependency; `SIWE_DOMAIN`/wallet-session `JWT_EXPIRY_MINUTES`
+config.
+
+**Not removed** (out of this decision's scope - "user operations," not
+every caller class):
+- `middleware.AudienceAdmin` JWT for staff/admin routes - unaffected.
+- `middleware.APIKeyAuth` for servicelinks partner routes - unaffected.
+  The original layered its universal signature scheme *and* a
+  service-link API key on these routes; this port's API-key-only scheme
+  already identifies "which partner" on its own terms without needing a
+  partner-held signer keypair at all, and is arguably the cleaner of the
+  two designs already in place - not being undone just to match the
+  original's blanket middleware application.
+
+**Needs a small, related fix, not a redesign**: `servicelinks/services/
+approvals.go`'s `VerifyApproval` currently mints a wallet-session JWT for
+a `LOGIN`-kind approval (`middleware.IssueToken(...,
+AudienceWalletSession, ...)`) - its own doc comment already flags this as
+a deliberate departure from "the original's bespoke per-request Ed25519
+signature scheme." With no session token concept left to issue, this
+becomes: `VerifyApproval` simply confirms the approval and returns the
+target user's info (matching what the original's own
+`GetServicelinksAppAuthorizeVerify...` handler actually does - it returns
+`userInfo` directly, never a token); the partner's subsequent calls on
+that user's behalf continue authenticating as themselves via their
+existing API key, passing the target user's address the same way
+`requireOwnedUser`-guarded routes already do elsewhere in servicelinks.
+
+### 12.6 `wallet-web` impact (tracked here, implemented there)
+
+This is the same kind of cross-project dependency `wallet-payment-
+history-engine/PLAN.md` and `wallet-web/PLAN.md` each flagged for their
+own backend requirements - noted here, addressed in `wallet-web`'s own
+plan/implementation:
+
+- Remove: `api/siwe.ts`, `api/authFlow.ts`'s SIWE-specific functions,
+  `api/authApi.ts`'s nonce/verify calls, `authSlice.ts`'s `sessionToken`
+  (no bearer token to store) - and the onboarding wizard's separate
+  "sign in" step, since there's no login round trip left to do.
+- Add: a per-request signing step in `api/httpClient.ts` - build
+  `fullPathWithQuery + signerAddress + timestamp`, sign it with the
+  **signer** role's key (`wallet-core`'s `sign_siwe_message` is already
+  message-agnostic EIP-191 personal_sign despite its name - reuse or
+  rename it), attach the four headers to every authenticated call.
+  Registration (`POST /v1/users`) becomes just another signed request
+  with no separate auth step first.
+- **A property being traded away, stated plainly**: SIWE's `domain` field
+  is a real phishing signal - a signing wallet can show "you are signing
+  in to wallet.example.com." A generic path+address+timestamp message has
+  no domain binding at all. This doesn't matter for `wallet-web`'s own
+  embedded signer specifically (it signs silently in a Worker with no
+  human-reviewed prompt either way - see that project's own PLAN.md §4.1),
+  but is worth remembering if a browser-extension-wallet client (MetaMask
+  et al.) is ever added against this same API, since that class of client
+  *does* show the user what they're signing, and an unreadable
+  path-string message is a materially worse thing to show them than a
+  formatted SIWE message would have been.
+
+### 12.7 Phased build roadmap for this change
+
+| Phase | Scope | Depends on |
+|---|---|---|
+| 1 | `internal/middleware/signature_auth.go`: header extraction, timestamp tolerance, `cryptoutil.VerifyPersonalSign` call, self-service authorization, `CtxSubject`/`CtxSigner` wiring | — |
+| 2 | Delegated authorization: `sharedaccess` `GroupMember` role check when `wallet != signer` | Phase 1 |
+| 3 | Wire the new middleware onto every route currently guarded by `JWTAuth(..., AudienceWalletSession)`; remove `internal/components/auth`, `siwe-go`, related config | Phase 1, 2 |
+| 4 | Fix `servicelinks/services/approvals.go`'s `VerifyApproval` per §12.5 | Phase 3 |
+| 5 | Update `.env.example`/`DEPLOYMENT.md` for the new config, remove the retired SIWE ones | Phase 3, 4 |
+| 6 | Full build/vet/test/tidy pass; a live smoke test exercising a signed request end-to-end | Everything above |
+| 7 (tracked, not implemented here) | `wallet-web`'s own client-side changes (§12.6) | This phase's completion |
+
+Each phase, when implementation is authorized, follows this project's
+established discipline: build clean → test → document in this file's own
+"Implementation notes" → commit and push. Implementation does not begin
+until explicitly authorized.
