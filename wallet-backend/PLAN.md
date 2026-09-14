@@ -2305,16 +2305,31 @@ JWT-session scheme to begin with, so nothing there moves.
 
 Implementation does not begin until explicitly authorized.
 
-## 15. Wallet recovery: replacing a lost signer without losing the wallet
+## 15. Wallet recovery: two coexisting branches, not a replacement
 
-This is a distinct feature from the already-built `recovery.go` (which
-handles a **forgotten username/lost device** - OTP plus security
-questions, re-pointing a username to a caller-supplied address). This
-section covers a different, paid, opt-in feature the original calls
-account recovery internally but which is really **wallet-signer**
-recovery: letting a user who has lost their actual private key regain
-control of their *existing* wallets - same address, new key - rather
-than starting over on a fresh one.
+**Explicit decision, superseding an earlier draft of this section**: the
+already-built `recovery.go` (DB-only - re-points a username's address to
+a caller-supplied new one, no chain interaction, no sub-wallet/shared-
+access continuity) is **kept exactly as it is**, not superseded. A
+second, new mechanism is added alongside it - true wallet-signer
+recovery, preserving the same address via a Safe owner-swap. Both
+branches share the same identity-proof front door (security questions +
+email OTP + a `personal_sign` from the new key) and diverge only in what
+happens once that proof succeeds:
+
+| | Branch A - DB-only address swap | Branch B - true wallet recovery |
+|---|---|---|
+| What it does | `UPDATE users SET address = newAddress` - a fresh identity, nothing preserved | `swapOwner` on the primary wallet's Safe - same address, same funds, same sub-wallets and shared-access memberships |
+| Already built? | **Yes** - `recovery.go`, unchanged by this section | No - new work, §15.5 below |
+| Cost | Free (matches what's already built - no fee logic exists in `recovery.go` today) | The original's one-off enrollment fee (§15.7) |
+| Requires primary wallet already deployed? | No | Yes (§13.11) |
+| Enrollment flag | `User.AccountRecoveryEnabled` (already built, already wired) | New, separate flag - §15.2a |
+
+This mirrors the original's own two-function split
+(`DoInactiveAccountRecover` vs. `DoAccountRecovery`, §15.1) more
+faithfully than a single mechanism could - the original also offers a
+cheap, identity-only path and a stronger, wallet-preserving path side by
+side, not one replacing the other.
 
 ### 15.1 What the original actually does (audited directly)
 
@@ -2362,41 +2377,51 @@ than starting over on a fresh one.
   caller may not control any registered signer at all. The actual gate
   on those two routes is the security-answer/OTP check alone.
 
-### 15.2 Why this needs a real redesign, not a port of §15.1
+### 15.2 Why Branch B is new work, not an extension of `recovery.go`
 
-Two independent reasons converge on the same fix:
+`recovery.go`'s own doc comment states its design assumption directly:
+*"unlike a Stellar account, an EVM address is its key, so there is no
+'re-key the same address' operation to perform"* - correct for a bare
+EOA, and exactly what §13's Safe redesign changes: once the primary
+wallet is a Safe (§13.3), re-keying the same address becomes possible on
+Base too, via `swapOwner`. That's a different code path from `recovery.go`'s
+`UPDATE users SET address = newAddress`, not a variant of it - hence a
+new branch rather than a modification. `recovery.go`'s security-question/
+OTP/new-address-`personal_sign` machinery is directly reusable as
+Branch B's *identity-proof front door* too (§15.5 step 1) - that part is
+shared code, not duplicated.
 
-1. **The already-built `recovery.go` cannot be extended to do this.** Its
-   own doc comment states the design assumption directly: *"unlike a
-   Stellar account, an EVM address is its key, so there is no
-   're-key the same address' operation to perform"* - so it re-points the
-   username to an entirely new address instead, abandoning the old
-   wallet's identity (and never touches sub-wallets at all). That
-   assumption was correct for a bare EOA and is exactly what §13's
-   Safe redesign changes: **once the primary wallet is a Safe
-   (§13.3), re-keying the same address is possible on Base too** -
-   `swapOwner`. `recovery.go`'s security-question/OTP/new-address-
-   personal_sign machinery is directly reusable as the *identity-proof
-   front door*; what changes underneath is everything past that point.
-2. **§13.3's nested-EIP-1271-ownership design collapses the original's
-   whole "which wallets are eligible" question.** Because every
-   sub-wallet and every shared-access `GroupMember` entry names a
-   participant's *primary wallet address*, never their signer key
-   directly (§13.4), swapping the signer on **just the primary wallet's
-   Safe** is instantly, transparently reflected everywhere that user is
-   referenced - every sub-wallet they own, and every shared-access
-   wallet they participate in as owner or approver - with **zero**
-   additional on-chain transactions and **no per-wallet eligibility
-   logic at all**. This is not an approximation of the original's intent,
-   it's a strictly cleaner realization of it: the original has to loop
-   over every wallet and individually decide whether to touch it (and,
-   per §15.1, sometimes gets that boundary wrong); the Base design has
-   nothing to loop over, because there's only ever one place a signer
-   swap needs to happen.
+**§13.3's nested-EIP-1271-ownership design also collapses the original's
+whole "which wallets are eligible" question, for Branch B specifically.**
+Because every sub-wallet and every shared-access `GroupMember` entry
+names a participant's *primary wallet address*, never their signer key
+directly (§13.4), swapping the signer on **just the primary wallet's
+Safe** is instantly, transparently reflected everywhere that user is
+referenced - every sub-wallet they own, and every shared-access wallet
+they participate in as owner or approver - with **zero** additional
+on-chain transactions and **no per-wallet eligibility logic at all**.
+This is not an approximation of the original's intent, it's a strictly
+cleaner realization of it: the original has to loop over every wallet
+and individually decide whether to touch it (and, per §15.1, sometimes
+gets that boundary wrong); Branch B has nothing to loop over, because
+there's only ever one place a signer swap needs to happen.
 
-### 15.3 The recovery service itself: what it can do, stated plainly
+### 15.2a Two independent enrollment flags, not one gating the other
 
-Enabling recovery means adding a second owner to the primary wallet's
+**Recommendation**: `User.AccountRecoveryEnabled` (already built, gates
+Branch A exactly as today) and a new, separate `User.WalletRecoveryEnabled`
+(gates Branch B) are independent - a user may enable neither, either, or
+both, and enabling one never requires or implies the other. This is the
+simplest option and avoids inventing a dependency the original doesn't
+have either (its `EnableAccountRecovery` is a single all-or-nothing
+switch for its one mechanism). The alternative - requiring Branch A's
+flag before Branch B's can be set, on the theory that Branch B is a
+"stronger upgrade" - is a documented option, not the recommendation;
+flag if that dependency is wanted instead before implementation starts.
+
+### 15.3 Branch B's recovery service: what it can do, stated plainly
+
+Enabling Branch B means adding a second owner to the primary wallet's
 Safe: `owners: [signerEOA, recoveryServiceAddress], threshold: 1`. Since
 Safe has no per-owner "this key may only do X" restriction natively,
 this owner - like the original's weight-1 Stellar signer on a
@@ -2428,38 +2453,44 @@ improvement the original's ledger cannot:
   simultaneously - the same single-point-of-failure shape already
   flagged for the pre-redesign `sharedaccess` component in §13.5).
 
-### 15.4 Eligibility, simplified
+### 15.4 Branch B eligibility, simplified
 
-Given §15.2's point 2, eligibility stops being "which wallets does
-recovery need to touch" (the original's error-prone question) and
-becomes "does the *primary* wallet's own Safe already have a threshold
-the primary's single owner can satisfy alone" - which is always true for
-this design (`threshold: 1` from creation, §13.3) unless the primary
-wallet itself has been given additional independent owners some other
-way (not part of this plan's current scope). **Recovery enrollment
-is therefore a single operation on a single Safe, full stop** - no
-per-sub-wallet, per-shared-wallet loop, no `NumberOfApprovalsNeeded`
-boundary check, and consequently none of §15.1's boundary-inconsistency
-bug surface exists to reproduce. Market-making/bulk-payment-style
-higher-threshold custodial wallets (§13.1's `WalletType 2/3`) are simply
-out of scope for recovery under this design, by construction - not
-because of a special-cased exclusion rule, but because they were never
-reached through the primary wallet's owner chain to begin with. Flagging
-this as a deliberate simplification worth confirming rather than a gap.
+Given §15.2's nested-ownership point, eligibility stops being "which
+wallets does recovery need to touch" (the original's error-prone
+question) and becomes "does the *primary* wallet's own Safe already have
+a threshold the primary's single owner can satisfy alone" - which is
+always true for this design (`threshold: 1` from creation, §13.3) unless
+the primary wallet itself has been given additional independent owners
+some other way (not part of this plan's current scope). **Branch B
+enrollment is therefore a single operation on a single Safe, full
+stop** - no per-sub-wallet, per-shared-wallet loop, no
+`NumberOfApprovalsNeeded` boundary check, and consequently none of
+§15.1's boundary-inconsistency bug surface exists to reproduce.
+Market-making/bulk-payment-style higher-threshold custodial wallets
+(§13.1's `WalletType 2/3`) are simply out of scope for Branch B under
+this design, by construction - not because of a special-cased exclusion
+rule, but because they were never reached through the primary wallet's
+owner chain to begin with. Flagging this as a deliberate simplification
+worth confirming rather than a gap. (Branch A has no such restriction -
+it never touches any wallet but the DB row, so wallet type is
+irrelevant to it.)
 
-### 15.5 Recovery execution flow
+### 15.5 Branch B: true wallet recovery execution flow
 
-1. Locked-out user proves identity via `recovery.go`'s existing
-   mechanism: every configured security answer, a valid emailed OTP, and
-   a `personal_sign` proof from the **new** signer key over a recovery
-   message (never from the old one - it's lost, by definition). This
-   part of `recovery.go` is retained essentially as-is.
-2. Instead of `recovery.go`'s current `UPDATE users SET address =
-   newAddress` (which changes the wallet's permanent identity), the
-   service builds and submits a Safe `swapOwner(prevOwner, oldSigner,
+1. Locked-out user proves identity via the **same** functions
+   `recovery.go` already exports for Branch A - every configured
+   security answer, a valid emailed OTP, and a `personal_sign` proof
+   from the **new** signer key over a recovery message (never from the
+   old one - it's lost, by definition). This is shared, called code, not
+   a second copy of the logic - see §15.8.
+2. Where Branch A's `Recover` does `UPDATE users SET address =
+   newAddress` (which changes the wallet's permanent identity), Branch B
+   instead builds and submits a Safe `swapOwner(prevOwner, oldSigner,
    newSigner)` call against the **primary wallet's Safe** - `User.Address`
    never changes; only `User.SignerAddress` does, in step with the
-   Safe's actual on-chain owner.
+   Safe's actual on-chain owner. This is a distinct new function,
+   `RecoverWallet` or similar, called from a distinct new route -
+   `recovery.go`'s existing `Recover` is untouched.
 3. Per §15.4, no other wallet needs any on-chain transaction. The
    recovering user's `GroupMember` rows on *other* people's shared-access
    wallets (where they hold `APPROVER`) don't need deleting either -
@@ -2483,52 +2514,66 @@ this as a deliberate simplification worth confirming rather than a gap.
 
 ### 15.6 Interaction with §12's authorization model
 
-`POST /v1/users/account/recover`-equivalent is a deliberate exception to
-§12's general rule (self-service, or delegated via a `GroupMember`
-role): the whole premise is that the caller does **not** control any
-address currently authorized on the target account. The route still
-parses a well-formed §12-style signature (so the HTTP layer is uniform),
-but that signature only has to be internally valid, not tied to the
-target account - authorization for *this* route comes entirely from
-§15.5 step 1's identity factors, exactly matching the original's actual
-(if under-documented) behavior audited in §15.1. Enable/Disable, by
-contrast, **do** fit §12's normal model cleanly (the caller must already
-be the account's current signer) and need no exception.
+Both branches' execute routes (Branch A's already-built
+`POST /v1/account-recovery/:username/recover`, and Branch B's new
+equivalent - §15.9 names it `.../recover-wallet`) are a deliberate
+exception to §12's general rule (self-service, or delegated via a
+`GroupMember` role): the whole premise is that the caller does **not**
+control any address currently authorized on the target account. Each
+route still parses a well-formed §12-style signature (so the HTTP layer
+is uniform), but that signature only has to be internally valid, not
+tied to the target account - authorization for *these* routes comes
+entirely from the shared identity factors (§15.5 step 1), exactly
+matching the original's actual (if under-documented) behavior audited in
+§15.1 and already how the built Branch A route behaves today. Enable/
+Disable, for both branches, **do** fit §12's normal model cleanly (the
+caller must already be the account's current signer) and need no
+exception.
 
 ### 15.7 Fee model
 
-The original charges a one-off `ServiceFee` (`ACCOUNT_RECOVERY_FEE`) on
-enable, not an enforced subscription - `AccountRecoveryExpiresOn` is set
-but never read back anywhere in the codebase (a half-built,
-never-finished renewal feature). Recommendation: port only what's
-actually enforced - a one-off enrollment fee - rather than building
-unused expiry/renewal machinery to match a field the original itself
-never wired up.
+**Branch A stays free**, matching what's already built - no fee logic
+exists in `recovery.go` today, and this section doesn't propose adding
+any. **Branch B carries the original's one-off enrollment fee**
+(`ServiceFee`-style, matching `ACCOUNT_RECOVERY_FEE`) - not an enforced
+subscription; `AccountRecoveryExpiresOn` is set in the original but never
+read back anywhere in its own codebase (a half-built, never-finished
+renewal feature). Recommendation: port only what's actually enforced for
+Branch B - a one-off enrollment fee - rather than building unused
+expiry/renewal machinery to match a field the original itself never
+wired up.
 
 ### 15.8 What happens to the existing `recovery.go`
 
-Superseded, not deleted-and-forgotten: its OTP model
+**Nothing - it is Branch A, unchanged, in full.** Its OTP model
 (`AccountRecoveryEmailVerification`), security-question verification
-(`verifyAllSecurityAnswers`), and the `personal_sign`-proof-of-the-new-
-address pattern (`verifyNewAddressOwnership`/`RecoveryMessage`) are the
-right identity-proof primitives and carry forward into §15.5 step 1
-unchanged in spirit. What gets replaced is everything past identity
-verification: `Recover`'s `UPDATE users SET address = newAddress` (and
-its now-unnecessary `GroupMember` deletion, per §15.5 point 3) becomes
-the `swapOwner` call in §15.5 step 2. `buildRecoveryLog`'s
-tamper-evident attestation (signed by a `cryptoutil.DeriveKey`-derived
-authority key) is worth keeping as an audit trail regardless of the
-mechanism underneath.
+(`verifyAllSecurityAnswers`), `personal_sign`-proof-of-the-new-address
+pattern (`verifyNewAddressOwnership`/`RecoveryMessage`), and its
+`Recover` function's actual DB-swap behavior all stay exactly as built -
+this is Branch A's complete implementation, not a partial one awaiting
+replacement. Branch B is purely additive: new fields
+(`User.WalletRecoveryEnabled`, §15.2a), a new service function
+alongside `Recover` (not instead of it) that reuses
+`verifyAllSecurityAnswers`/`consumeValidOTP`/`verifyNewAddressOwnership`
+as shared, called code and then performs the `swapOwner` call from
+§15.5 step 2 instead of `Recover`'s DB update, and new routes (§15.9).
+`buildRecoveryLog`'s tamper-evident attestation pattern (signed by a
+`cryptoutil.DeriveKey`-derived authority key) is worth reusing for
+Branch B's own audit trail too, logging a different fact (a signer swap
+rather than an address change).
 
 ### 15.9 Phased roadmap (not started - design only)
+
+**Branch A needs no build phase - it's already shipped.** The phases
+below are Branch B only, purely additive to the existing `recovery.go`:
 
 | Phase | Scope | Depends on |
 |---|---|---|
 | 1 | Recovery-service Safe: its own internal N-of-M ownership, deployed once as platform infrastructure | §13's Safe wiring |
 | 2 | Safe Guard contract restricting the recovery-service owner to owner-management calls only (§15.3) | Phase 1 |
-| 3 | `EnableAccountRecovery`/`DisableAccountRecovery` equivalents: add/remove the recovery-service Safe as a second owner of the caller's primary wallet, gated by the one-off fee (§15.7) | §13.11 (primary wallet must already be deployed) |
-| 4 | Rework `Recover` to perform `swapOwner` on the primary wallet instead of re-pointing `User.Address`; drop the now-unnecessary `GroupMember` cleanup (§15.5 point 3) | Phase 3 |
-| 5 | `DoInactiveAccountRecover`-equivalent for a never-yet-activated primary wallet: no on-chain call needed at all (nothing deployed yet) - just recompute the counterfactual Safe address for the new signer and update the DB row, fixing the original's misleadingly-named `OneWeekAgo` (actually "24 hours from now") window bug along the way rather than reproducing it | — |
-| 6 | Test, document, push | 1-5 |
+| 3 | `User.WalletRecoveryEnabled` field; enable/disable service functions and routes: add/remove the recovery-service Safe as a second owner of the caller's primary wallet, gated by the one-off fee (§15.7) - independent of `User.AccountRecoveryEnabled` per §15.2a | §13.11 (primary wallet must already be deployed) |
+| 4 | New `RecoverWallet`-equivalent service function alongside (not replacing) `Recover`: reuses `verifyAllSecurityAnswers`/`consumeValidOTP`/`verifyNewAddressOwnership` as shared code, then performs `swapOwner` per §15.5 step 2; new route (e.g. `POST /v1/account-recovery/:username/recover-wallet`), `recovery.go`'s existing route and `Recover` untouched | Phase 3 |
+| 5 | Optional: a `DoInactiveAccountRecover`-equivalent for a never-yet-activated primary wallet, if wanted as a *third* path distinct from Branch A/B - worth confirming it isn't already redundant with Branch A (which already handles "no chain cost" identity recovery unconditionally, without the original's extra never-activated/fresh-account restriction) before building a third mechanism | — |
+| 6 | Test, document, push | 1-4 (5 if pursued) |
 
 Implementation does not begin until explicitly authorized.

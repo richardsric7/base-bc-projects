@@ -760,26 +760,41 @@ there) actually starts.
 
 ## 13. Wallet recovery UI (tracked, not yet implemented here)
 
-`wallet-backend/PLAN.md` §15 documents a paid, opt-in wallet-recovery
-feature: enroll a recovery-service Safe as a second owner of the primary
-wallet, so a lost signer key can later be replaced (`swapOwner`) without
-losing the wallet's address or its sub-wallets/shared-access
-memberships (§13.3's nested-ownership design means recovery only ever
-touches the primary wallet's own Safe - nothing else needs re-pointing).
-Once that lands server-side, this app needs:
+`wallet-backend/PLAN.md` §15 documents **two coexisting recovery
+branches**, not one - both worth UI here, presented as genuinely
+different options with different tradeoffs, not one being an upgraded
+version of the other in the UI copy:
 
-- An enable/disable settings screen (security questions setup, the
-  one-off fee disclosure, and a plain-language explanation of what the
-  recovery service can and cannot do per §15.3 - especially if the
-  recommended Safe Guard restricting it to owner-management calls only
-  is implemented, since that's a genuine, worth-advertising guarantee).
-- A recovery execution flow reachable *without* being logged in (by
-  definition, the user has no working signer key at this point): security
-  questions, email OTP, and a **new** signer key generated fresh in
-  `wallet-core` right there in that flow, ending with a `personal_sign`
-  proof from that new key (`wallet-backend/PLAN.md` §15.5 step 1) - this
-  is the one place in this app where a brand-new vault gets created
-  *before* any successful login, not after one.
+- **Branch A - free, DB-only address swap** (already built server-side,
+  `recovery.go`): trades continuity for simplicity - the account gets a
+  fresh address, and any funds/sub-wallets/shared-access memberships at
+  the old one are abandoned, not carried over. No settings/enrollment
+  screen beyond the existing enable/disable toggle - the security
+  questions setup it depends on may already exist from account
+  registration.
+- **Branch B - paid, true wallet recovery** (new, §15.5): enroll a
+  recovery-service Safe as a second owner of the primary wallet, so a
+  lost signer key can later be replaced (`swapOwner`) without losing the
+  wallet's address or its sub-wallets/shared-access memberships (§13.3's
+  nested-ownership design means recovery only ever touches the primary
+  wallet's own Safe - nothing else needs re-pointing). Needs its own
+  enable/disable settings screen (the one-off fee disclosure, and a
+  plain-language explanation of what the recovery service can and
+  cannot do per §15.3 - especially if the recommended Safe Guard
+  restricting it to owner-management calls only is implemented, since
+  that's a genuine, worth-advertising guarantee).
+
+Both branches share one recovery execution flow reachable *without*
+being logged in (by definition, the user has no working signer key at
+this point): security questions, email OTP, and a **new** signer key
+generated fresh in `wallet-core` right there in that flow, ending with a
+`personal_sign` proof from that new key (`wallet-backend/PLAN.md` §15.5
+step 1) - this is the one place in this app where a brand-new vault gets
+created *before* any successful login, not after one. The UI's job is
+presenting the choice plainly (same address, sub-wallets, and shared
+access preserved vs. a fresh start) before the user picks which branch
+to invoke, since the two produce materially different outcomes for the
+same starting problem.
 
 Not implemented here - tracked as a dependency this app's own
 implementation will need once `wallet-backend`'s §15 lands, the same way

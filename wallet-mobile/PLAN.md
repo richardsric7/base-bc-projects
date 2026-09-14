@@ -229,34 +229,43 @@ handles carries over:
 - `register`/`tokenizedAsset` carry over as their own existing flows,
   unaffected by this redesign.
 
-## 9. Wallet recovery: screens and flow
+## 9. Wallet recovery: screens and flow for both branches
 
 The original's `screens/account_recovery/` (§1) covers what
-`wallet-backend/PLAN.md` §15 calls wallet-**signer** recovery (distinct
-from a forgotten-username flow) - a paid, opt-in feature letting a user
-who's lost their device/key regain control of their *existing* wallets,
-same address, new key. This port needs two screen groups, not ported
-line-for-line from the original but matching its actual identity-proof
-factors:
+`wallet-backend/PLAN.md` §15 splits into **two coexisting branches**,
+presented to the user as genuinely different options, not one an
+upgrade of the other:
 
-- **Enable/disable settings**: security-question setup, a plain-language
-  explanation of what the recovery service can and cannot do (especially
-  worth advertising if `wallet-backend/PLAN.md` §15.3's recommended Safe
-  Guard - restricting the recovery service to owner-management calls
-  only, never a direct transfer - is implemented), and the one-off fee
-  disclosure.
-- **Recovery execution - reachable without being logged in**, since by
-  definition the user has no working signer key: security questions,
-  email OTP, then `wallet-core` generates a **fresh** mnemonic/vault
-  right there in this flow (before any successful login exists) and
-  produces a `personal_sign` proof from that new key
-  (`wallet-backend/PLAN.md` §15.5 step 1). Per §15.2 of that document,
-  nothing about sub-wallets or shared-access memberships needs touching
-  in this flow or its screens - the backend's nested-ownership design
-  means swapping the primary wallet's signer is the only on-chain change
-  that ever happens, so there's no "select which wallets to recover"
-  step to build, unlike what the original's own multi-wallet-loop
-  behavior might suggest.
+- **Branch A - free, DB-only address swap** (already built
+  server-side, `recovery.go`): the account gets re-pointed to a fresh
+  address; whatever was at the old one - funds, sub-wallets, shared-access
+  memberships - is abandoned, not carried over. No enrollment screen
+  beyond a toggle - it depends on the same security questions likely
+  already set up at registration.
+- **Branch B - paid, true wallet recovery** (new, §15.5): same address,
+  same sub-wallets, same shared-access memberships afterward - a Safe
+  owner-swap on the primary wallet, nothing else. Needs its own
+  enable/disable settings screen: security-question setup if not already
+  done, a plain-language explanation of what the recovery service can
+  and cannot do (especially worth advertising if `wallet-backend/PLAN.md`
+  §15.3's recommended Safe Guard - restricting the recovery service to
+  owner-management calls only, never a direct transfer - is
+  implemented), and the one-off fee disclosure.
+
+Both branches share **one recovery execution flow, reachable without
+being logged in**, since by definition the user has no working signer
+key: security questions, email OTP, then `wallet-core` generates a
+**fresh** mnemonic/vault right there in this flow (before any successful
+login exists) and produces a `personal_sign` proof from that new key
+(`wallet-backend/PLAN.md` §15.5 step 1) - only the last step (which
+branch's endpoint gets called) differs, and the screen should say
+plainly what each choice preserves versus abandons before the user
+picks. For Branch B specifically, per §15.4 of that document, nothing
+about sub-wallets or shared-access memberships needs a "select which
+wallets to recover" step - the backend's nested-ownership design means
+swapping the primary wallet's signer is the only on-chain change that
+ever happens, unlike what the original's own multi-wallet-loop behavior
+might suggest.
 
 ## 10. Business-logic parity map
 
