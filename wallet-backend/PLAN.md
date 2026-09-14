@@ -1980,7 +1980,7 @@ overhead on top of that floor, and about who fronts it:
 
 | Option | How it works | Tradeoff |
 |---|---|---|
-| **A - Safe's built-in gas refund (recommended to start)** | `execTransaction`'s own `gasPrice`/`gasToken`/`refundReceiver` parameters let the Safe reimburse whoever submits the call, paid from the Safe's *own* ETH balance. A small ETH top-up at creation time (directly analogous to the original's DB-configurable `ActivationAmount`) funds this float; a backend-operated relayer submits transactions and gets reimbursed by each Safe it acts for. | Needs a relayer service (can be the same account submitting on behalf of many wallets) and each wallet needs a small ETH float, refilled periodically - closely mirrors the original's "activates using the primary wallet's balance" framing, since the top-up itself is typically funded by a transfer from the primary at creation time. |
+| **A - Safe's built-in gas refund (recommended to start)** | `execTransaction`'s own `gasPrice`/`gasToken`/`refundReceiver` parameters let the Safe reimburse whoever submits the call, paid from the Safe's *own* ETH balance. A small ETH top-up at creation time (directly analogous to the original's DB-configurable `ActivationAmount`) funds this float; a backend-operated relayer submits transactions and gets reimbursed by each Safe it acts for. | Needs a relayer service - specifically a **pool** of relayer EOAs, not one (§13.12 - the direct Base equivalent of the original's channel-account pool, needed for the same reason: many concurrent submissions from a single account contend for that one account's nonce) - and each wallet needs a small ETH float, refilled periodically. Closely mirrors the original's "activates using the primary wallet's balance" framing, since the top-up itself is typically funded by a transfer from the primary at creation time. |
 | **B - Primary EOA pays gas directly** | Primary wallet holds a small ETH balance and submits `execTransaction` itself as an ordinary sender. | Simplest to build, but pushes a "keep some ETH around" UX requirement onto the user - the exact thing Stellar's model doesn't require of end users, since the original abstracts even the *native-asset* activation amount away as an internal bookkeeping detail. |
 | **C - ERC-4337 (account abstraction) + Paymaster** | A `UserOperation` flow where a project-funded paymaster sponsors gas entirely - zero ETH ever required from the user for this. | Real engineering lift (bundler integration, paymaster contract/service) beyond what this feature needs on day one; worth keeping as a documented future upgrade path once volume justifies it, not a blocker now. |
 
@@ -2080,11 +2080,12 @@ half of this change.
 | 1 | Safe factory/singleton wiring on Base (address constants, CREATE2 address computation helper, deployment call), EIP-1271 nested-signature construction/verification helper |
 | 2 | Primary wallet becomes a Safe: `User.SignerAddress` field, primary-wallet Safe deployment flow (§13.11), migrating registration off "primary is a bare EOA" |
 | 3 | Unified sub-wallet/group schema migration (§13.4), sub-wallet creation flow (§13.6) replacing `POST /v1/users/subwallet`'s two-phase XDR dance, owned by the primary wallet's Safe address |
-| 4 | Gas-refund float wiring (§13.7 Option A) and relayer submission path |
+| 4 | Gas-refund float wiring (§13.7 Option A) and relayer submission path, built on the relayer-EOA pool + startup reconciliation from §13.12 (not a single relayer) |
 | 5 | Member management + group disable (§13.8), routed through the existing propose/approve/execute pipeline, `GroupMember.MemberAddress` always a participant's primary-wallet address (§13.4) with an activation precondition check (§13.11) |
-| 6 | Generic per-domain post-processing hook (§13.8); wire crypto/tokenization/market-making initiators onto it |
-| 7 | Cross-wallet listing + curated-asset-filtered balance summary (§13.8) |
-| 8 | Full build/vet/test/tidy pass; a live smoke test deploying a primary wallet, creating a sub-wallet, enabling shared access, and driving one action through propose→approve→execute on Base Sepolia |
+| 6 | Per-Safe nonce reservation for `PendingAction` proposals (§13.12 risk 1) and the stale-`PendingAction` expiry sweep |
+| 7 | Generic per-domain post-processing hook (§13.8); wire crypto/tokenization/market-making initiators onto it |
+| 8 | Cross-wallet listing + curated-asset-filtered balance summary (§13.8) |
+| 9 | Full build/vet/test/tidy pass; a live smoke test deploying a primary wallet, creating a sub-wallet, enabling shared access, and driving one action through propose→approve→execute on Base Sepolia, including a concurrent-proposal test exercising §13.12's nonce reservation |
 
 ### 13.11 Activation-order dependencies (user-flagged, audited against §13.1-§13.8's design)
 
@@ -2117,6 +2118,117 @@ bundled invisibly into an unrelated action's cost. Lazy deployment as a
 fallback (for a user who skipped the explicit step and then tries an
 operation that needs it) is still worth supporting, just not as the
 primary path.
+
+### 13.12 Concurrency: the Base equivalent of the original's channel-account pool
+
+The user asked specifically that this feature's equivalent be retained,
+and audited directly (not assumed): the original solves a Stellar-
+specific problem (a strictly incrementing sequence number owned by a
+transaction's source account, colliding if two transactions for the same
+source are built concurrently) with a pool of dedicated "channel
+accounts" used as the source account for transactions with a long
+pending-approval window - reserving that window's sequence number away
+from contention with the wallet's own ongoing activity. Base has an
+analogous, but not identical, nonce-collision problem in **two**
+different places, both needing the same architectural pattern (a pool,
+claim/release, startup reconciliation) - not one.
+
+**Audited finding: the original's own implementation of this feature has
+a real bug, for exactly the flows the user described it as protecting.**
+There is no `channel_accounts` DB table - the pool is an in-memory Go
+buffered channel of keypairs (`sharedconfig.GlobalConfig.ChannelAccounts`)
+populated at startup from env config (`CHANNEL_ACCOUNTS` seed CSV,
+topped up to `CHANNEL_ACCOUNT_MIN_COUNT` with fresh random keypairs).
+Claiming is a channel receive, releasing is a channel send - and the
+shared-access code (`generateModifySharedAccessXdr`,
+`generateRemoveSharedAccessXdr`) claims one, builds the XDR, and
+**releases it immediately via an unconditional `defer`** - the account
+is back in the available pool the instant the pending, awaiting-
+approval transaction is written to the DB, not held for the whole
+approval-collection window the mechanism exists to protect. Only one
+call site anywhere in the codebase (a fiat-purchase flow,
+`tokenized_assets.go`) does the correct thing - hold it in
+`InUseChannelAccounts` via `StoreInUseChannelAccount`, release only on
+completion via `ReleaseInUseChannelAccount`. The startup reconciliation
+goroutine the user described (scans `PendingAuth` rows with
+`transaction_status = 'PENDING'` and re-marks their channel account
+in-use) is real and does exactly what's described - but for the
+shared-access flows, it's compensating for a bug that leaves the account
+available *during the entire live-process window*, only closing the gap
+retroactively on the *next restart*. This is flagged, not reproduced -
+the Base design below implements the mechanism the original's own
+`StoreInUseChannelAccount` pattern was aiming for, applied consistently,
+plus the startup-reconciliation safety net the user asked to keep.
+
+**Two distinct nonce-collision risks on Base, both real:**
+
+1. **A Safe's own internal nonce** (used inside its `SafeTxHash`
+   computation) is a single incrementing counter per Safe. If two
+   `PendingAction`s are proposed against the *same* Safe concurrently,
+   both naively computed against "the Safe's current nonce," they
+   collide the same way two Stellar transactions sharing a sequence
+   number do - whichever executes second, after the first has already
+   incremented the Safe's nonce, fails. This has no "pool" to reach for
+   (there's only one Safe, one nonce sequence, at a time) - it needs
+   **per-Safe serialization at proposal time**, not a shared resource.
+2. **The relayer EOA(s) submitting `execTransaction` calls** (§13.7)
+   have their own Ethereum account nonce. A single relayer processing
+   many concurrent submissions across many different users' Safes hits
+   *exactly* the problem channel accounts solve on Stellar - many
+   pending on-chain submissions contending for one account's nonce
+   sequence. This **does** need a pool, structured the same way the
+   original's channel-account pool is.
+
+**Design for risk 1 - per-Safe nonce reservation, held for the whole
+pending window:**
+- `PendingAction` gains a `SafeNonce` column, assigned atomically at
+  proposal time: within one DB transaction, lock the `ClosedGroup` row
+  (`SELECT ... FOR UPDATE` or GORM's equivalent), compute
+  `nextNonce = safe.OnChainNonce + count(non-terminal PendingActions for
+  this GroupID)`, insert the new `PendingAction` with that `SafeNonce`,
+  commit. A concurrent proposal against the same Safe blocks on the row
+  lock rather than racing - this is the correct version of what the
+  original's `defer`-release pattern was supposed to provide and didn't.
+- Released (in the sense of "no longer reserved") only when the
+  `PendingAction` reaches a terminal state - `EXECUTED` or `REJECTED`.
+  This closes another audited original gap: `RejectTransaction` never
+  releases its channel account at all in the original, leaking it until
+  the next restart's reconciliation; here, rejection is itself what
+  frees the reservation, immediately, correctly.
+- **New: a periodic expiry sweep for stale, never-resolved
+  `PendingAction`s** - the original has this for fiat invoices
+  (`ExpireStalePaymentInvoices`, a 30-minute ticker) but conspicuously
+  *not* for `PendingAuth`/shared-access, a gap flagged in §13.1's audit
+  and left unfixed there; this design closes it uniformly rather than
+  leaving shared-access as the one flow with no timeout.
+
+**Design for risk 2 - a relayer-EOA pool, directly mirroring the
+original's channel-account pool:**
+
+| Original (channel accounts) | Base equivalent (relayer pool) |
+|---|---|
+| `CHANNEL_ACCOUNTS` (seed CSV), `CHANNEL_ACCOUNT_MIN_COUNT`, `CHANNEL_ACCOUNT_FUNDER`, `CHANNEL_ACCOUNT_FUNDING_AMOUNT`/`MIN_BALANCE` | Equivalent env config for a pool of relayer EOAs - a funder key top-up, a minimum pool size, a minimum ETH balance per relayer |
+| In-memory buffered channel + `InUseChannelAccounts` map + mutex | Same in-process shape is fine to start - a buffered channel of relayer keys plus an in-use set, guarded by a mutex |
+| Claim = channel receive, release = channel send (correct in principle; the bug was *when* release was called, not the primitive itself) | Same primitive, held from claim until the submitted transaction is **confirmed on-chain** (or fails/times out) - not released the moment the call is merely broadcast, closing the analogous "released too early" risk before it can be introduced here |
+| Startup goroutine scans `PendingAuth`/`FiatPaymentInvoice` rows with a pending status and re-marks their channel account in-use | Same pattern: scan for any transaction row still in a "submitted, not yet confirmed" state at boot and re-mark its relayer EOA in-use before accepting new work - the direct, explicitly-requested equivalent |
+| Scoped narrowly to a few flows (shared access, regulated-asset minting, fiat purchase) - ordinary payments use the wallet's own account as source, sidestepping the relayer entirely | Scoped to **every** backend-submitted transaction, not narrowly - on Base, the relayer (not the wallet) always submits `execTransaction`, per §13.7's gas-sponsorship model, so the same nonce-contention risk exists uniformly, not just for multi-approval flows. Narrower scoping isn't available the way it is on Stellar. |
+
+### 13.13 Open decisions for §13.12
+
+- Pool sizing: static config (matching `CHANNEL_ACCOUNT_MIN_COUNT`) is
+  the recommended starting point; auto-scaling the pool based on
+  observed concurrent-submission volume is a reasonable later
+  refinement, not needed for v1.
+- Whether risk 2's pool should eventually move to a proper job-queue-
+  backed relayer service (more robust under process restarts and
+  horizontal scaling) rather than an in-process Go channel - the
+  in-process version mirrors the original closely enough to start with
+  and is simpler to reason about; flag if the operational scale from day
+  one warrants the heavier design instead.
+- Whether "confirmed on-chain" (risk 2's release condition) should wait
+  for one confirmation or a small number, trading a slightly longer
+  relayer-hold time for stronger protection against a reorg re-opening
+  the same nonce.
 
 Implementation does not begin until explicitly authorized.
 
