@@ -2372,6 +2372,81 @@ database):
   approval (no second signature required, same error both times). Full
   `go build`/`go vet`/`go test ./...` pass across the module.
 
+#### Phase 4 implementation notes (done)
+
+- **Real execution, finally**: `executeAction` no longer fails loudly - it
+  packs every recorded off-chain approval into the real
+  `Safe.execTransaction` signatures blob (`safe.PackSignatures`), submits
+  it through a pool relayer, and waits for on-chain confirmation before
+  marking the action `EXECUTED`. This closes the second half of §13.5's
+  flagged gap (the first half, real Safe *deployment*, was Phase 3's).
+- **Approvals now sign the real digest, not a descriptive string**:
+  `ApproveAction`'s signature check moved from `canonicalActionMessage`
+  (an off-chain-only text string) to the actual `safe.SafeTxHash` - or,
+  for a member who is a registered user's primary wallet, the nested
+  EIP-1271 `MessageHashForSafe` digest that primary wallet's own owner
+  (its current `SignerAddress`) must sign instead
+  (`resolveGroupOwnerSigner`/`digestToSign`). `GET .../actions/:actionId`
+  now returns `digestToSign` (renamed from `messageToSign`, since it's a
+  binary hash now, not a message) computed per the calling member -
+  `CanonicalActionMessage` is gone.
+- **Nested EIP-1271 signature packing** (`buildPackedSignature`): a direct
+  external-EOA owner's approval packs as a plain EOA signature; a
+  registered user's primary-wallet owner's approval - signed by that
+  user's current signer key over the nested digest - packs as an EIP-1271
+  contract signature (`safe.ContractSignature`, wrapping an inner
+  `safe.PackSignatures` blob over that primary wallet's own single
+  owner). This is the first place PLAN.md §13.4's nested-ownership design
+  (built and cross-checked in Phase 1, unused until now) actually runs
+  end to end.
+- **`PendingAction.SafeNonce`** (new column) fixes, at proposal time, the
+  Safe nonce every approver's signature is computed against - read with a
+  plain `Safe.nonce()` eth_call (`safe.EncodeNonceCalldata`/
+  `network.Client.SafeNonce`), not reserved atomically. This is a known,
+  deliberately deferred race (two actions proposed concurrently against
+  the same Safe can collide) - closing it with a row-locked atomic
+  reservation is Phase 6's job (§13.12 risk 1), not this one.
+- **`internal/relayer`** (new package): the direct Base equivalent of the
+  original's channel-account pool (§13.12 risk 2) - a fixed set of
+  relayer EOAs, each deterministically derived from `RELAYER_KEY_SALT`
+  (never stored, same convention as every other server-controlled key),
+  claimed for the lifetime of one submission and released only once it's
+  confirmed on-chain (or fails/times out) - never merely on broadcast,
+  the exact bug §13.12's audit found in the original's own shared-access
+  code. `PendingAction.RelayerAddress` plus a new transient `SUBMITTED`
+  status track which relayer is mid-flight for which action.
+- **`Service.ReconcileRelayers`** (called once at boot, before the router
+  serves traffic) is the startup-reconciliation counterpart the original
+  has for its own pool: it re-marks any relayer address recorded against
+  a still-`SUBMITTED` action in-use before the freshly-constructed
+  in-memory pool ever serves a `Claim`, then resumes waiting on each - the
+  in-memory pool has no memory of its own across a restart, so without
+  this a relayer whose last submission's outcome is unknown could be
+  handed out for new work immediately.
+- **Gas-sponsorship model note**: §13.7's "Option A" (a Safe's own
+  built-in `execTransaction` gas refund, paid from a per-Safe ETH float)
+  was superseded by a decision already made in Phase 1:
+  `EncodeExecTransactionCalldata` always zeroes `gasPrice`/`gasToken`/
+  `refundReceiver`, so the relayer pool pays execution gas directly out
+  of its own centrally-funded balance rather than being reimbursed
+  per-transaction by each Safe. Simpler to implement and reason about
+  than in-band refund accounting, and a reasonable simplification given
+  Base's already-negligible L2 fees - no per-Safe ETH top-up is needed
+  for execution gas (a group's own balance still needs funding for
+  whatever it actually pays out, of course).
+- **Verification**: `sharedaccess/services` tests now assert real
+  execution succeeds and reaches `EXECUTED` once threshold is met (not
+  just that it's attempted), cover the nested EIP-1271 packing path with
+  a registered-user primary-wallet member end to end (asserting the
+  nested digest differs from the plain `SafeTxHash`), and cover retrying
+  a failed submission without a second signature (the fake blockchain's
+  configurable `err` simulates a transient RPC failure, then clears for
+  the retry). New `internal/relayer` tests cover deterministic key
+  derivation, distinct addresses per pool, Claim/Release round-tripping,
+  and `ReserveAtStartup` keeping a reserved address unavailable until
+  released. Full `go build`/`go vet`/`go test ./...` pass across the
+  module.
+
 ### 13.11 Activation-order dependencies (user-flagged, audited against §13.1-§13.8's design)
 
 Registration itself never requires on-chain activation - the primary

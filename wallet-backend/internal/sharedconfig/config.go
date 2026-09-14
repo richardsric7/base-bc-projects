@@ -21,6 +21,7 @@ import (
 	"wallet-backend/internal/network"
 	"wallet-backend/internal/notify"
 	"wallet-backend/internal/rates"
+	"wallet-backend/internal/relayer"
 	"wallet-backend/internal/storage"
 )
 
@@ -80,6 +81,13 @@ type GlobalConfig struct {
 	// Unlike RecoveryAuthoritySalt or MarketEscrowKeySalt below, rotating
 	// this is harmless: fund one address, once, for the whole platform.
 	SafeDeployerKeySalt string
+
+	// RelayerPool is the pool of backend-operated EOAs that submit every
+	// real Safe execTransaction call once a shared-access group's
+	// approval threshold is met (internal/relayer, PLAN.md §13.10
+	// Phase 4/§13.12) - the direct Base equivalent of the original's
+	// channel-account pool. Always non-nil.
+	RelayerPool *relayer.Pool
 
 	// Sumsub/Doja credentials for internal/components/kyc. The upstream
 	// project stored these in a database KYCConfig table; this port keeps
@@ -201,6 +209,12 @@ type Env struct {
 
 	SafeDeployerKeySalt string
 
+	// RelayerKeySalt/RelayerPoolSize configure the shared-access execution
+	// relayer pool (internal/relayer, PLAN.md §13.10 Phase 4/§13.12) -
+	// see GlobalConfig.RelayerPool's doc.
+	RelayerKeySalt  string
+	RelayerPoolSize int
+
 	SumsubBaseURL   string
 	SumsubToken     string
 	SumsubSecretKey string
@@ -290,6 +304,9 @@ func LoadEnv() Env {
 		RecoveryOTPTTLMinutes: getEnvInt("RECOVERY_OTP_TTL_MINUTES", 15),
 
 		SafeDeployerKeySalt: getEnv("SAFE_DEPLOYER_KEY_SALT", "dev-only-change-me"),
+
+		RelayerKeySalt:  getEnv("RELAYER_KEY_SALT", "dev-only-change-me"),
+		RelayerPoolSize: getEnvInt("RELAYER_POOL_SIZE", 3),
 
 		SumsubBaseURL:   getEnv("SUMSUB_BASE_URL", "https://api.sumsub.com"),
 		SumsubToken:     getEnv("SUMSUB_TOKEN", ""),

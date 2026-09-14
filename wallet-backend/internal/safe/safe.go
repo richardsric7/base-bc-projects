@@ -27,6 +27,7 @@
 package safe
 
 import (
+	"fmt"
 	"math/big"
 	"strings"
 
@@ -127,7 +128,8 @@ const safeABIJSON = `[
 		{"name":"_singleton","type":"address"},
 		{"name":"initializer","type":"bytes"},
 		{"name":"saltNonce","type":"uint256"}
-	],"outputs":[{"name":"proxy","type":"address"}]}
+	],"outputs":[{"name":"proxy","type":"address"}]},
+	{"name":"nonce","type":"function","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"uint256"}]}
 ]`
 
 var safeABI abi.ABI
@@ -209,4 +211,30 @@ func valueOrZero(v *big.Int) *big.Int {
 		return big.NewInt(0)
 	}
 	return v
+}
+
+// EncodeNonceCalldata ABI-encodes a call to Safe.nonce(), the view function
+// a Safe's own current transaction nonce is read from - needed at proposal
+// time (PLAN.md §13.10 Phase 4) to fix the nonce a SafeTx's hash, and every
+// approver's signature over it, are computed against. Reading this value
+// with a plain eth_call rather than reserving it atomically under a row
+// lock is a known, deliberately deferred race (PLAN.md §13.12 risk 1,
+// closed in Phase 6): two actions proposed concurrently against the same
+// Safe can observe the same nonce and collide on-chain when the second
+// tries to execute - acceptable for Phase 4, not for the long term.
+func EncodeNonceCalldata() ([]byte, error) {
+	return safeABI.Pack("nonce")
+}
+
+// DecodeNonceResult unpacks Safe.nonce()'s eth_call return data.
+func DecodeNonceResult(data []byte) (*big.Int, error) {
+	out, err := safeABI.Unpack("nonce", data)
+	if err != nil {
+		return nil, err
+	}
+	nonce, ok := out[0].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("safe: decode nonce: unexpected output type")
+	}
+	return nonce, nil
 }

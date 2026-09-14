@@ -19,8 +19,8 @@ import (
 )
 
 // Init registers the sharedaccess component's routes on router.
-func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
-	svc := services.New(gc.DB, gc.Blockchain, gc.SafeDeployerKeySalt)
+func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
+	svc := services.New(gc.DB, gc.Blockchain, gc.SafeDeployerKeySalt, gc.ChainID, gc.RelayerPool)
 
 	group := router.Group("/v1/shared-access")
 	group.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
@@ -34,6 +34,8 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
 	group.GET("/actions/:actionId", getAction(svc))
 	group.POST("/actions/:actionId/approve", approveAction(svc))
 	group.POST("/actions/:actionId/reject", rejectAction(svc))
+
+	return svc
 }
 
 type memberInput struct {
@@ -123,9 +125,9 @@ func proposeAction(svc *services.Service) gin.HandlerFunc {
 		var err error
 		switch models.ActionKind(req.Kind) {
 		case models.ActionPayment:
-			action, err = svc.ProposePayment(proposer, req.GroupID, req.Description, req.Recipient, req.TokenAddress, req.Amount)
+			action, err = svc.ProposePayment(c.Request.Context(), proposer, req.GroupID, req.Description, req.Recipient, req.TokenAddress, req.Amount)
 		case models.ActionSwap, models.ActionContractCall:
-			action, err = svc.ProposeContractCall(proposer, req.GroupID, models.ActionKind(req.Kind), req.Description, req.To, req.ValueWei, req.Data)
+			action, err = svc.ProposeContractCall(c.Request.Context(), proposer, req.GroupID, models.ActionKind(req.Kind), req.Description, req.To, req.ValueWei, req.Data)
 		default:
 			apperrors.Abort(c, apperrors.BadRequest(`kind must be "payment", "swap" or "contract_call"`))
 			return
@@ -150,11 +152,12 @@ func listPending(svc *services.Service) gin.HandlerFunc {
 	}
 }
 
-// actionDetail bundles the action with the exact message an approver must
-// sign, so a client never has to reconstruct the canonical format itself.
+// actionDetail bundles the action with the exact digest the calling member
+// must personal_sign to approve it, so a client never has to reconstruct
+// the real SafeTxHash (or its nested EIP-1271 wrapping) itself.
 type actionDetail struct {
 	*models.PendingAction
-	MessageToSign string `json:"messageToSign"`
+	DigestToSign string `json:"digestToSign"`
 }
 
 func getAction(svc *services.Service) gin.HandlerFunc {
@@ -168,12 +171,13 @@ func getAction(svc *services.Service) gin.HandlerFunc {
 			apperrors.AbortAny(c, err)
 			return
 		}
-		message, err := svc.CanonicalActionMessage(actionID)
+		caller := c.GetString(middleware.CtxSubject)
+		digest, err := svc.DigestToSign(actionID, caller)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, actionDetail{PendingAction: action, MessageToSign: message})
+		c.JSON(http.StatusOK, actionDetail{PendingAction: action, DigestToSign: digest})
 	}
 }
 

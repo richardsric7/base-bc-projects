@@ -63,6 +63,7 @@ import (
 	"wallet-backend/internal/network"
 	"wallet-backend/internal/notify"
 	"wallet-backend/internal/rates"
+	"wallet-backend/internal/relayer"
 	"wallet-backend/internal/sharedconfig"
 	"wallet-backend/internal/storage"
 )
@@ -138,6 +139,12 @@ func main() {
 
 	addressWatcher := network.NewAddressWatcher(blockchain)
 
+	relayerPool, err := relayer.NewPool(env.RelayerKeySalt, env.RelayerPoolSize)
+	if err != nil {
+		log.Fatalf("failed to derive the shared-access relayer pool: %v", err)
+	}
+	log.Printf("relayer: pool of %d addresses derived (fund them with ETH before enabling shared-access execution)", len(relayerPool.Addresses()))
+
 	var mailer notify.Mailer = notify.NewConsoleMailer()
 	if !env.UseConsoleMailer && env.SMTPHost != "" {
 		mailer = notify.NewSMTPMailer(env.SMTPHost, env.SMTPPort, env.SMTPUsername, env.SMTPPassword, env.MailFrom)
@@ -206,6 +213,7 @@ func main() {
 		RecoveryOTPTTL:        durationFromMinutes(env.RecoveryOTPTTLMinutes),
 
 		SafeDeployerKeySalt: env.SafeDeployerKeySalt,
+		RelayerPool:         relayerPool,
 
 		SumsubBaseURL:   env.SumsubBaseURL,
 		SumsubToken:     env.SumsubToken,
@@ -250,7 +258,11 @@ func main() {
 	paymentsSvc.Alerts = gc.Alerts
 	swapsSvc := swapsControllers.Init(router, gc)
 	swapsSvc.Alerts = gc.Alerts
-	sharedaccessControllers.Init(router, gc)
+	sharedaccessSvc := sharedaccessControllers.Init(router, gc)
+	// Must run before the router starts serving traffic - see
+	// relayer.Pool.ReserveAtStartup's own doc comment on why it isn't
+	// safe to call once the pool is already handling concurrent Claims.
+	sharedaccessSvc.ReconcileRelayers(context.Background())
 	ratesControllers.Init(router, gc)
 	announcementsControllers.Init(router, gc)
 	callbacksControllers.Init(router, gc)

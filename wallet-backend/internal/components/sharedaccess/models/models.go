@@ -95,9 +95,18 @@ type GroupMember struct {
 type ActionStatus string
 
 const (
-	ActionPending  ActionStatus = "PENDING"
-	ActionExecuted ActionStatus = "EXECUTED"
-	ActionRejected ActionStatus = "REJECTED"
+	ActionPending ActionStatus = "PENDING"
+	// ActionSubmitted is a transient state: the approval threshold was
+	// met and a relayer has broadcast the real Safe execTransaction call,
+	// but its confirmation hasn't been observed yet (PLAN.md §13.10
+	// Phase 4). It blocks new approvals the same way PENDING's own
+	// terminal-state check does, preventing a second concurrent
+	// submission of the same action. A failed or unconfirmed submission
+	// reverts to ActionPending so the next approval call retries
+	// execution (see services.ApproveAction's already-approved branch).
+	ActionSubmitted ActionStatus = "SUBMITTED"
+	ActionExecuted  ActionStatus = "EXECUTED"
+	ActionRejected  ActionStatus = "REJECTED"
 )
 
 // ActionKind distinguishes what a proposed action does, purely for display
@@ -115,20 +124,33 @@ const (
 // shape rather than one row per component (payment/swap/etc.), see
 // PLAN.md §4.2.
 type PendingAction struct {
-	ID                uint         `gorm:"primaryKey" json:"id"`
-	GroupID           uint         `gorm:"index;not null" json:"groupId"`
-	ProposerAddress   string       `gorm:"size:42;not null" json:"proposerAddress"`
-	Kind              ActionKind   `gorm:"size:16;not null" json:"kind"`
-	Description       string       `gorm:"size:512" json:"description"`
-	To                string       `gorm:"size:42;not null" json:"to"`
-	TokenAddress      string       `gorm:"size:42" json:"tokenAddress"` // empty = native ETH
-	Value             string       `gorm:"size:80;not null" json:"value"`
-	Data              string       `gorm:"type:text" json:"data"` // hex calldata, "0x" if none
-	RequiredApprovals int          `gorm:"not null" json:"requiredApprovals"`
-	Status            ActionStatus `gorm:"size:16;not null;default:PENDING" json:"status"`
-	TxHash            string       `gorm:"size:66" json:"txHash"`
-	RejectionReason   string       `gorm:"size:512" json:"rejectionReason"`
-	CreatedAt         time.Time    `json:"createdAt"`
+	ID                uint       `gorm:"primaryKey" json:"id"`
+	GroupID           uint       `gorm:"index;not null" json:"groupId"`
+	ProposerAddress   string     `gorm:"size:42;not null" json:"proposerAddress"`
+	Kind              ActionKind `gorm:"size:16;not null" json:"kind"`
+	Description       string     `gorm:"size:512" json:"description"`
+	To                string     `gorm:"size:42;not null" json:"to"`
+	TokenAddress      string     `gorm:"size:42" json:"tokenAddress"` // empty = native ETH
+	Value             string     `gorm:"size:80;not null" json:"value"`
+	Data              string     `gorm:"type:text" json:"data"` // hex calldata, "0x" if none
+	RequiredApprovals int        `gorm:"not null" json:"requiredApprovals"`
+	// SafeNonce is the group Safe's on-chain nonce this action's SafeTx
+	// was built against, read once (services.createPendingAction) at
+	// proposal time and fixed from then on - every approver must sign the
+	// same SafeTxHash, which depends on it. See safe.EncodeNonceCalldata's
+	// doc comment for the concurrency race this naive read defers to
+	// PLAN.md §13.10 Phase 6.
+	SafeNonce string       `gorm:"size:80" json:"safeNonce"`
+	Status    ActionStatus `gorm:"size:16;not null;default:PENDING" json:"status"`
+	TxHash    string       `gorm:"size:66" json:"txHash"`
+	// RelayerAddress is the pool relayer (internal/relayer) currently
+	// submitting - or that most recently submitted - this action's
+	// execTransaction call. Only meaningful while Status is SUBMITTED;
+	// used by services.ReconcileRelayers to re-mark the right relayer
+	// in-use after a restart (PLAN.md §13.12).
+	RelayerAddress  string    `gorm:"size:42" json:"relayerAddress,omitempty"`
+	RejectionReason string    `gorm:"size:512" json:"rejectionReason"`
+	CreatedAt       time.Time `json:"createdAt"`
 }
 
 // PendingActionApproval is one member's off-chain co-signature of a

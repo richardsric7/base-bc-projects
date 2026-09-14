@@ -15,13 +15,17 @@
 // depends on this so a member's own future key rotation never requires
 // touching a wallet they merely participate in.
 //
-// PLAN.md §13.10 Phase 3 stops at creation: CreateGroup deploys a real
-// Safe, but ApproveAction's off-chain approval-recording and
-// executeAction's actual on-chain submission are not yet rewired to
-// match (see executeAction's own doc comment) - that lands in Phase 4
-// (the relayer submission path) and Phase 6 (per-Safe nonce reservation),
-// which is also where members' approvals start signing the real
-// safe.SafeTxHash instead of today's off-chain-only descriptive message.
+// PLAN.md §13.10 Phase 4 makes execution real: once a PendingAction's
+// threshold is met, executeAction builds the actual Safe execTransaction
+// call, packs members' real safe.SafeTxHash-derived signatures via
+// safe.PackSignatures (nested EIP-1271 contract signatures for members who
+// are another user's primary wallet, direct EOA signatures for members who
+// are a plain external EOA - see resolveGroupOwnerSigner), and submits it
+// through a pool relayer (internal/relayer), held until the submission
+// confirms on-chain (PLAN.md §13.12). What's still deliberately missing:
+// per-Safe nonce reservation (a proposal's SafeNonce is a naive on-chain
+// read at proposal time, not an atomically reserved one - PLAN.md §13.12
+// risk 1) and the stale-action expiry sweep, both Phase 6's job.
 package services
 
 import (
@@ -30,10 +34,12 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"gorm.io/gorm"
 
 	"wallet-backend/internal/apperrors"
@@ -41,6 +47,7 @@ import (
 	usersModels "wallet-backend/internal/components/users/models"
 	"wallet-backend/internal/cryptoutil"
 	"wallet-backend/internal/network"
+	"wallet-backend/internal/relayer"
 	"wallet-backend/internal/safe"
 	"wallet-backend/internal/validators"
 )
@@ -50,6 +57,14 @@ import (
 // execution path with a fake instead of a live Base RPC connection.
 type BlockchainClient interface {
 	SignAndSubmitTx(ctx context.Context, signer *ecdsa.PrivateKey, to *common.Address, value *big.Int, data []byte, explicitNonce *uint64) (string, error)
+	// WaitForReceipt blocks until a submitted execution transaction
+	// confirms (or ctx is done), reporting whether it succeeded - see
+	// network.Client.WaitForReceipt.
+	WaitForReceipt(ctx context.Context, txHash string) (bool, error)
+	// SafeNonce reads a Safe's current on-chain nonce - see
+	// safe.EncodeNonceCalldata's doc comment for why and the concurrency
+	// caveat.
+	SafeNonce(ctx context.Context, safeAddress string) (*big.Int, error)
 	NativeBalance(ctx context.Context, address string) (*big.Int, error)
 	ERC20BalanceOf(ctx context.Context, tokenAddress, owner string) (*big.Int, error)
 }
@@ -64,10 +79,26 @@ type Service struct {
 	// duplicated since deploying a Safe never requires any authority
 	// over the wallet it deploys.
 	DeployerKeySalt string
+	// ChainID identifies the chain a group's Safe is deployed on, needed
+	// to compute its EIP-712 domain separator (safe.DomainSeparator) when
+	// hashing or verifying a SafeTx - see PLAN.md §8.
+	ChainID *big.Int
+	// RelayerPool is the pool of backend-operated EOAs that submit every
+	// real execTransaction call (PLAN.md §13.10 Phase 4/§13.12) - never
+	// the group's own funds and never a single dedicated key, so many
+	// concurrent executions across many different groups don't contend
+	// for one account's Ethereum nonce.
+	RelayerPool *relayer.Pool
 }
 
-func New(db *gorm.DB, blockchain BlockchainClient, deployerKeySalt string) *Service {
-	return &Service{DB: db, Blockchain: blockchain, DeployerKeySalt: deployerKeySalt}
+func New(db *gorm.DB, blockchain BlockchainClient, deployerKeySalt string, chainID int64, relayerPool *relayer.Pool) *Service {
+	return &Service{
+		DB:              db,
+		Blockchain:      blockchain,
+		DeployerKeySalt: deployerKeySalt,
+		ChainID:         big.NewInt(chainID),
+		RelayerPool:     relayerPool,
+	}
 }
 
 // deriveSafeDeployerKey derives the key that pays gas to deploy a group's
@@ -126,6 +157,27 @@ func (s *Service) validateSafeOwnerCandidate(address string) error {
 		return apperrors.Internal("failed to validate member address")
 	}
 	return nil
+}
+
+// resolveGroupOwnerSigner reports, for a Safe owner address (any member
+// with CanApprove(role)), whether it's a registered user's primary wallet
+// - in which case the actual EOA that must sign is that user's current
+// SignerAddress, and the signature has to be nested through EIP-1271
+// (PLAN.md §13.4) since the wallet itself is a Safe, not a key - or a
+// plain external EOA acting as a direct Safe owner, in which case it signs
+// (and is verified) directly. validateSafeOwnerCandidate already
+// guarantees a nested case's primary wallet is deployed, so it's always
+// safe to treat it as reachable via EIP-1271.
+func (s *Service) resolveGroupOwnerSigner(memberAddress string) (nested bool, signerAddress string, err error) {
+	var user usersModels.User
+	dbErr := s.DB.Where("LOWER(address) = LOWER(?)", memberAddress).First(&user).Error
+	if dbErr == nil {
+		return true, user.SignerAddress, nil
+	}
+	if !errors.Is(dbErr, gorm.ErrRecordNotFound) {
+		return false, "", apperrors.Internal("failed to resolve group member's signer")
+	}
+	return false, memberAddress, nil
 }
 
 // MemberInput is one member to add when creating a group.
@@ -241,7 +293,7 @@ func (s *Service) memberRole(groupID uint, address string) (models.GroupRole, er
 
 // ProposePayment proposes a native-ETH or ERC-20 payment from the group's
 // wallet. Only an INITIATOR may propose.
-func (s *Service) ProposePayment(proposerAddress string, groupID uint, description, recipient, tokenAddress, amount string) (*models.PendingAction, error) {
+func (s *Service) ProposePayment(ctx context.Context, proposerAddress string, groupID uint, description, recipient, tokenAddress, amount string) (*models.PendingAction, error) {
 	group, err := s.requireInitiator(groupID, proposerAddress)
 	if err != nil {
 		return nil, err
@@ -268,13 +320,13 @@ func (s *Service) ProposePayment(proposerAddress string, groupID uint, descripti
 		to, tokenAddr, value, data = tokenAddress, tokenAddress, "0", "0x"+common.Bytes2Hex(callData)
 	}
 
-	return s.createPendingAction(group, proposerAddress, models.ActionPayment, description, to, tokenAddr, value, data)
+	return s.createPendingAction(ctx, group, proposerAddress, models.ActionPayment, description, to, tokenAddr, value, data)
 }
 
 // ProposeContractCall proposes an arbitrary contract call (e.g. a swap
 // router call built the same way internal/components/swaps builds one) from
 // the group's wallet. Only an INITIATOR may propose.
-func (s *Service) ProposeContractCall(proposerAddress string, groupID uint, kind models.ActionKind, description, contractAddress, valueWei, dataHex string) (*models.PendingAction, error) {
+func (s *Service) ProposeContractCall(ctx context.Context, proposerAddress string, groupID uint, kind models.ActionKind, description, contractAddress, valueWei, dataHex string) (*models.PendingAction, error) {
 	group, err := s.requireInitiator(groupID, proposerAddress)
 	if err != nil {
 		return nil, err
@@ -292,7 +344,7 @@ func (s *Service) ProposeContractCall(proposerAddress string, groupID uint, kind
 		return nil, apperrors.BadRequest("data must be 0x-prefixed hex")
 	}
 
-	return s.createPendingAction(group, proposerAddress, kind, description, contractAddress, "", valueWei, dataHex)
+	return s.createPendingAction(ctx, group, proposerAddress, kind, description, contractAddress, "", valueWei, dataHex)
 }
 
 func (s *Service) requireInitiator(groupID uint, address string) (*models.ClosedGroup, error) {
@@ -313,7 +365,15 @@ func (s *Service) requireInitiator(groupID uint, address string) (*models.Closed
 	return group, nil
 }
 
-func (s *Service) createPendingAction(group *models.ClosedGroup, proposer string, kind models.ActionKind, description, to, tokenAddress, value, data string) (*models.PendingAction, error) {
+func (s *Service) createPendingAction(ctx context.Context, group *models.ClosedGroup, proposer string, kind models.ActionKind, description, to, tokenAddress, value, data string) (*models.PendingAction, error) {
+	if group.Address == nil {
+		return nil, apperrors.Internal("group has no on-chain wallet address")
+	}
+	nonce, err := s.Blockchain.SafeNonce(ctx, *group.Address)
+	if err != nil {
+		return nil, apperrors.Internal("failed to read the group wallet's on-chain nonce: " + err.Error())
+	}
+
 	action := models.PendingAction{
 		GroupID:           group.ID,
 		ProposerAddress:   proposer,
@@ -323,6 +383,7 @@ func (s *Service) createPendingAction(group *models.ClosedGroup, proposer string
 		TokenAddress:      tokenAddress,
 		Value:             value,
 		Data:              data,
+		SafeNonce:         nonce.String(),
 		RequiredApprovals: group.Threshold,
 		Status:            models.ActionPending,
 	}
@@ -332,24 +393,80 @@ func (s *Service) createPendingAction(group *models.ClosedGroup, proposer string
 	return &action, nil
 }
 
-// canonicalActionMessage is exactly what a member signs to approve an
-// action - reconstructed identically by the server at verification time, so
-// there is no ambiguity about what was approved.
-func canonicalActionMessage(action *models.PendingAction) string {
-	return fmt.Sprintf(
-		"wallet-backend shared action #%d\ngroup: %d\nkind: %s\nto: %s\ntoken: %s\nvalue: %s\ndata: %s",
-		action.ID, action.GroupID, action.Kind, action.To, action.TokenAddress, action.Value, action.Data,
-	)
+// buildSafeTx reconstructs the safe.SafeTx an action's approvals were - or
+// must be - signed over: a plain CALL (this codebase never proposes a
+// delegatecall) to action.To with action.Value/Data, at the nonce fixed at
+// proposal time (action.SafeNonce). SafeTxGas/BaseGas/GasPrice/GasToken/
+// RefundReceiver are always zero - see safe.EncodeExecTransactionCalldata's
+// doc comment for why (the relayer pool pays gas directly rather than
+// asking the Safe for an in-band refund).
+func buildSafeTx(action *models.PendingAction) (safe.SafeTx, error) {
+	value, ok := new(big.Int).SetString(action.Value, 10)
+	if !ok {
+		return safe.SafeTx{}, apperrors.Internal("stored action value is not a valid integer")
+	}
+	nonce, ok := new(big.Int).SetString(action.SafeNonce, 10)
+	if !ok {
+		return safe.SafeTx{}, apperrors.Internal("stored action safe nonce is not a valid integer")
+	}
+	var data []byte
+	if action.Data != "" && action.Data != "0x" {
+		data = common.FromHex(action.Data)
+	}
+	return safe.SafeTx{
+		To:        common.HexToAddress(action.To),
+		Value:     value,
+		Data:      data,
+		Operation: safe.OperationCall,
+		Nonce:     nonce,
+	}, nil
 }
 
-// CanonicalActionMessage exposes the exact message a member must sign to
-// approve actionID, so a client can construct the correct signature.
-func (s *Service) CanonicalActionMessage(actionID uint) (string, error) {
+// digestToSign computes the exact 32-byte digest memberAddress's approval
+// must be a personal_sign signature of: the plain SafeTxHash for a direct
+// EOA owner, or, for a member that's a registered user's primary wallet
+// (nested EIP-1271, PLAN.md §13.4), the nested MessageHashForSafe that
+// primary wallet's own owner (its current signer) must sign instead - see
+// resolveGroupOwnerSigner.
+func (s *Service) digestToSign(groupAddress common.Address, tx safe.SafeTx, memberAddress string) (common.Hash, error) {
+	domainSeparator := safe.DomainSeparator(s.ChainID, groupAddress)
+	nested, _, err := s.resolveGroupOwnerSigner(memberAddress)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if !nested {
+		return safe.SafeTxHash(domainSeparator, tx), nil
+	}
+	outerPreImage := safe.EncodeTransactionData(domainSeparator, tx)
+	memberDomainSeparator := safe.DomainSeparator(s.ChainID, common.HexToAddress(memberAddress))
+	return safe.MessageHashForSafe(memberDomainSeparator, outerPreImage), nil
+}
+
+// DigestToSign returns the 0x-prefixed hex digest memberAddress must
+// personal_sign to approve actionID - the real on-chain SafeTxHash (or its
+// nested EIP-1271 wrapping), replacing what used to be a purely off-chain
+// descriptive message once execution became real (PLAN.md §13.10 Phase 4).
+func (s *Service) DigestToSign(actionID uint, memberAddress string) (string, error) {
 	action, err := s.GetAction(actionID)
 	if err != nil {
 		return "", err
 	}
-	return canonicalActionMessage(action), nil
+	group, err := s.GetGroup(action.GroupID)
+	if err != nil {
+		return "", err
+	}
+	if group.Address == nil {
+		return "", apperrors.Internal("group has no on-chain wallet address")
+	}
+	tx, err := buildSafeTx(action)
+	if err != nil {
+		return "", err
+	}
+	digest, err := s.digestToSign(common.HexToAddress(*group.Address), tx, memberAddress)
+	if err != nil {
+		return "", err
+	}
+	return digest.Hex(), nil
 }
 
 // GetAction fetches one pending action.
@@ -386,9 +503,10 @@ func (s *Service) ListPendingForMember(memberAddress string) ([]models.PendingAc
 	return actions, nil
 }
 
-// ApproveAction records memberAddress's signed approval of actionID and, if
-// that brings the tally to the group's threshold, executes the action:
-// derives the group's key, signs, and submits the real transaction.
+// ApproveAction records memberAddress's signed approval of actionID -
+// verified as a personal_sign signature over the real digest DigestToSign
+// reports for that member (PLAN.md §13.10 Phase 4) - and, if that brings
+// the tally to the group's threshold, executes the action for real.
 func (s *Service) ApproveAction(ctx context.Context, actionID uint, memberAddress, signatureHex string) (*models.PendingAction, error) {
 	action, err := s.GetAction(actionID)
 	if err != nil {
@@ -411,26 +529,47 @@ func (s *Service) ApproveAction(ctx context.Context, actionID uint, memberAddres
 	if err == nil {
 		// This member already approved. The action is still PENDING (checked
 		// above), which can only mean a prior execution attempt failed after
-		// the threshold was already met (e.g. a transient RPC error) - retry
-		// execution rather than rejecting this as a duplicate, since without
-		// this every approver having already signed once would permanently
-		// strand the action with no way to move it forward.
+		// the threshold was already met (e.g. a transient RPC error or an
+		// on-chain revert) - retry execution rather than rejecting this as a
+		// duplicate, since without this every approver having already signed
+		// once would permanently strand the action with no way to move it
+		// forward.
 		return s.tallyAndMaybeExecute(ctx, action)
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, apperrors.Internal("failed to check for an existing approval")
 	}
 
+	group, err := s.GetGroup(action.GroupID)
+	if err != nil {
+		return nil, err
+	}
+	if group.Address == nil {
+		return nil, apperrors.Internal("group has no on-chain wallet address")
+	}
+	tx, err := buildSafeTx(action)
+	if err != nil {
+		return nil, err
+	}
+	digest, err := s.digestToSign(common.HexToAddress(*group.Address), tx, memberAddress)
+	if err != nil {
+		return nil, err
+	}
+	_, signerAddress, err := s.resolveGroupOwnerSigner(memberAddress)
+	if err != nil {
+		return nil, err
+	}
+
 	if !strings.HasPrefix(signatureHex, "0x") {
 		return nil, apperrors.BadRequest("signature must be 0x-prefixed hex")
 	}
 	sigBytes := common.FromHex(signatureHex)
-	valid, err := cryptoutil.VerifyPersonalSign(canonicalActionMessage(action), sigBytes, common.HexToAddress(memberAddress))
+	valid, err := cryptoutil.VerifyPersonalSignBytes(digest.Bytes(), sigBytes, common.HexToAddress(signerAddress))
 	if err != nil {
 		return nil, apperrors.BadRequest("invalid signature: " + err.Error())
 	}
 	if !valid {
-		return nil, apperrors.Unauthorized("signature does not match the approving member's address")
+		return nil, apperrors.Unauthorized("signature does not match the approving member's current signing key")
 	}
 
 	if err := s.DB.Create(&models.PendingActionApproval{PendingActionID: actionID, MemberAddress: memberAddress, Signature: signatureHex}).Error; err != nil {
@@ -455,26 +594,170 @@ func (s *Service) tallyAndMaybeExecute(ctx context.Context, action *models.Pendi
 	return s.executeAction(ctx, action)
 }
 
+// buildPackedSignature turns one recorded off-chain approval into the
+// safe.Signature PackSignatures expects: a direct EOA signature for a
+// plain external-EOA owner, or a nested EIP-1271 contract signature - the
+// inner PackSignatures blob over that primary wallet's own (single) owner
+// - for a member that's a registered user's primary wallet (PLAN.md
+// §13.4).
+func (s *Service) buildPackedSignature(domainSeparator common.Hash, tx safe.SafeTx, approval models.PendingActionApproval) (safe.Signature, error) {
+	nested, signerAddress, err := s.resolveGroupOwnerSigner(approval.MemberAddress)
+	if err != nil {
+		return safe.Signature{}, err
+	}
+	rawSig := common.FromHex(approval.Signature)
+	if !nested {
+		return safe.EOAPersonalSignSignature(common.HexToAddress(approval.MemberAddress), rawSig)
+	}
+
+	innerSig, err := safe.EOAPersonalSignSignature(common.HexToAddress(signerAddress), rawSig)
+	if err != nil {
+		return safe.Signature{}, err
+	}
+	innerPacked, err := safe.PackSignatures([]safe.Signature{innerSig})
+	if err != nil {
+		return safe.Signature{}, err
+	}
+	return safe.ContractSignature(common.HexToAddress(approval.MemberAddress), innerPacked), nil
+}
+
 // executeAction is called once an action has reached its approval
-// threshold. Before PLAN.md §13's Safe migration this derived the
-// group's custodial key and sent the transaction directly from it; since
-// Phase 3 made a group's Address a real Safe, that key has no
-// relationship to the group's actual funds or on-chain authority at all
-// (it isn't a Safe owner, and even if it somehow held ETH, spending from
-// it would never move the Safe's own balance). Rather than let that
-// silently attempt - and confusingly fail deep inside an RPC call, or
-// worse, appear to "succeed" against the wrong account - this fails
-// immediately and explicitly: real submission (building the Safe
-// execTransaction call, packing members' real safe.SafeTxHash signatures
-// via safe.PackSignatures, and relaying it through a funded key) is
-// PLAN.md §13.10 Phase 4's job, built on Phase 6's per-Safe nonce
-// reservation so concurrent proposals against the same Safe can't race.
-// Until then, approvals still record correctly (ApproveAction's
-// signature check is an off-chain gate, unrelated to Safe mechanics) and
-// tallyAndMaybeExecute still recognizes when a threshold is reached - only
-// this last step, actually moving funds, is not yet available.
-func (s *Service) executeAction(_ context.Context, action *models.PendingAction) (*models.PendingAction, error) {
-	return nil, apperrors.Internal("this wallet's threshold has been met, but on-chain execution via a real Safe transaction is not implemented yet - see PLAN.md §13.10 Phases 4 and 6")
+// threshold: it packs every recorded approval into the real signatures
+// blob Safe.execTransaction expects, claims a relayer, submits the call,
+// and waits for it to confirm before releasing the relayer and marking
+// the action EXECUTED (PLAN.md §13.10 Phase 4/§13.12). A submission or
+// on-chain failure reverts the action to PENDING so the next approval call
+// (via ApproveAction's already-approved retry branch) tries again - Phase
+// 4 has no other terminal state to leave a failed attempt in, and a fresh
+// attempt is safe to retry since nothing about a failed execTransaction
+// call changes the Safe's own nonce.
+func (s *Service) executeAction(ctx context.Context, action *models.PendingAction) (*models.PendingAction, error) {
+	group, err := s.GetGroup(action.GroupID)
+	if err != nil {
+		return nil, err
+	}
+	if group.Address == nil {
+		return nil, apperrors.Internal("group has no on-chain wallet address")
+	}
+	groupAddr := common.HexToAddress(*group.Address)
+
+	tx, err := buildSafeTx(action)
+	if err != nil {
+		return nil, err
+	}
+	domainSeparator := safe.DomainSeparator(s.ChainID, groupAddr)
+
+	var approvals []models.PendingActionApproval
+	if err := s.DB.Where("pending_action_id = ?", action.ID).Find(&approvals).Error; err != nil {
+		return nil, apperrors.Internal("failed to load recorded approvals")
+	}
+	sigs := make([]safe.Signature, 0, len(approvals))
+	for _, approval := range approvals {
+		sig, err := s.buildPackedSignature(domainSeparator, tx, approval)
+		if err != nil {
+			return nil, err
+		}
+		sigs = append(sigs, sig)
+	}
+	packed, err := safe.PackSignatures(sigs)
+	if err != nil {
+		return nil, apperrors.Internal("failed to pack approval signatures: " + err.Error())
+	}
+	calldata, err := safe.EncodeExecTransactionCalldata(tx, packed)
+	if err != nil {
+		return nil, apperrors.Internal("failed to encode execution calldata")
+	}
+
+	relayerKey, err := s.RelayerPool.Claim(ctx)
+	if err != nil {
+		return nil, apperrors.Internal("no relayer currently available: " + err.Error())
+	}
+	relayerAddr := crypto.PubkeyToAddress(relayerKey.PublicKey)
+
+	txHash, err := s.Blockchain.SignAndSubmitTx(ctx, relayerKey, &groupAddr, big.NewInt(0), calldata, nil)
+	if err != nil {
+		s.RelayerPool.Release(relayerAddr)
+		return nil, apperrors.Internal("failed to submit execution transaction: " + err.Error())
+	}
+
+	action.Status = models.ActionSubmitted
+	action.TxHash = txHash
+	action.RelayerAddress = relayerAddr.Hex()
+	if err := s.DB.Save(action).Error; err != nil {
+		log.Printf("[sharedaccess] failed to persist SUBMITTED status for action %d (tx already broadcast: %s): %v", action.ID, txHash, err)
+	}
+
+	return s.awaitExecution(ctx, action, relayerAddr, txHash)
+}
+
+// awaitExecution blocks until txHash confirms (or ctx is done), releases
+// relayerAddr back to the pool exactly then - per PLAN.md §13.12, not at
+// the instant of submission - and finalizes action's status.
+func (s *Service) awaitExecution(ctx context.Context, action *models.PendingAction, relayerAddr common.Address, txHash string) (*models.PendingAction, error) {
+	defer s.RelayerPool.Release(relayerAddr)
+
+	success, err := s.Blockchain.WaitForReceipt(ctx, txHash)
+	if err != nil || !success {
+		action.Status = models.ActionPending
+		if saveErr := s.DB.Save(action).Error; saveErr != nil {
+			log.Printf("[sharedaccess] failed to revert action %d to PENDING after a failed execution: %v", action.ID, saveErr)
+		}
+		if err != nil {
+			return nil, apperrors.Internal("execution transaction did not confirm: " + err.Error())
+		}
+		return nil, apperrors.Internal("execution transaction reverted on-chain")
+	}
+
+	action.Status = models.ActionExecuted
+	if err := s.DB.Save(action).Error; err != nil {
+		return nil, apperrors.Internal("execution succeeded on-chain but failed to record locally: " + err.Error())
+	}
+	return action, nil
+}
+
+// ReconcileRelayers re-marks in-use any relayer whose last known
+// submission (per the database) was still SUBMITTED - never resolved -
+// when the process last stopped, then resumes waiting on each one. This
+// is the direct counterpart to the original's own startup-reconciliation
+// goroutine (PLAN.md §13.12): the in-memory relayer pool has no memory of
+// its own across a restart, so without this a relayer whose last
+// submission's outcome is still unknown could be handed out for new work
+// immediately. Call once at boot, before serving traffic.
+func (s *Service) ReconcileRelayers(ctx context.Context) {
+	var stuck []models.PendingAction
+	if err := s.DB.Where("status = ?", models.ActionSubmitted).Find(&stuck).Error; err != nil {
+		log.Printf("[sharedaccess] failed to scan for in-flight actions at startup: %v", err)
+		return
+	}
+	if len(stuck) == 0 {
+		return
+	}
+
+	var reserve []common.Address
+	for _, a := range stuck {
+		if a.RelayerAddress != "" {
+			reserve = append(reserve, common.HexToAddress(a.RelayerAddress))
+		}
+	}
+	s.RelayerPool.ReserveAtStartup(reserve)
+
+	for i := range stuck {
+		action := stuck[i]
+		if action.RelayerAddress == "" || action.TxHash == "" {
+			// Nothing to wait on - revert immediately so the next approval
+			// retries execution from scratch.
+			action.Status = models.ActionPending
+			if err := s.DB.Save(&action).Error; err != nil {
+				log.Printf("[sharedaccess] failed to revert incomplete action %d to PENDING at startup: %v", action.ID, err)
+			}
+			continue
+		}
+		go func(action models.PendingAction) {
+			if _, err := s.awaitExecution(ctx, &action, common.HexToAddress(action.RelayerAddress), action.TxHash); err != nil {
+				log.Printf("[sharedaccess] startup reconciliation for action %d: %v", action.ID, err)
+			}
+		}(action)
+	}
 }
 
 // RejectAction marks a pending action rejected. Only an APPROVER may reject,
