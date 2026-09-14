@@ -35,6 +35,14 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	group.POST("/actions/:actionId/approve", approveAction(svc))
 	group.POST("/actions/:actionId/reject", rejectAction(svc))
 
+	// Group-management proposals (PLAN.md §13.10 Phase 5) - each returns a
+	// PendingAction that goes through the exact same approve/reject/
+	// execute routes above, not a separate pipeline.
+	group.POST("/groups/:groupId/members", proposeAddMember(svc))
+	group.POST("/groups/:groupId/members/:memberAddress/remove", proposeRemoveMember(svc))
+	group.POST("/groups/:groupId/threshold", proposeChangeThreshold(svc))
+	group.POST("/groups/:groupId/disable", proposeDisableGroup(svc))
+
 	return svc
 }
 
@@ -228,6 +236,100 @@ func rejectAction(svc *services.Service) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, action)
+	}
+}
+
+type addMemberRequest struct {
+	Address      string `json:"address" binding:"required"`
+	Role         string `json:"role" binding:"required"`
+	NewThreshold int    `json:"newThreshold" binding:"required"`
+}
+
+func proposeAddMember(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		groupID, err := parseID(c, "groupId")
+		if err != nil {
+			return
+		}
+		var req addMemberRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			apperrors.Abort(c, apperrors.BadRequest("address, role and newThreshold are required"))
+			return
+		}
+		proposer := c.GetString(middleware.CtxSubject)
+		action, err := svc.ProposeAddMember(c.Request.Context(), proposer, groupID, req.Address, models.GroupRole(req.Role), req.NewThreshold)
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, action)
+	}
+}
+
+type removeMemberRequest struct {
+	NewThreshold int `json:"newThreshold" binding:"required"`
+}
+
+func proposeRemoveMember(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		groupID, err := parseID(c, "groupId")
+		if err != nil {
+			return
+		}
+		memberAddress := c.Param("memberAddress")
+		var req removeMemberRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			apperrors.Abort(c, apperrors.BadRequest("newThreshold is required"))
+			return
+		}
+		proposer := c.GetString(middleware.CtxSubject)
+		action, err := svc.ProposeRemoveMember(c.Request.Context(), proposer, groupID, memberAddress, req.NewThreshold)
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, action)
+	}
+}
+
+type changeThresholdRequest struct {
+	NewThreshold int `json:"newThreshold" binding:"required"`
+}
+
+func proposeChangeThreshold(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		groupID, err := parseID(c, "groupId")
+		if err != nil {
+			return
+		}
+		var req changeThresholdRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			apperrors.Abort(c, apperrors.BadRequest("newThreshold is required"))
+			return
+		}
+		proposer := c.GetString(middleware.CtxSubject)
+		action, err := svc.ProposeChangeThreshold(c.Request.Context(), proposer, groupID, req.NewThreshold)
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, action)
+	}
+}
+
+func proposeDisableGroup(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		groupID, err := parseID(c, "groupId")
+		if err != nil {
+			return
+		}
+		proposer := c.GetString(middleware.CtxSubject)
+		action, err := svc.ProposeDisableGroup(c.Request.Context(), proposer, groupID)
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, action)
 	}
 }
 

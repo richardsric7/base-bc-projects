@@ -2447,6 +2447,80 @@ database):
   released. Full `go build`/`go vet`/`go test ./...` pass across the
   module.
 
+#### Phase 5 implementation notes (done)
+
+- **Member management** (§13.8's flagged gap, closed): four new
+  `ActionKind`s - `add_member`, `remove_member`, `change_threshold`,
+  `disable_group` - proposed and approved through the exact same
+  propose/approve/execute pipeline as a payment or contract call, per the
+  original design note ("mapped here to a Safe
+  addOwnerWithThreshold/removeOwner/swapOwner/changeThreshold call
+  proposed and approved exactly like any other action"). `swapOwner`
+  itself wasn't needed: a pure role change that doesn't cross the
+  CanApprove boundary (e.g. APPROVER to INITIATOR_APPROVER) needs no Safe
+  call at all, and one that does cross it is expressed as a remove
+  followed by an add - a deliberate scope cut to keep this phase bounded,
+  noted here rather than silently dropped.
+- **On-chain vs. application-level, decided per proposal**:
+  `ProposeAddMember`/`ProposeRemoveMember` check whether the role
+  involved can approve (`models.CanApprove`) - if so, the proposal is a
+  real `Safe.addOwnerWithThreshold`/`removeOwner` self-call (`To` = the
+  group's own Safe address); if not (VIEW_ONLY or a plain INITIATOR),
+  it's pure `ClosedGroup`/`GroupMember` bookkeeping with `To` left empty
+  and no relayer/execution machinery touched at all.
+  `ProposeChangeThreshold` is always a real Safe call;
+  `ProposeDisableGroup` (the original's `DELETE /v1/shared-access/
+  users/account` equivalent) is always application-level, since a Safe
+  has no "disabled" concept of its own - disabling only stops this
+  application from proposing further actions against the group
+  (`ClosedGroup.Disabled`, already checked by `requireInitiator`).
+- **`safe.FindPrevOwner`/`Safe.getOwners()`** (new): `removeOwner`
+  requires the previous owner in `OwnerManager`'s singly-linked-list
+  storage layout, computed from a live `getOwners()` read
+  (`network.Client.SafeOwners`) rather than assumed - the Safe's actual
+  on-chain owner order is the only source of truth for it.
+  `ProposeRemoveMember` also re-derives the post-removal approver count
+  from that same live read (not the local `GroupMember` table) before
+  accepting a caller-supplied `newThreshold`, so the local mirror being
+  briefly stale can't let through a threshold the Safe would itself
+  reject.
+- **A digest for actions with no real Safe transaction**: signing the
+  actual `SafeTxHash` (Phase 4) has no equivalent for an
+  application-level-only action, since there's nothing on-chain to hash -
+  `canonicalManagementDigest` (a deterministic `keccak256` over the
+  action's id/group/kind/target/role/threshold) fills that gap, wrapped
+  through the same nested-EIP-1271-or-direct logic (`digestToSign`) as a
+  real `SafeTxHash` would be, so a primary-wallet member still signs with
+  their own current signer key regardless of which of the two cases
+  applies to the action itself.
+- **`applyMembershipSideEffect`**: once a Safe-calling management action
+  is confirmed on-chain (or immediately, for the two application-level
+  kinds), this mirrors the effect into `GroupMember`/`ClosedGroup` inside
+  one transaction - inserting or deleting the target's `GroupMember` row
+  and updating `Threshold`. A failure here after real on-chain success is
+  surfaced as a loud error (this application's own bookkeeping drifting
+  from the Safe's real owner set is exactly the kind of silent
+  inconsistency this whole redesign exists to avoid), not swallowed.
+- **Conflict prevention**: `requireNoConflictingManagementAction` blocks
+  proposing any of the four management kinds while another one is still
+  `PENDING`/`SUBMITTED` on the same group - the direct generalization of
+  the original's "blocked while another shared-access change is already
+  pending" rule for `DISABLE SHARED ACCESS`, extended to every management
+  kind rather than just that one, since two concurrent owner-set changes
+  racing against the same Safe is exactly the kind of conflict PLAN.md
+  §13.12 already flags elsewhere.
+- **Verification**: new tests cover an approving member's addition/removal
+  actually calling the Safe (asserting the submission target and that the
+  local `GroupMember` row changes only after confirmation), a
+  non-approving member's addition/removal never submitting anything
+  on-chain, threshold changes both succeeding and being rejected when
+  they'd exceed the current approver count, disabling a group blocking
+  every further proposal (payments included), and the conflict-prevention
+  rule itself. `internal/safe` tests cover the three new self-call
+  encoders round-tripping through their own ABI and `FindPrevOwner`'s
+  first/middle/last/not-found cases. Full `go build`/`go vet`/
+  `go test ./...` pass across the module.
+
 ### 13.11 Activation-order dependencies (user-flagged, audited against §13.1-§13.8's design)
 
 Registration itself never requires on-chain activation - the primary

@@ -35,6 +35,8 @@ type fakeBlockchain struct {
 	nonce      *big.Int // SafeNonce's return value; defaults to 0
 	receiptOK  bool     // WaitForReceipt's success value; defaults to true (see newFakeBlockchain)
 	receiptErr error    // if set, WaitForReceipt fails
+	owners     []common.Address
+	ownersErr  error // if set, SafeOwners fails
 }
 
 func newFakeBlockchain(hash string) *fakeBlockchain {
@@ -66,6 +68,13 @@ func (f *fakeBlockchain) SafeNonce(context.Context, string) (*big.Int, error) {
 		return f.nonce, nil
 	}
 	return big.NewInt(0), nil
+}
+
+func (f *fakeBlockchain) SafeOwners(context.Context, string) ([]common.Address, error) {
+	if f.ownersErr != nil {
+		return nil, f.ownersErr
+	}
+	return f.owners, nil
 }
 
 func (f *fakeBlockchain) NativeBalance(context.Context, string) (*big.Int, error) {
@@ -574,5 +583,270 @@ func TestApproveAction_RetryAfterFailedSubmissionDoesNotRequireASecondSignature(
 	}
 	if executed.Status != models.ActionExecuted {
 		t.Fatalf("expected status EXECUTED after retry, got %s", executed.Status)
+	}
+}
+
+func TestProposeAddMember_ApprovingMemberBecomesRealSafeOwner(t *testing.T) {
+	chain := newFakeBlockchain("0xexecuted")
+	svc := newTestService(t, chain)
+	owner, ownerKey := randomAddress(t)
+	newMember, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "1-of-1", 1, []MemberInput{
+		{Address: owner, Role: models.RoleInitiatorApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+
+	action, err := svc.ProposeAddMember(context.Background(), owner, group.ID, newMember, models.RoleApprover, 1)
+	if err != nil {
+		t.Fatalf("ProposeAddMember returned error: %v", err)
+	}
+	if action.To == "" {
+		t.Fatal("expected an approving member's addition to be a real Safe call")
+	}
+
+	digest, err := svc.DigestToSign(action.ID, owner)
+	if err != nil {
+		t.Fatalf("DigestToSign returned error: %v", err)
+	}
+	executed, err := svc.ApproveAction(context.Background(), action.ID, owner, signDigest(t, ownerKey, digest))
+	if err != nil {
+		t.Fatalf("expected the add-member action to execute, got error: %v", err)
+	}
+	if executed.Status != models.ActionExecuted {
+		t.Fatalf("expected status EXECUTED, got %s", executed.Status)
+	}
+	if chain.submitted[len(chain.submitted)-1].to != common.HexToAddress(*group.Address) {
+		t.Fatal("expected the addOwnerWithThreshold call to target the group's own Safe")
+	}
+
+	role, err := svc.memberRole(group.ID, newMember)
+	if err != nil {
+		t.Fatalf("expected the new member to be recorded locally, got error: %v", err)
+	}
+	if role != models.RoleApprover {
+		t.Fatalf("expected role APPROVER, got %s", role)
+	}
+}
+
+func TestProposeAddMember_NonApprovingMemberIsDBOnlyNoChainCall(t *testing.T) {
+	chain := newFakeBlockchain("0xexecuted")
+	svc := newTestService(t, chain)
+	owner, ownerKey := randomAddress(t)
+	newMember, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "1-of-1", 1, []MemberInput{
+		{Address: owner, Role: models.RoleInitiatorApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+	submittedBefore := len(chain.submitted)
+
+	action, err := svc.ProposeAddMember(context.Background(), owner, group.ID, newMember, models.RoleViewOnly, group.Threshold)
+	if err != nil {
+		t.Fatalf("ProposeAddMember returned error: %v", err)
+	}
+	if action.To != "" {
+		t.Fatal("expected a non-approving member's addition to never touch the Safe")
+	}
+
+	digest, err := svc.DigestToSign(action.ID, owner)
+	if err != nil {
+		t.Fatalf("DigestToSign returned error: %v", err)
+	}
+	executed, err := svc.ApproveAction(context.Background(), action.ID, owner, signDigest(t, ownerKey, digest))
+	if err != nil {
+		t.Fatalf("expected the DB-only add-member action to execute, got error: %v", err)
+	}
+	if executed.Status != models.ActionExecuted {
+		t.Fatalf("expected status EXECUTED, got %s", executed.Status)
+	}
+	if len(chain.submitted) != submittedBefore {
+		t.Fatalf("expected no additional on-chain submission for a VIEW_ONLY addition, got %d new", len(chain.submitted)-submittedBefore)
+	}
+	role, err := svc.memberRole(group.ID, newMember)
+	if err != nil {
+		t.Fatalf("expected the new member to be recorded locally, got error: %v", err)
+	}
+	if role != models.RoleViewOnly {
+		t.Fatalf("expected role VIEW_ONLY, got %s", role)
+	}
+}
+
+func TestProposeRemoveMember_ApprovingMemberRemovedOnChain(t *testing.T) {
+	chain := newFakeBlockchain("0xexecuted")
+	svc := newTestService(t, chain)
+	ownerA, keyA := randomAddress(t)
+	ownerB, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "2-approvers-1-of-2", 1, []MemberInput{
+		{Address: ownerA, Role: models.RoleInitiatorApprover},
+		{Address: ownerB, Role: models.RoleApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+	// Simulate the Safe's real on-chain owner order for FindPrevOwner.
+	chain.owners = []common.Address{common.HexToAddress(ownerA), common.HexToAddress(ownerB)}
+
+	action, err := svc.ProposeRemoveMember(context.Background(), ownerA, group.ID, ownerB, 1)
+	if err != nil {
+		t.Fatalf("ProposeRemoveMember returned error: %v", err)
+	}
+	if action.To == "" {
+		t.Fatal("expected an approving member's removal to be a real Safe call")
+	}
+
+	digest, err := svc.DigestToSign(action.ID, ownerA)
+	if err != nil {
+		t.Fatalf("DigestToSign returned error: %v", err)
+	}
+	executed, err := svc.ApproveAction(context.Background(), action.ID, ownerA, signDigest(t, keyA, digest))
+	if err != nil {
+		t.Fatalf("expected the remove-member action to execute, got error: %v", err)
+	}
+	if executed.Status != models.ActionExecuted {
+		t.Fatalf("expected status EXECUTED, got %s", executed.Status)
+	}
+
+	if _, err := svc.memberRole(group.ID, ownerB); err == nil {
+		t.Fatal("expected the removed member to no longer be a group member")
+	}
+}
+
+func TestProposeChangeThreshold_UpdatesGroupOnExecution(t *testing.T) {
+	chain := newFakeBlockchain("0xexecuted")
+	svc := newTestService(t, chain)
+	ownerA, keyA := randomAddress(t)
+	ownerB, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "1-of-2", 1, []MemberInput{
+		{Address: ownerA, Role: models.RoleInitiatorApprover},
+		{Address: ownerB, Role: models.RoleApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+
+	action, err := svc.ProposeChangeThreshold(context.Background(), ownerA, group.ID, 2)
+	if err != nil {
+		t.Fatalf("ProposeChangeThreshold returned error: %v", err)
+	}
+
+	digest, err := svc.DigestToSign(action.ID, ownerA)
+	if err != nil {
+		t.Fatalf("DigestToSign returned error: %v", err)
+	}
+	executed, err := svc.ApproveAction(context.Background(), action.ID, ownerA, signDigest(t, keyA, digest))
+	if err != nil {
+		t.Fatalf("expected the change-threshold action to execute, got error: %v", err)
+	}
+	if executed.Status != models.ActionExecuted {
+		t.Fatalf("expected status EXECUTED, got %s", executed.Status)
+	}
+
+	reloaded, err := svc.GetGroup(group.ID)
+	if err != nil {
+		t.Fatalf("GetGroup returned error: %v", err)
+	}
+	if reloaded.Threshold != 2 {
+		t.Fatalf("expected threshold 2, got %d", reloaded.Threshold)
+	}
+}
+
+func TestProposeChangeThreshold_RejectsExceedingApproverCount(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xexecuted"))
+	owner, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "1-of-1", 1, []MemberInput{
+		{Address: owner, Role: models.RoleInitiatorApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+
+	_, err = svc.ProposeChangeThreshold(context.Background(), owner, group.ID, 5)
+	if err == nil {
+		t.Fatal("expected an error when the new threshold exceeds the number of approvers")
+	}
+	appErr, ok := err.(*apperrors.AppError)
+	if !ok || appErr.StatusCode() != 400 {
+		t.Fatalf("expected a 400 AppError, got %#v", err)
+	}
+}
+
+func TestProposeDisableGroup_ExecutesWithNoChainCallAndBlocksFurtherProposals(t *testing.T) {
+	chain := newFakeBlockchain("0xexecuted")
+	svc := newTestService(t, chain)
+	owner, ownerKey := randomAddress(t)
+	recipient, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "1-of-1", 1, []MemberInput{
+		{Address: owner, Role: models.RoleInitiatorApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+	submittedBefore := len(chain.submitted)
+
+	action, err := svc.ProposeDisableGroup(context.Background(), owner, group.ID)
+	if err != nil {
+		t.Fatalf("ProposeDisableGroup returned error: %v", err)
+	}
+
+	digest, err := svc.DigestToSign(action.ID, owner)
+	if err != nil {
+		t.Fatalf("DigestToSign returned error: %v", err)
+	}
+	executed, err := svc.ApproveAction(context.Background(), action.ID, owner, signDigest(t, ownerKey, digest))
+	if err != nil {
+		t.Fatalf("expected the disable action to execute, got error: %v", err)
+	}
+	if executed.Status != models.ActionExecuted {
+		t.Fatalf("expected status EXECUTED, got %s", executed.Status)
+	}
+	if len(chain.submitted) != submittedBefore {
+		t.Fatal("expected disabling a group to never submit an on-chain transaction")
+	}
+
+	reloaded, err := svc.GetGroup(group.ID)
+	if err != nil {
+		t.Fatalf("GetGroup returned error: %v", err)
+	}
+	if !reloaded.Disabled {
+		t.Fatal("expected the group to be marked disabled")
+	}
+
+	if _, err := svc.ProposePayment(context.Background(), owner, group.ID, "", recipient, "", "1"); err == nil {
+		t.Fatal("expected proposing a payment on a disabled group to fail")
+	}
+}
+
+func TestRequireNoConflictingManagementAction_BlocksWhileOneIsPending(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xexecuted"))
+	owner, _ := randomAddress(t)
+	newMember, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "1-of-1", 1, []MemberInput{
+		{Address: owner, Role: models.RoleInitiatorApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+
+	if _, err := svc.ProposeDisableGroup(context.Background(), owner, group.ID); err != nil {
+		t.Fatalf("ProposeDisableGroup returned error: %v", err)
+	}
+
+	_, err = svc.ProposeAddMember(context.Background(), owner, group.ID, newMember, models.RoleViewOnly, 1)
+	if err == nil {
+		t.Fatal("expected a second management action to be blocked while the disable is still pending")
+	}
+	appErr, ok := err.(*apperrors.AppError)
+	if !ok || appErr.StatusCode() != 409 {
+		t.Fatalf("expected a 409 AppError, got %#v", err)
 	}
 }

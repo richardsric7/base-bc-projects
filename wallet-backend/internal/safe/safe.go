@@ -129,7 +129,20 @@ const safeABIJSON = `[
 		{"name":"initializer","type":"bytes"},
 		{"name":"saltNonce","type":"uint256"}
 	],"outputs":[{"name":"proxy","type":"address"}]},
-	{"name":"nonce","type":"function","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"uint256"}]}
+	{"name":"nonce","type":"function","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"uint256"}]},
+	{"name":"addOwnerWithThreshold","type":"function","inputs":[
+		{"name":"owner","type":"address"},
+		{"name":"_threshold","type":"uint256"}
+	],"outputs":[]},
+	{"name":"removeOwner","type":"function","inputs":[
+		{"name":"prevOwner","type":"address"},
+		{"name":"owner","type":"address"},
+		{"name":"_threshold","type":"uint256"}
+	],"outputs":[]},
+	{"name":"changeThreshold","type":"function","inputs":[
+		{"name":"_threshold","type":"uint256"}
+	],"outputs":[]},
+	{"name":"getOwners","type":"function","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"address[]"}]}
 ]`
 
 var safeABI abi.ABI
@@ -237,4 +250,70 @@ func DecodeNonceResult(data []byte) (*big.Int, error) {
 		return nil, fmt.Errorf("safe: decode nonce: unexpected output type")
 	}
 	return nonce, nil
+}
+
+// EncodeAddOwnerWithThresholdCalldata ABI-encodes a call to
+// Safe.addOwnerWithThreshold(owner, threshold) - a Safe's own owner-
+// management self-call, proposed and approved through the exact same
+// propose/approve/execute pipeline as any other action (PLAN.md §13.10
+// Phase 5): its `to` is the Safe's own address, not some external
+// contract.
+func EncodeAddOwnerWithThresholdCalldata(owner common.Address, threshold *big.Int) ([]byte, error) {
+	return safeABI.Pack("addOwnerWithThreshold", owner, threshold)
+}
+
+// EncodeRemoveOwnerCalldata ABI-encodes a call to
+// Safe.removeOwner(prevOwner, owner, threshold). prevOwner is required by
+// OwnerManager's singly-linked-list storage layout - see FindPrevOwner for
+// how to compute it from Safe.getOwners()'s own return order.
+func EncodeRemoveOwnerCalldata(prevOwner, owner common.Address, threshold *big.Int) ([]byte, error) {
+	return safeABI.Pack("removeOwner", prevOwner, owner, threshold)
+}
+
+// EncodeChangeThresholdCalldata ABI-encodes a call to
+// Safe.changeThreshold(threshold), with no other change to the owner set.
+func EncodeChangeThresholdCalldata(threshold *big.Int) ([]byte, error) {
+	return safeABI.Pack("changeThreshold", threshold)
+}
+
+// EncodeGetOwnersCalldata ABI-encodes a call to Safe.getOwners(), the view
+// function returning a Safe's current owners in OwnerManager's own
+// linked-list order (sentinel-first, not necessarily address-sorted) -
+// needed to compute removeOwner's prevOwner argument.
+func EncodeGetOwnersCalldata() ([]byte, error) {
+	return safeABI.Pack("getOwners")
+}
+
+// DecodeGetOwnersResult unpacks Safe.getOwners()'s eth_call return data.
+func DecodeGetOwnersResult(data []byte) ([]common.Address, error) {
+	out, err := safeABI.Unpack("getOwners", data)
+	if err != nil {
+		return nil, err
+	}
+	owners, ok := out[0].([]common.Address)
+	if !ok {
+		return nil, fmt.Errorf("safe: decode getOwners: unexpected output type")
+	}
+	return owners, nil
+}
+
+// SentinelOwner is OwnerManager's SENTINEL_OWNERS constant (address(0x1)) -
+// the linked list's head marker, and the correct prevOwner argument for
+// removeOwner when the owner being removed is first in Safe.getOwners()'s
+// own return order.
+var SentinelOwner = common.HexToAddress("0x1")
+
+// FindPrevOwner returns the owner immediately preceding target in owners
+// (as returned by Safe.getOwners()) - or SentinelOwner if target is
+// first - exactly the prevOwner argument Safe.removeOwner requires to
+// unlink it. Returns an error if target isn't present in owners at all.
+func FindPrevOwner(owners []common.Address, target common.Address) (common.Address, error) {
+	prev := SentinelOwner
+	for _, o := range owners {
+		if o == target {
+			return prev, nil
+		}
+		prev = o
+	}
+	return common.Address{}, fmt.Errorf("safe: %s is not a current owner", target.Hex())
 }

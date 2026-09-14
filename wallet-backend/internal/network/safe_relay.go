@@ -31,6 +31,22 @@ func (c *Client) SafeNonce(ctx context.Context, safeAddress string) (*big.Int, e
 	return safe.DecodeNonceResult(result)
 }
 
+// SafeOwners reads a Gnosis Safe's current owners via Safe.getOwners() -
+// needed (PLAN.md §13.10 Phase 5) to compute the prevOwner argument
+// Safe.removeOwner requires (see safe.FindPrevOwner).
+func (c *Client) SafeOwners(ctx context.Context, safeAddress string) ([]common.Address, error) {
+	addr := common.HexToAddress(safeAddress)
+	data, err := safe.EncodeGetOwnersCalldata()
+	if err != nil {
+		return nil, fmt.Errorf("encode getOwners call: %w", err)
+	}
+	result, err := c.Eth.CallContract(ctx, ethereum.CallMsg{To: &addr, Data: data}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("call getOwners: %w", err)
+	}
+	return safe.DecodeGetOwnersResult(result)
+}
+
 // receiptPollInterval is how often WaitForReceipt re-checks for a
 // transaction's receipt while it hasn't landed yet - short enough to add
 // negligible latency on Base's ~2-second blocks without hammering the RPC

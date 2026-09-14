@@ -117,6 +117,26 @@ const (
 	ActionPayment      ActionKind = "payment"
 	ActionSwap         ActionKind = "swap"
 	ActionContractCall ActionKind = "contract_call"
+	// ActionAddMember, ActionRemoveMember and ActionChangeThreshold
+	// (PLAN.md §13.10 Phase 5) are the group-management equivalents of
+	// the original's ModifySharedWalletAccess - gated through the exact
+	// same propose/approve/execute pipeline as any other action. Adding
+	// or removing a member who holds (or would hold) an approve-capable
+	// role maps to a real Safe self-call (addOwnerWithThreshold/
+	// removeOwner - see TargetMemberAddress/TargetRole/NewThreshold);
+	// changing a VIEW_ONLY/plain-INITIATOR member's membership, or the
+	// threshold-only case, never touches the Safe's own owner set - see
+	// services.createPendingAction's To=="" branch.
+	ActionAddMember       ActionKind = "add_member"
+	ActionRemoveMember    ActionKind = "remove_member"
+	ActionChangeThreshold ActionKind = "change_threshold"
+	// ActionDisableGroup (PLAN.md §13.10 Phase 5) is the equivalent of
+	// the original's DELETE /v1/shared-access/users/account - a pure
+	// application-level flag (ClosedGroup.Disabled), never a Safe call:
+	// disabling only stops this application from proposing further
+	// actions against the group, since the underlying Safe itself has no
+	// "disabled" concept of its own.
+	ActionDisableGroup ActionKind = "disable_group"
 )
 
 // PendingAction is one proposed group action awaiting approval - the
@@ -127,7 +147,7 @@ type PendingAction struct {
 	ID                uint       `gorm:"primaryKey" json:"id"`
 	GroupID           uint       `gorm:"index;not null" json:"groupId"`
 	ProposerAddress   string     `gorm:"size:42;not null" json:"proposerAddress"`
-	Kind              ActionKind `gorm:"size:16;not null" json:"kind"`
+	Kind              ActionKind `gorm:"size:20;not null" json:"kind"`
 	Description       string     `gorm:"size:512" json:"description"`
 	To                string     `gorm:"size:42;not null" json:"to"`
 	TokenAddress      string     `gorm:"size:42" json:"tokenAddress"` // empty = native ETH
@@ -148,15 +168,23 @@ type PendingAction struct {
 	// execTransaction call. Only meaningful while Status is SUBMITTED;
 	// used by services.ReconcileRelayers to re-mark the right relayer
 	// in-use after a restart (PLAN.md §13.12).
-	RelayerAddress  string    `gorm:"size:42" json:"relayerAddress,omitempty"`
-	RejectionReason string    `gorm:"size:512" json:"rejectionReason"`
-	CreatedAt       time.Time `json:"createdAt"`
+	RelayerAddress string `gorm:"size:42" json:"relayerAddress,omitempty"`
+	// TargetMemberAddress/TargetRole/NewThreshold are populated only for
+	// the group-management kinds above (ActionAddMember/RemoveMember/
+	// ChangeThreshold/DisableGroup) - see their doc comments. Unused
+	// (zero-valued) for ordinary payment/swap/contract_call actions.
+	TargetMemberAddress string    `gorm:"size:42" json:"targetMemberAddress,omitempty"`
+	TargetRole          GroupRole `gorm:"size:20" json:"targetRole,omitempty"`
+	NewThreshold        int       `json:"newThreshold,omitempty"`
+	RejectionReason     string    `gorm:"size:512" json:"rejectionReason"`
+	CreatedAt           time.Time `json:"createdAt"`
 }
 
 // PendingActionApproval is one member's off-chain co-signature of a
-// PendingAction's canonical description - the equivalent of the original's
-// PendingTransactionSignature. See services.canonicalActionMessage for
-// exactly what gets signed.
+// PendingAction's real digest (the on-chain SafeTxHash, or its nested
+// EIP-1271 wrapping) - the equivalent of the original's
+// PendingTransactionSignature. See services.digestToSign for exactly what
+// gets signed.
 type PendingActionApproval struct {
 	ID              uint      `gorm:"primaryKey" json:"id"`
 	PendingActionID uint      `gorm:"uniqueIndex:idx_action_approver;not null" json:"pendingActionId"`

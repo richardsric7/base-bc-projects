@@ -228,6 +228,77 @@ func TestPackSignatures_ContractSignatureLayout(t *testing.T) {
 	}
 }
 
+func TestOwnerManagementCalldata_EncodesExpectedSelectors(t *testing.T) {
+	owner := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	prevOwner := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	threshold := big.NewInt(2)
+
+	addData, err := EncodeAddOwnerWithThresholdCalldata(owner, threshold)
+	if err != nil {
+		t.Fatalf("EncodeAddOwnerWithThresholdCalldata: %v", err)
+	}
+	if _, err := safeABI.Methods["addOwnerWithThreshold"].Inputs.Unpack(addData[4:]); err != nil {
+		t.Fatalf("addOwnerWithThreshold calldata did not decode against its own ABI: %v", err)
+	}
+
+	removeData, err := EncodeRemoveOwnerCalldata(prevOwner, owner, threshold)
+	if err != nil {
+		t.Fatalf("EncodeRemoveOwnerCalldata: %v", err)
+	}
+	if _, err := safeABI.Methods["removeOwner"].Inputs.Unpack(removeData[4:]); err != nil {
+		t.Fatalf("removeOwner calldata did not decode against its own ABI: %v", err)
+	}
+
+	changeData, err := EncodeChangeThresholdCalldata(threshold)
+	if err != nil {
+		t.Fatalf("EncodeChangeThresholdCalldata: %v", err)
+	}
+	if _, err := safeABI.Methods["changeThreshold"].Inputs.Unpack(changeData[4:]); err != nil {
+		t.Fatalf("changeThreshold calldata did not decode against its own ABI: %v", err)
+	}
+
+	getOwnersData, err := EncodeGetOwnersCalldata()
+	if err != nil {
+		t.Fatalf("EncodeGetOwnersCalldata: %v", err)
+	}
+	if len(getOwnersData) != 4 {
+		t.Fatalf("getOwners calldata should be just its 4-byte selector, got %d bytes", len(getOwnersData))
+	}
+
+	packedOwners, err := safeABI.Methods["getOwners"].Outputs.Pack([]common.Address{owner, prevOwner})
+	if err != nil {
+		t.Fatalf("pack fixture getOwners result: %v", err)
+	}
+	decoded, err := DecodeGetOwnersResult(packedOwners)
+	if err != nil {
+		t.Fatalf("DecodeGetOwnersResult: %v", err)
+	}
+	if len(decoded) != 2 || decoded[0] != owner || decoded[1] != prevOwner {
+		t.Fatalf("DecodeGetOwnersResult = %v, want [%s %s]", decoded, owner.Hex(), prevOwner.Hex())
+	}
+}
+
+func TestFindPrevOwner(t *testing.T) {
+	a := common.HexToAddress("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	b := common.HexToAddress("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	c := common.HexToAddress("0xcccccccccccccccccccccccccccccccccccccccc")
+	owners := []common.Address{a, b, c}
+
+	if prev, err := FindPrevOwner(owners, a); err != nil || prev != SentinelOwner {
+		t.Fatalf("FindPrevOwner(a) = %s, %v; want SentinelOwner, nil", prev.Hex(), err)
+	}
+	if prev, err := FindPrevOwner(owners, b); err != nil || prev != a {
+		t.Fatalf("FindPrevOwner(b) = %s, %v; want %s, nil", prev.Hex(), err, a.Hex())
+	}
+	if prev, err := FindPrevOwner(owners, c); err != nil || prev != b {
+		t.Fatalf("FindPrevOwner(c) = %s, %v; want %s, nil", prev.Hex(), err, b.Hex())
+	}
+	other := common.HexToAddress("0xdddddddddddddddddddddddddddddddddddddddd")
+	if _, err := FindPrevOwner(owners, other); err == nil {
+		t.Fatal("expected an error for an address that isn't a current owner")
+	}
+}
+
 func TestEncodeMessageDataForSafe_RoundTripsThroughHash(t *testing.T) {
 	message := []byte("arbitrary pre-image bytes, e.g. an outer SafeTx's EncodeTransactionData")
 	data := EncodeMessageDataForSafe(fixedDomainSeparator, message)

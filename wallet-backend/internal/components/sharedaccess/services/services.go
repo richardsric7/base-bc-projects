@@ -65,6 +65,9 @@ type BlockchainClient interface {
 	// safe.EncodeNonceCalldata's doc comment for why and the concurrency
 	// caveat.
 	SafeNonce(ctx context.Context, safeAddress string) (*big.Int, error)
+	// SafeOwners reads a Safe's current owners - needed (PLAN.md §13.10
+	// Phase 5) to compute removeOwner's prevOwner argument.
+	SafeOwners(ctx context.Context, safeAddress string) ([]common.Address, error)
 	NativeBalance(ctx context.Context, address string) (*big.Int, error)
 	ERC20BalanceOf(ctx context.Context, tokenAddress, owner string) (*big.Int, error)
 }
@@ -320,7 +323,10 @@ func (s *Service) ProposePayment(ctx context.Context, proposerAddress string, gr
 		to, tokenAddr, value, data = tokenAddress, tokenAddress, "0", "0x"+common.Bytes2Hex(callData)
 	}
 
-	return s.createPendingAction(ctx, group, proposerAddress, models.ActionPayment, description, to, tokenAddr, value, data)
+	return s.createPendingAction(ctx, group, proposerAddress, pendingActionParams{
+		kind: models.ActionPayment, description: description,
+		to: to, tokenAddress: tokenAddr, value: value, data: data,
+	})
 }
 
 // ProposeContractCall proposes an arbitrary contract call (e.g. a swap
@@ -344,7 +350,10 @@ func (s *Service) ProposeContractCall(ctx context.Context, proposerAddress strin
 		return nil, apperrors.BadRequest("data must be 0x-prefixed hex")
 	}
 
-	return s.createPendingAction(ctx, group, proposerAddress, kind, description, contractAddress, "", valueWei, dataHex)
+	return s.createPendingAction(ctx, group, proposerAddress, pendingActionParams{
+		kind: kind, description: description,
+		to: contractAddress, value: valueWei, data: dataHex,
+	})
 }
 
 func (s *Service) requireInitiator(groupID uint, address string) (*models.ClosedGroup, error) {
@@ -365,32 +374,263 @@ func (s *Service) requireInitiator(groupID uint, address string) (*models.Closed
 	return group, nil
 }
 
-func (s *Service) createPendingAction(ctx context.Context, group *models.ClosedGroup, proposer string, kind models.ActionKind, description, to, tokenAddress, value, data string) (*models.PendingAction, error) {
+// pendingActionParams is everything createPendingAction needs beyond the
+// group and proposer - a struct rather than a long positional parameter
+// list now that Phase 5's group-management kinds add three more
+// (target-member/role/threshold) fields most callers never set.
+type pendingActionParams struct {
+	kind         models.ActionKind
+	description  string
+	to           string // "" for a pure application-level change with no Safe call at all (PLAN.md §13.10 Phase 5)
+	tokenAddress string
+	value        string
+	data         string
+
+	// targetMemberAddress/targetRole/newThreshold are set only by the
+	// group-management Propose* functions below.
+	targetMemberAddress string
+	targetRole          models.GroupRole
+	newThreshold        int
+}
+
+func (s *Service) createPendingAction(ctx context.Context, group *models.ClosedGroup, proposer string, p pendingActionParams) (*models.PendingAction, error) {
 	if group.Address == nil {
 		return nil, apperrors.Internal("group has no on-chain wallet address")
 	}
-	nonce, err := s.Blockchain.SafeNonce(ctx, *group.Address)
-	if err != nil {
-		return nil, apperrors.Internal("failed to read the group wallet's on-chain nonce: " + err.Error())
-	}
-
 	action := models.PendingAction{
-		GroupID:           group.ID,
-		ProposerAddress:   proposer,
-		Kind:              kind,
-		Description:       description,
-		To:                to,
-		TokenAddress:      tokenAddress,
-		Value:             value,
-		Data:              data,
-		SafeNonce:         nonce.String(),
-		RequiredApprovals: group.Threshold,
-		Status:            models.ActionPending,
+		GroupID:             group.ID,
+		ProposerAddress:     proposer,
+		Kind:                p.kind,
+		Description:         p.description,
+		To:                  p.to,
+		TokenAddress:        p.tokenAddress,
+		Value:               p.value,
+		Data:                p.data,
+		TargetMemberAddress: p.targetMemberAddress,
+		TargetRole:          p.targetRole,
+		NewThreshold:        p.newThreshold,
+		RequiredApprovals:   group.Threshold,
+		Status:              models.ActionPending,
+	}
+	// Only an action that will actually call the Safe needs a nonce fixed
+	// up front - a pure application-level change (an added/removed
+	// VIEW_ONLY/INITIATOR member, or a group disable) never submits
+	// anything on-chain, so there's no SafeTxHash for it to fix a nonce
+	// for.
+	if p.to != "" {
+		nonce, err := s.Blockchain.SafeNonce(ctx, *group.Address)
+		if err != nil {
+			return nil, apperrors.Internal("failed to read the group wallet's on-chain nonce: " + err.Error())
+		}
+		action.SafeNonce = nonce.String()
 	}
 	if err := s.DB.Create(&action).Error; err != nil {
 		return nil, apperrors.Internal("failed to propose action")
 	}
 	return &action, nil
+}
+
+// managementActionKinds are the four group-management kinds Phase 5 adds -
+// see their doc comments in the models package.
+var managementActionKinds = []models.ActionKind{
+	models.ActionAddMember, models.ActionRemoveMember, models.ActionChangeThreshold, models.ActionDisableGroup,
+}
+
+// requireNoConflictingManagementAction blocks proposing a new group-
+// management action while another one is still in flight on the same
+// group - mirroring the original's own rule for DISABLE SHARED ACCESS
+// ("blocked while another shared-access change is already pending"),
+// generalized to every management kind: two concurrent owner-set changes
+// racing against the same Safe is exactly the kind of conflict PLAN.md
+// §13.12 flags elsewhere, and there's no reason to allow it here either.
+func (s *Service) requireNoConflictingManagementAction(groupID uint) error {
+	var count int64
+	err := s.DB.Model(&models.PendingAction{}).
+		Where("group_id = ? AND kind IN ? AND status IN ?", groupID, managementActionKinds, []models.ActionStatus{models.ActionPending, models.ActionSubmitted}).
+		Count(&count).Error
+	if err != nil {
+		return apperrors.Internal("failed to check for a conflicting membership change")
+	}
+	if count > 0 {
+		return apperrors.Conflict("another membership change is already pending or in flight on this group")
+	}
+	return nil
+}
+
+// ProposeAddMember proposes adding newMemberAddress to the group with
+// role, with the group's threshold becoming newThreshold once executed
+// (Safe.addOwnerWithThreshold and this application's own GroupMember row
+// change together, atomically from the caller's point of view - see
+// applyMembershipSideEffect). If role can approve (models.CanApprove),
+// newMemberAddress must pass validateSafeOwnerCandidate exactly like
+// CreateGroup requires, and the proposal becomes a real Safe self-call;
+// otherwise (VIEW_ONLY or a plain INITIATOR) it never touches the Safe's
+// owner set at all, so newThreshold must simply equal the group's current
+// threshold, kept explicit rather than silently ignored so a caller is
+// never surprised by which of the two paths ran.
+func (s *Service) ProposeAddMember(ctx context.Context, proposerAddress string, groupID uint, newMemberAddress string, role models.GroupRole, newThreshold int) (*models.PendingAction, error) {
+	group, err := s.requireInitiator(groupID, proposerAddress)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireNoConflictingManagementAction(groupID); err != nil {
+		return nil, err
+	}
+	if !validators.IsValidAddress(newMemberAddress) {
+		return nil, apperrors.BadRequest("invalid member address")
+	}
+	switch role {
+	case models.RoleInitiator, models.RoleApprover, models.RoleViewOnly, models.RoleInitiatorApprover:
+	default:
+		return nil, apperrors.BadRequest("invalid role")
+	}
+	if newThreshold < 1 {
+		return nil, apperrors.BadRequest("threshold must be at least 1")
+	}
+	var existing models.GroupMember
+	err = s.DB.Where("group_id = ? AND member_address = ?", groupID, newMemberAddress).First(&existing).Error
+	if err == nil {
+		return nil, apperrors.Conflict(newMemberAddress + " is already a member of this group")
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, apperrors.Internal("failed to check existing membership")
+	}
+
+	var to, data string
+	if models.CanApprove(role) {
+		if err := s.validateSafeOwnerCandidate(newMemberAddress); err != nil {
+			return nil, err
+		}
+		calldata, err := safe.EncodeAddOwnerWithThresholdCalldata(common.HexToAddress(newMemberAddress), big.NewInt(int64(newThreshold)))
+		if err != nil {
+			return nil, apperrors.Internal("failed to encode addOwnerWithThreshold calldata")
+		}
+		to, data = *group.Address, "0x"+common.Bytes2Hex(calldata)
+	} else if newThreshold != group.Threshold {
+		return nil, apperrors.BadRequest("newThreshold must equal the group's current threshold when adding a non-approving member")
+	}
+
+	return s.createPendingAction(ctx, group, proposerAddress, pendingActionParams{
+		kind: models.ActionAddMember, description: fmt.Sprintf("add %s as %s", newMemberAddress, role),
+		to: to, value: "0", data: data,
+		targetMemberAddress: newMemberAddress, targetRole: role, newThreshold: newThreshold,
+	})
+}
+
+// ProposeRemoveMember proposes removing memberAddress from the group,
+// with the group's threshold becoming newThreshold once executed. If the
+// member currently holds an approve-capable role, the proposal becomes a
+// real Safe.removeOwner self-call (its prevOwner argument computed from
+// the Safe's own current owner order - see safe.FindPrevOwner); otherwise
+// it's a pure application-level removal and newThreshold must equal the
+// group's current threshold.
+func (s *Service) ProposeRemoveMember(ctx context.Context, proposerAddress string, groupID uint, memberAddress string, newThreshold int) (*models.PendingAction, error) {
+	group, err := s.requireInitiator(groupID, proposerAddress)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireNoConflictingManagementAction(groupID); err != nil {
+		return nil, err
+	}
+	if newThreshold < 1 {
+		return nil, apperrors.BadRequest("threshold must be at least 1")
+	}
+	var member models.GroupMember
+	err = s.DB.Where("group_id = ? AND member_address = ?", groupID, memberAddress).First(&member).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperrors.NotFound(memberAddress + " is not a member of this group")
+		}
+		return nil, apperrors.Internal("failed to load group membership")
+	}
+
+	var to, data string
+	if models.CanApprove(member.Role) {
+		owners, err := s.Blockchain.SafeOwners(ctx, *group.Address)
+		if err != nil {
+			return nil, apperrors.Internal("failed to read the group wallet's current owners: " + err.Error())
+		}
+		target := common.HexToAddress(memberAddress)
+		prevOwner, err := safe.FindPrevOwner(owners, target)
+		if err != nil {
+			return nil, apperrors.Conflict("member is not currently a Safe owner on-chain: " + err.Error())
+		}
+		remainingApprovers := 0
+		for _, o := range owners {
+			if o != target {
+				remainingApprovers++
+			}
+		}
+		if newThreshold > remainingApprovers {
+			return nil, apperrors.BadRequest(fmt.Sprintf("threshold (%d) would exceed the number of approvers remaining after removal (%d)", newThreshold, remainingApprovers))
+		}
+		calldata, err := safe.EncodeRemoveOwnerCalldata(prevOwner, target, big.NewInt(int64(newThreshold)))
+		if err != nil {
+			return nil, apperrors.Internal("failed to encode removeOwner calldata")
+		}
+		to, data = *group.Address, "0x"+common.Bytes2Hex(calldata)
+	} else if newThreshold != group.Threshold {
+		return nil, apperrors.BadRequest("newThreshold must equal the group's current threshold when removing a non-approving member")
+	}
+
+	return s.createPendingAction(ctx, group, proposerAddress, pendingActionParams{
+		kind: models.ActionRemoveMember, description: "remove " + memberAddress,
+		to: to, value: "0", data: data,
+		targetMemberAddress: memberAddress, newThreshold: newThreshold,
+	})
+}
+
+// ProposeChangeThreshold proposes Safe.changeThreshold(newThreshold) with
+// no other change to the owner set.
+func (s *Service) ProposeChangeThreshold(ctx context.Context, proposerAddress string, groupID uint, newThreshold int) (*models.PendingAction, error) {
+	group, err := s.requireInitiator(groupID, proposerAddress)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireNoConflictingManagementAction(groupID); err != nil {
+		return nil, err
+	}
+	if newThreshold < 1 {
+		return nil, apperrors.BadRequest("threshold must be at least 1")
+	}
+	var approverCount int64
+	err = s.DB.Model(&models.GroupMember{}).
+		Where("group_id = ? AND role IN ?", groupID, []models.GroupRole{models.RoleApprover, models.RoleInitiatorApprover}).
+		Count(&approverCount).Error
+	if err != nil {
+		return nil, apperrors.Internal("failed to count current approvers")
+	}
+	if int64(newThreshold) > approverCount {
+		return nil, apperrors.BadRequest(fmt.Sprintf("threshold (%d) exceeds the number of approvers (%d)", newThreshold, approverCount))
+	}
+
+	calldata, err := safe.EncodeChangeThresholdCalldata(big.NewInt(int64(newThreshold)))
+	if err != nil {
+		return nil, apperrors.Internal("failed to encode changeThreshold calldata")
+	}
+	return s.createPendingAction(ctx, group, proposerAddress, pendingActionParams{
+		kind: models.ActionChangeThreshold, description: fmt.Sprintf("change threshold to %d", newThreshold),
+		to: *group.Address, value: "0", data: "0x" + common.Bytes2Hex(calldata),
+		newThreshold: newThreshold,
+	})
+}
+
+// ProposeDisableGroup proposes disabling the group - the equivalent of the
+// original's DELETE /v1/shared-access/users/account. A pure application-
+// level flag, never a Safe call (see models.ActionDisableGroup's doc
+// comment) - once executed, no further action may be proposed against
+// this group (requireInitiator already checks ClosedGroup.Disabled).
+func (s *Service) ProposeDisableGroup(ctx context.Context, proposerAddress string, groupID uint) (*models.PendingAction, error) {
+	group, err := s.requireInitiator(groupID, proposerAddress)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireNoConflictingManagementAction(groupID); err != nil {
+		return nil, err
+	}
+	return s.createPendingAction(ctx, group, proposerAddress, pendingActionParams{
+		kind: models.ActionDisableGroup, description: "disable shared access", value: "0",
+	})
 }
 
 // buildSafeTx reconstructs the safe.SafeTx an action's approvals were - or
@@ -422,15 +662,47 @@ func buildSafeTx(action *models.PendingAction) (safe.SafeTx, error) {
 	}, nil
 }
 
+// canonicalManagementDigest stands in for a real SafeTxHash on a
+// group-management action that never calls the Safe at all (action.To ==
+// "" - PLAN.md §13.10 Phase 5, e.g. adding/removing a VIEW_ONLY member, or
+// disabling a group): there is no genuine on-chain transaction for
+// approvers to commit to, but every approval should still be a concrete
+// cryptographic commitment to exactly what's being approved rather than a
+// bare "yes" - so approvers personal_sign this deterministic description
+// instead.
+func canonicalManagementDigest(action *models.PendingAction) common.Hash {
+	return crypto.Keccak256Hash([]byte(fmt.Sprintf(
+		"wallet-backend group-management action #%d\ngroup: %d\nkind: %s\ntargetMember: %s\ntargetRole: %s\nnewThreshold: %d",
+		action.ID, action.GroupID, action.Kind, action.TargetMemberAddress, action.TargetRole, action.NewThreshold,
+	)))
+}
+
 // digestToSign computes the exact 32-byte digest memberAddress's approval
-// must be a personal_sign signature of: the plain SafeTxHash for a direct
-// EOA owner, or, for a member that's a registered user's primary wallet
-// (nested EIP-1271, PLAN.md §13.4), the nested MessageHashForSafe that
-// primary wallet's own owner (its current signer) must sign instead - see
-// resolveGroupOwnerSigner.
-func (s *Service) digestToSign(groupAddress common.Address, tx safe.SafeTx, memberAddress string) (common.Hash, error) {
+// must be a personal_sign signature of. For an action that calls the Safe
+// (action.To != ""): the plain SafeTxHash for a direct EOA owner, or, for
+// a member that's a registered user's primary wallet (nested EIP-1271,
+// PLAN.md §13.4), the nested MessageHashForSafe that primary wallet's own
+// owner (its current signer) must sign instead - see
+// resolveGroupOwnerSigner. For a pure application-level action
+// (action.To == ""), the same nested-or-direct wrapping applies to
+// canonicalManagementDigest instead, since there's no real SafeTx to hash.
+func (s *Service) digestToSign(groupAddress common.Address, action *models.PendingAction, memberAddress string) (common.Hash, error) {
 	domainSeparator := safe.DomainSeparator(s.ChainID, groupAddress)
 	nested, _, err := s.resolveGroupOwnerSigner(memberAddress)
+	if err != nil {
+		return common.Hash{}, err
+	}
+
+	if action.To == "" {
+		base := canonicalManagementDigest(action)
+		if !nested {
+			return base, nil
+		}
+		memberDomainSeparator := safe.DomainSeparator(s.ChainID, common.HexToAddress(memberAddress))
+		return safe.MessageHashForSafe(memberDomainSeparator, base.Bytes()), nil
+	}
+
+	tx, err := buildSafeTx(action)
 	if err != nil {
 		return common.Hash{}, err
 	}
@@ -444,8 +716,10 @@ func (s *Service) digestToSign(groupAddress common.Address, tx safe.SafeTx, memb
 
 // DigestToSign returns the 0x-prefixed hex digest memberAddress must
 // personal_sign to approve actionID - the real on-chain SafeTxHash (or its
-// nested EIP-1271 wrapping), replacing what used to be a purely off-chain
-// descriptive message once execution became real (PLAN.md §13.10 Phase 4).
+// nested EIP-1271 wrapping) for an action that calls the Safe, or
+// canonicalManagementDigest's wrapping for one that doesn't - replacing
+// what used to be a purely off-chain descriptive message for every action
+// once execution became real (PLAN.md §13.10 Phase 4).
 func (s *Service) DigestToSign(actionID uint, memberAddress string) (string, error) {
 	action, err := s.GetAction(actionID)
 	if err != nil {
@@ -458,11 +732,7 @@ func (s *Service) DigestToSign(actionID uint, memberAddress string) (string, err
 	if group.Address == nil {
 		return "", apperrors.Internal("group has no on-chain wallet address")
 	}
-	tx, err := buildSafeTx(action)
-	if err != nil {
-		return "", err
-	}
-	digest, err := s.digestToSign(common.HexToAddress(*group.Address), tx, memberAddress)
+	digest, err := s.digestToSign(common.HexToAddress(*group.Address), action, memberAddress)
 	if err != nil {
 		return "", err
 	}
@@ -547,11 +817,7 @@ func (s *Service) ApproveAction(ctx context.Context, actionID uint, memberAddres
 	if group.Address == nil {
 		return nil, apperrors.Internal("group has no on-chain wallet address")
 	}
-	tx, err := buildSafeTx(action)
-	if err != nil {
-		return nil, err
-	}
-	digest, err := s.digestToSign(common.HexToAddress(*group.Address), tx, memberAddress)
+	digest, err := s.digestToSign(common.HexToAddress(*group.Address), action, memberAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -622,16 +888,27 @@ func (s *Service) buildPackedSignature(domainSeparator common.Hash, tx safe.Safe
 }
 
 // executeAction is called once an action has reached its approval
-// threshold: it packs every recorded approval into the real signatures
-// blob Safe.execTransaction expects, claims a relayer, submits the call,
-// and waits for it to confirm before releasing the relayer and marking
-// the action EXECUTED (PLAN.md §13.10 Phase 4/§13.12). A submission or
-// on-chain failure reverts the action to PENDING so the next approval call
-// (via ApproveAction's already-approved retry branch) tries again - Phase
-// 4 has no other terminal state to leave a failed attempt in, and a fresh
+// threshold. Most kinds pack every recorded approval into the real
+// signatures blob Safe.execTransaction expects, claim a relayer, submit
+// the call, and wait for it to confirm before releasing the relayer and
+// marking the action EXECUTED (PLAN.md §13.10 Phase 4/§13.12). Two kinds
+// never touch the chain at all: ActionDisableGroup (always) and a
+// group-management action targeting a non-approving member (action.To ==
+// "" - see pendingActionParams' doc comment) - both are pure
+// application-level changes, applied directly. A submission or on-chain
+// failure reverts the action to PENDING so the next approval call (via
+// ApproveAction's already-approved retry branch) tries again - Phase 4
+// has no other terminal state to leave a failed attempt in, and a fresh
 // attempt is safe to retry since nothing about a failed execTransaction
 // call changes the Safe's own nonce.
 func (s *Service) executeAction(ctx context.Context, action *models.PendingAction) (*models.PendingAction, error) {
+	if action.Kind == models.ActionDisableGroup {
+		return s.executeDisableGroup(action)
+	}
+	if action.To == "" {
+		return s.executeMembershipOnly(action)
+	}
+
 	group, err := s.GetGroup(action.GroupID)
 	if err != nil {
 		return nil, err
@@ -687,7 +964,86 @@ func (s *Service) executeAction(ctx context.Context, action *models.PendingActio
 		log.Printf("[sharedaccess] failed to persist SUBMITTED status for action %d (tx already broadcast: %s): %v", action.ID, txHash, err)
 	}
 
-	return s.awaitExecution(ctx, action, relayerAddr, txHash)
+	result, err := s.awaitExecution(ctx, action, relayerAddr, txHash)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.applyMembershipSideEffect(result); err != nil {
+		// The Safe's own owner set (or threshold) really did change
+		// on-chain at this point - surface the drift loudly rather than
+		// silently leaving this application's GroupMember/ClosedGroup
+		// rows out of sync with it.
+		return nil, apperrors.Internal("execution succeeded on-chain but failed to sync local membership: " + err.Error())
+	}
+	return result, nil
+}
+
+// executeDisableGroup applies ActionDisableGroup's only effect - setting
+// ClosedGroup.Disabled - and marks the action EXECUTED, both in one
+// transaction. No Safe call, no relayer: see models.ActionDisableGroup's
+// doc comment for why.
+func (s *Service) executeDisableGroup(action *models.PendingAction) (*models.PendingAction, error) {
+	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.ClosedGroup{}).Where("id = ?", action.GroupID).Update("disabled", true).Error; err != nil {
+			return err
+		}
+		action.Status = models.ActionExecuted
+		return tx.Save(action).Error
+	})
+	if err != nil {
+		return nil, apperrors.Internal("failed to disable group: " + err.Error())
+	}
+	return action, nil
+}
+
+// executeMembershipOnly applies an add/remove-member action that never
+// touched the Safe's own owner set (action.To == "") - a non-approving
+// member's addition or removal, pure application-level bookkeeping.
+func (s *Service) executeMembershipOnly(action *models.PendingAction) (*models.PendingAction, error) {
+	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		if err := applyMembershipSideEffectTx(tx, action); err != nil {
+			return err
+		}
+		action.Status = models.ActionExecuted
+		return tx.Save(action).Error
+	})
+	if err != nil {
+		return nil, apperrors.Internal("failed to apply membership change: " + err.Error())
+	}
+	return action, nil
+}
+
+// applyMembershipSideEffect mirrors an on-chain-confirmed group-management
+// action's effect into this application's own GroupMember/ClosedGroup
+// rows - the counterpart, for the real-Safe-call kinds, to what
+// executeMembershipOnly and executeDisableGroup already do for the two
+// kinds that never touch the chain at all.
+func (s *Service) applyMembershipSideEffect(action *models.PendingAction) error {
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		return applyMembershipSideEffectTx(tx, action)
+	})
+}
+
+// applyMembershipSideEffectTx is applyMembershipSideEffect's actual logic,
+// factored out so executeMembershipOnly can apply it inside the same
+// transaction that also marks the action EXECUTED.
+func applyMembershipSideEffectTx(tx *gorm.DB, action *models.PendingAction) error {
+	switch action.Kind {
+	case models.ActionAddMember:
+		if err := tx.Create(&models.GroupMember{GroupID: action.GroupID, MemberAddress: action.TargetMemberAddress, Role: action.TargetRole}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&models.ClosedGroup{}).Where("id = ?", action.GroupID).Update("threshold", action.NewThreshold).Error
+	case models.ActionRemoveMember:
+		if err := tx.Where("group_id = ? AND member_address = ?", action.GroupID, action.TargetMemberAddress).Delete(&models.GroupMember{}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&models.ClosedGroup{}).Where("id = ?", action.GroupID).Update("threshold", action.NewThreshold).Error
+	case models.ActionChangeThreshold:
+		return tx.Model(&models.ClosedGroup{}).Where("id = ?", action.GroupID).Update("threshold", action.NewThreshold).Error
+	default:
+		return nil
+	}
 }
 
 // awaitExecution blocks until txHash confirms (or ctx is done), releases
