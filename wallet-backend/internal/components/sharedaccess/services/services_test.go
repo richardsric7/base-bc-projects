@@ -203,7 +203,7 @@ func TestCreateGroup_CombinedRoleCountsAsAnApproverAndCanInitiate(t *testing.T) 
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
 
-	action, err := svc.ProposePayment(context.Background(), owner, group.ID, "", recipient, "", "1")
+	action, err := svc.ProposePayment(context.Background(), owner, group.ID, "", recipient, "", "1", "", "")
 	if err != nil {
 		t.Fatalf("ProposePayment (as INITIATOR_APPROVER) returned error: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestApproveAction_NestedPrimaryWalletMemberExecutesViaEIP1271(t *testing.T)
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
 
-	action, err := svc.ProposePayment(context.Background(), primaryAddr, group.ID, "", recipient, "", "1")
+	action, err := svc.ProposePayment(context.Background(), primaryAddr, group.ID, "", recipient, "", "1", "", "")
 	if err != nil {
 		t.Fatalf("ProposePayment returned error: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestProposeAndApprove_ExecutesOnceThresholdIsMet(t *testing.T) {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
 
-	action, err := svc.ProposePayment(context.Background(), initiator, group.ID, "monthly rent", recipient, "", "1000000000000000000")
+	action, err := svc.ProposePayment(context.Background(), initiator, group.ID, "monthly rent", recipient, "", "1000000000000000000", "", "")
 	if err != nil {
 		t.Fatalf("ProposePayment returned error: %v", err)
 	}
@@ -437,7 +437,7 @@ func TestApproveAction_RejectsForgedSignature(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
-	action, err := svc.ProposePayment(context.Background(), initiator, group.ID, "", recipient, "", "1")
+	action, err := svc.ProposePayment(context.Background(), initiator, group.ID, "", recipient, "", "1", "", "")
 	if err != nil {
 		t.Fatalf("ProposePayment returned error: %v", err)
 	}
@@ -469,7 +469,7 @@ func TestApproveAction_RejectsNonApprover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
-	action, err := svc.ProposePayment(context.Background(), initiator, group.ID, "", recipient, "", "1")
+	action, err := svc.ProposePayment(context.Background(), initiator, group.ID, "", recipient, "", "1", "", "")
 	if err != nil {
 		t.Fatalf("ProposePayment returned error: %v", err)
 	}
@@ -502,7 +502,7 @@ func TestRejectAction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
-	action, err := svc.ProposePayment(context.Background(), initiator, group.ID, "", recipient, "", "1")
+	action, err := svc.ProposePayment(context.Background(), initiator, group.ID, "", recipient, "", "1", "", "")
 	if err != nil {
 		t.Fatalf("ProposePayment returned error: %v", err)
 	}
@@ -542,7 +542,7 @@ func TestApproveAction_RetryAfterFailedSubmissionDoesNotRequireASecondSignature(
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
-	action, err := svc.ProposePayment(context.Background(), initiator, group.ID, "", recipient, "", "1")
+	action, err := svc.ProposePayment(context.Background(), initiator, group.ID, "", recipient, "", "1", "", "")
 	if err != nil {
 		t.Fatalf("ProposePayment returned error: %v", err)
 	}
@@ -821,7 +821,7 @@ func TestProposeDisableGroup_ExecutesWithNoChainCallAndBlocksFurtherProposals(t 
 		t.Fatal("expected the group to be marked disabled")
 	}
 
-	if _, err := svc.ProposePayment(context.Background(), owner, group.ID, "", recipient, "", "1"); err == nil {
+	if _, err := svc.ProposePayment(context.Background(), owner, group.ID, "", recipient, "", "1", "", ""); err == nil {
 		t.Fatal("expected proposing a payment on a disabled group to fail")
 	}
 }
@@ -863,11 +863,11 @@ func TestProposePayment_BlocksASecondOutstandingOnChainAction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
-	if _, err := svc.ProposePayment(context.Background(), initiator, group.ID, "first", recipient, "", "1"); err != nil {
+	if _, err := svc.ProposePayment(context.Background(), initiator, group.ID, "first", recipient, "", "1", "", ""); err != nil {
 		t.Fatalf("first ProposePayment returned error: %v", err)
 	}
 
-	_, err = svc.ProposePayment(context.Background(), initiator, group.ID, "second", recipient, "", "1")
+	_, err = svc.ProposePayment(context.Background(), initiator, group.ID, "second", recipient, "", "1", "", "")
 	if err == nil {
 		t.Fatal("expected a second on-chain action to be blocked while the first is still outstanding")
 	}
@@ -889,7 +889,7 @@ func TestProposePayment_AllowedAgainOnceThePriorActionIsResolved(t *testing.T) {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
 
-	first, err := svc.ProposePayment(context.Background(), initiator, group.ID, "first", recipient, "", "1")
+	first, err := svc.ProposePayment(context.Background(), initiator, group.ID, "first", recipient, "", "1", "", "")
 	if err != nil {
 		t.Fatalf("first ProposePayment returned error: %v", err)
 	}
@@ -897,7 +897,7 @@ func TestProposePayment_AllowedAgainOnceThePriorActionIsResolved(t *testing.T) {
 		t.Fatalf("RejectAction returned error: %v", err)
 	}
 
-	second, err := svc.ProposePayment(context.Background(), initiator, group.ID, "second", recipient, "", "1")
+	second, err := svc.ProposePayment(context.Background(), initiator, group.ID, "second", recipient, "", "1", "", "")
 	if err != nil {
 		t.Fatalf("expected a second proposal to succeed once the first was rejected, got error: %v", err)
 	}
@@ -926,7 +926,7 @@ func TestExpireStalePendingActions_RejectsOnlyActionsOlderThanTTL(t *testing.T) 
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
 
-	stale, err := svc.ProposePayment(context.Background(), initiator, group.ID, "stale", recipient, "", "1")
+	stale, err := svc.ProposePayment(context.Background(), initiator, group.ID, "stale", recipient, "", "1", "", "")
 	if err != nil {
 		t.Fatalf("ProposePayment returned error: %v", err)
 	}
@@ -955,7 +955,146 @@ func TestExpireStalePendingActions_RejectsOnlyActionsOlderThanTTL(t *testing.T) 
 		t.Fatalf("expected the stale action to be REJECTED, got %s", reloaded.Status)
 	}
 
-	if _, err := svc.ProposePayment(context.Background(), initiator, group.ID, "fresh", recipient, "", "1"); err != nil {
+	if _, err := svc.ProposePayment(context.Background(), initiator, group.ID, "fresh", recipient, "", "1", "", ""); err != nil {
 		t.Fatalf("expected a fresh proposal to succeed once the stale one expired, got error: %v", err)
+	}
+}
+
+func TestDomainHook_InvokedOnExecutionWithTheRightDomainAndRecord(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xexecuted"))
+	initiator, initiatorKey := randomAddress(t)
+	recipient, _ := randomAddress(t)
+
+	var got *models.PendingAction
+	svc.RegisterDomainHook("crypto-withdrawal", func(action *models.PendingAction) {
+		got = action
+	})
+
+	group, err := svc.CreateGroup(context.Background(), "treasury", 1, []MemberInput{
+		{Address: initiator, Role: models.RoleInitiatorApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+	action, err := svc.ProposePayment(context.Background(), initiator, group.ID, "withdrawal", recipient, "", "1", "crypto-withdrawal", "wd-42")
+	if err != nil {
+		t.Fatalf("ProposePayment returned error: %v", err)
+	}
+	if got != nil {
+		t.Fatal("expected the hook not to fire before the action executes")
+	}
+
+	digest, err := svc.DigestToSign(action.ID, initiator)
+	if err != nil {
+		t.Fatalf("DigestToSign returned error: %v", err)
+	}
+	if _, err := svc.ApproveAction(context.Background(), action.ID, initiator, signDigest(t, initiatorKey, digest)); err != nil {
+		t.Fatalf("expected the action to execute, got error: %v", err)
+	}
+
+	if got == nil {
+		t.Fatal("expected the domain hook to fire on execution")
+	}
+	if got.Status != models.ActionExecuted {
+		t.Fatalf("expected the hook to see status EXECUTED, got %s", got.Status)
+	}
+	if got.Domain != "crypto-withdrawal" || got.RelatedRecordID != "wd-42" {
+		t.Fatalf("expected domain=crypto-withdrawal relatedRecordId=wd-42, got domain=%q relatedRecordId=%q", got.Domain, got.RelatedRecordID)
+	}
+}
+
+func TestDomainHook_InvokedOnRejectionAndExpiry(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xexecuted"))
+	initiator, _ := randomAddress(t)
+	approver, _ := randomAddress(t)
+	recipient, _ := randomAddress(t)
+
+	var rejectedSeen, expiredSeen *models.PendingAction
+	svc.RegisterDomainHook("market-settlement", func(action *models.PendingAction) {
+		if action.RejectionReason != "" && rejectedSeen == nil && action.RelatedRecordID == "order-1" {
+			rejectedSeen = action
+		}
+		if action.RelatedRecordID == "order-2" {
+			expiredSeen = action
+		}
+	})
+
+	group, err := svc.CreateGroup(context.Background(), "market", 1, []MemberInput{
+		{Address: initiator, Role: models.RoleInitiator},
+		{Address: approver, Role: models.RoleApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+
+	rejected, err := svc.ProposePayment(context.Background(), initiator, group.ID, "order 1", recipient, "", "1", "market-settlement", "order-1")
+	if err != nil {
+		t.Fatalf("ProposePayment returned error: %v", err)
+	}
+	if _, err := svc.RejectAction(rejected.ID, approver, "order canceled"); err != nil {
+		t.Fatalf("RejectAction returned error: %v", err)
+	}
+	if rejectedSeen == nil {
+		t.Fatal("expected the domain hook to fire on rejection")
+	}
+
+	stale, err := svc.ProposePayment(context.Background(), initiator, group.ID, "order 2", recipient, "", "1", "market-settlement", "order-2")
+	if err != nil {
+		t.Fatalf("ProposePayment returned error: %v", err)
+	}
+	if err := svc.DB.Model(&models.PendingAction{}).Where("id = ?", stale.ID).
+		Update("created_at", time.Now().Add(-2*time.Hour)).Error; err != nil {
+		t.Fatalf("failed to backdate the stale action: %v", err)
+	}
+	if _, err := svc.ExpireStalePendingActions(time.Hour); err != nil {
+		t.Fatalf("ExpireStalePendingActions returned error: %v", err)
+	}
+	if expiredSeen == nil {
+		t.Fatal("expected the domain hook to fire on expiry")
+	}
+	if expiredSeen.Status != models.ActionRejected {
+		t.Fatalf("expected the expired action's hook to see status REJECTED, got %s", expiredSeen.Status)
+	}
+}
+
+func TestRegisterDomainHook_PanicsOnDuplicateRegistration(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain(""))
+	svc.RegisterDomainHook("tokenization-mint", func(*models.PendingAction) {})
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected registering the same domain twice to panic")
+		}
+	}()
+	svc.RegisterDomainHook("tokenization-mint", func(*models.PendingAction) {})
+}
+
+func TestDomainHook_NeverFiresForAnOrdinaryAction(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xexecuted"))
+	initiator, initiatorKey := randomAddress(t)
+	recipient, _ := randomAddress(t)
+
+	fired := false
+	svc.RegisterDomainHook("some-other-domain", func(*models.PendingAction) { fired = true })
+
+	group, err := svc.CreateGroup(context.Background(), "1-of-1", 1, []MemberInput{
+		{Address: initiator, Role: models.RoleInitiatorApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+	action, err := svc.ProposePayment(context.Background(), initiator, group.ID, "", recipient, "", "1", "", "")
+	if err != nil {
+		t.Fatalf("ProposePayment returned error: %v", err)
+	}
+	digest, err := svc.DigestToSign(action.ID, initiator)
+	if err != nil {
+		t.Fatalf("DigestToSign returned error: %v", err)
+	}
+	if _, err := svc.ApproveAction(context.Background(), action.ID, initiator, signDigest(t, initiatorKey, digest)); err != nil {
+		t.Fatalf("expected the action to execute, got error: %v", err)
+	}
+	if fired {
+		t.Fatal("expected no domain hook to fire for an action with no domain set")
 	}
 }

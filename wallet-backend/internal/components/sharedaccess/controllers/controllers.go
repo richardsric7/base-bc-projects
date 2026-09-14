@@ -133,9 +133,9 @@ func proposeAction(svc *services.Service) gin.HandlerFunc {
 		var err error
 		switch models.ActionKind(req.Kind) {
 		case models.ActionPayment:
-			action, err = svc.ProposePayment(c.Request.Context(), proposer, req.GroupID, req.Description, req.Recipient, req.TokenAddress, req.Amount)
+			action, err = svc.ProposePayment(c.Request.Context(), proposer, req.GroupID, req.Description, req.Recipient, req.TokenAddress, req.Amount, "", "")
 		case models.ActionSwap, models.ActionContractCall:
-			action, err = svc.ProposeContractCall(c.Request.Context(), proposer, req.GroupID, models.ActionKind(req.Kind), req.Description, req.To, req.ValueWei, req.Data)
+			action, err = svc.ProposeContractCall(c.Request.Context(), proposer, req.GroupID, models.ActionKind(req.Kind), req.Description, req.To, req.ValueWei, req.Data, "", "")
 		default:
 			apperrors.Abort(c, apperrors.BadRequest(`kind must be "payment", "swap" or "contract_call"`))
 			return

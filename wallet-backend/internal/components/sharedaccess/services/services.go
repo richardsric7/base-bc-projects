@@ -96,6 +96,10 @@ type Service struct {
 	// concurrent executions across many different groups don't contend
 	// for one account's Ethereum nonce.
 	RelayerPool *relayer.Pool
+
+	// domainHooks holds every registered DomainHook, keyed by domain - see
+	// RegisterDomainHook.
+	domainHooks map[string]DomainHook
 }
 
 func New(db *gorm.DB, blockchain BlockchainClient, deployerKeySalt string, chainID int64, relayerPool *relayer.Pool) *Service {
@@ -105,7 +109,56 @@ func New(db *gorm.DB, blockchain BlockchainClient, deployerKeySalt string, chain
 		DeployerKeySalt: deployerKeySalt,
 		ChainID:         big.NewInt(chainID),
 		RelayerPool:     relayerPool,
+		domainHooks:     map[string]DomainHook{},
 	}
+}
+
+// DomainHook is called once a domain-tagged PendingAction (one proposed
+// via ProposePayment/ProposeContractCall with a non-empty domain) reaches
+// a terminal state - EXECUTED or REJECTED (including via
+// ExpireStalePendingActions' expiry sweep) - so the business component
+// that proposed it (crypto withdrawals, tokenization, market-making, ...)
+// can react: crediting or reverting its own domain record, releasing an
+// escrow hold, notifying a user, etc. PLAN.md §13.8 flags this as the
+// piece needed to keep sharedaccess itself domain-agnostic - it never
+// creates a domain record or knows what one means, only carries
+// Domain/RelatedRecordID back to whoever registered a hook for that
+// domain.
+type DomainHook func(action *models.PendingAction)
+
+// RegisterDomainHook wires domain's post-execution hook - see DomainHook's
+// doc comment. Call once per domain at boot (main.go), after both
+// components exist - mirroring the same post-construction callback-wiring
+// pattern this codebase already uses for kyc.OnBVNVerified and
+// tokenization.CreateFiatInvoice, so a business component's own package
+// never has to import sharedaccess/services directly (nor sharedaccess
+// import any of them). Panics on a second registration for the same
+// domain - silently keeping only the first (or the last) would hide a
+// real wiring bug at boot rather than surfacing it immediately.
+func (s *Service) RegisterDomainHook(domain string, hook DomainHook) {
+	if _, exists := s.domainHooks[domain]; exists {
+		panic("sharedaccess: duplicate domain hook registration for domain " + domain)
+	}
+	s.domainHooks[domain] = hook
+}
+
+// invokeDomainHook calls action's registered domain hook, if any - a
+// no-op for the (overwhelmingly common) case of an ordinary,
+// non-domain-tagged action. Logs rather than fails if a domain was set
+// but nothing ever registered a hook for it: the action itself already
+// reached its terminal state correctly by this point, and a missing hook
+// is a business-component wiring bug this package has no way to recover
+// from on its behalf.
+func (s *Service) invokeDomainHook(action *models.PendingAction) {
+	if action.Domain == "" {
+		return
+	}
+	hook, ok := s.domainHooks[action.Domain]
+	if !ok {
+		log.Printf("[sharedaccess] action %d finished with domain %q but no hook is registered for it", action.ID, action.Domain)
+		return
+	}
+	hook(action)
 }
 
 // deriveSafeDeployerKey derives the key that pays gas to deploy a group's
@@ -299,8 +352,12 @@ func (s *Service) memberRole(groupID uint, address string) (models.GroupRole, er
 }
 
 // ProposePayment proposes a native-ETH or ERC-20 payment from the group's
-// wallet. Only an INITIATOR may propose.
-func (s *Service) ProposePayment(ctx context.Context, proposerAddress string, groupID uint, description, recipient, tokenAddress, amount string) (*models.PendingAction, error) {
+// wallet. Only an INITIATOR may propose. domain/relatedRecordID
+// (PLAN.md §13.10 Phase 7) tag this action as belonging to another
+// business component's own record - pass "", "" for an ordinary,
+// directly-user-proposed payment; see models.PendingAction.Domain and
+// DomainHook.
+func (s *Service) ProposePayment(ctx context.Context, proposerAddress string, groupID uint, description, recipient, tokenAddress, amount, domain, relatedRecordID string) (*models.PendingAction, error) {
 	group, err := s.requireInitiator(groupID, proposerAddress)
 	if err != nil {
 		return nil, err
@@ -330,13 +387,15 @@ func (s *Service) ProposePayment(ctx context.Context, proposerAddress string, gr
 	return s.createPendingAction(ctx, group, proposerAddress, pendingActionParams{
 		kind: models.ActionPayment, description: description,
 		to: to, tokenAddress: tokenAddr, value: value, data: data,
+		domain: domain, relatedRecordID: relatedRecordID,
 	})
 }
 
 // ProposeContractCall proposes an arbitrary contract call (e.g. a swap
-// router call built the same way internal/components/swaps builds one) from
-// the group's wallet. Only an INITIATOR may propose.
-func (s *Service) ProposeContractCall(ctx context.Context, proposerAddress string, groupID uint, kind models.ActionKind, description, contractAddress, valueWei, dataHex string) (*models.PendingAction, error) {
+// router call built the same way internal/components/swaps builds one, or
+// a tokenization mint call) from the group's wallet. Only an INITIATOR may
+// propose. domain/relatedRecordID - see ProposePayment's doc comment.
+func (s *Service) ProposeContractCall(ctx context.Context, proposerAddress string, groupID uint, kind models.ActionKind, description, contractAddress, valueWei, dataHex, domain, relatedRecordID string) (*models.PendingAction, error) {
 	group, err := s.requireInitiator(groupID, proposerAddress)
 	if err != nil {
 		return nil, err
@@ -357,6 +416,7 @@ func (s *Service) ProposeContractCall(ctx context.Context, proposerAddress strin
 	return s.createPendingAction(ctx, group, proposerAddress, pendingActionParams{
 		kind: kind, description: description,
 		to: contractAddress, value: valueWei, data: dataHex,
+		domain: domain, relatedRecordID: relatedRecordID,
 	})
 }
 
@@ -395,6 +455,13 @@ type pendingActionParams struct {
 	targetMemberAddress string
 	targetRole          models.GroupRole
 	newThreshold        int
+
+	// domain/relatedRecordID (PLAN.md §13.10 Phase 7) are set only when
+	// ProposePayment/ProposeContractCall is called on behalf of another
+	// business component rather than directly by an end user - see
+	// models.PendingAction.Domain's doc comment and DomainHook.
+	domain          string
+	relatedRecordID string
 }
 
 func (s *Service) createPendingAction(ctx context.Context, group *models.ClosedGroup, proposer string, p pendingActionParams) (*models.PendingAction, error) {
@@ -413,6 +480,8 @@ func (s *Service) createPendingAction(ctx context.Context, group *models.ClosedG
 		TargetMemberAddress: p.targetMemberAddress,
 		TargetRole:          p.targetRole,
 		NewThreshold:        p.newThreshold,
+		Domain:              p.domain,
+		RelatedRecordID:     p.relatedRecordID,
 		RequiredApprovals:   group.Threshold,
 		Status:              models.ActionPending,
 	}
@@ -1055,6 +1124,7 @@ func (s *Service) executeDisableGroup(action *models.PendingAction) (*models.Pen
 	if err != nil {
 		return nil, apperrors.Internal("failed to disable group: " + err.Error())
 	}
+	s.invokeDomainHook(action)
 	return action, nil
 }
 
@@ -1072,6 +1142,7 @@ func (s *Service) executeMembershipOnly(action *models.PendingAction) (*models.P
 	if err != nil {
 		return nil, apperrors.Internal("failed to apply membership change: " + err.Error())
 	}
+	s.invokeDomainHook(action)
 	return action, nil
 }
 
@@ -1130,6 +1201,7 @@ func (s *Service) awaitExecution(ctx context.Context, action *models.PendingActi
 	if err := s.DB.Save(action).Error; err != nil {
 		return nil, apperrors.Internal("execution succeeded on-chain but failed to record locally: " + err.Error())
 	}
+	s.invokeDomainHook(action)
 	return action, nil
 }
 
@@ -1204,6 +1276,7 @@ func (s *Service) RejectAction(actionID uint, memberAddress, reason string) (*mo
 	if err := s.DB.Save(action).Error; err != nil {
 		return nil, apperrors.Internal("failed to reject action")
 	}
+	s.invokeDomainHook(action)
 	return action, nil
 }
 
@@ -1220,20 +1293,29 @@ func (s *Service) RejectAction(actionID uint, memberAddress, reason string) (*mo
 // history exactly like any other rejection - and, for a nonce-consuming
 // action, immediately frees its reservation for the next proposal, since
 // reserveSafeNonce's outstanding-action check only ever counts
-// PENDING/SUBMITTED rows. Intended to run on a periodic ticker (main.go),
-// mirroring the original's own 30-minute cadence for invoice expiry.
+// PENDING/SUBMITTED rows. Rows are updated (and their domain hook, if
+// any, invoked) one at a time rather than via a single bulk UPDATE -
+// PLAN.md §13.10 Phase 7's DomainHook mechanism needs each individual
+// action to report an expiry as a rejection to whichever business
+// component proposed it, and expiry sweeps are infrequent and small
+// enough in practice for this not to matter. Intended to run on a
+// periodic ticker (main.go), mirroring the original's own 30-minute
+// cadence for invoice expiry.
 func (s *Service) ExpireStalePendingActions(ttl time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-ttl)
-	result := s.DB.Model(&models.PendingAction{}).
-		Where("status = ? AND created_at < ?", models.ActionPending, cutoff).
-		Updates(map[string]interface{}{
-			"status":           models.ActionRejected,
-			"rejection_reason": "expired - no execution within the configured pending window",
-		})
-	if result.Error != nil {
-		return 0, apperrors.Internal("failed to expire stale pending actions: " + result.Error.Error())
+	var stale []models.PendingAction
+	if err := s.DB.Where("status = ? AND created_at < ?", models.ActionPending, cutoff).Find(&stale).Error; err != nil {
+		return 0, apperrors.Internal("failed to scan for stale pending actions: " + err.Error())
 	}
-	return result.RowsAffected, nil
+	for i := range stale {
+		stale[i].Status = models.ActionRejected
+		stale[i].RejectionReason = "expired - no execution within the configured pending window"
+		if err := s.DB.Save(&stale[i]).Error; err != nil {
+			return int64(i), apperrors.Internal(fmt.Sprintf("failed to expire stale pending action %d: %v", stale[i].ID, err))
+		}
+		s.invokeDomainHook(&stale[i])
+	}
+	return int64(len(stale)), nil
 }
 
 // Balance returns a group wallet's native ETH balance (empty tokenAddress)

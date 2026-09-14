@@ -176,8 +176,19 @@ type PendingAction struct {
 	TargetMemberAddress string    `gorm:"size:42" json:"targetMemberAddress,omitempty"`
 	TargetRole          GroupRole `gorm:"size:20" json:"targetRole,omitempty"`
 	NewThreshold        int       `json:"newThreshold,omitempty"`
-	RejectionReason     string    `gorm:"size:512" json:"rejectionReason"`
-	CreatedAt           time.Time `json:"createdAt"`
+	// Domain and RelatedRecordID (PLAN.md §13.8/§13.10 Phase 7) let a
+	// business component outside this package (crypto withdrawals,
+	// tokenization, market-making, ...) attach its own domain record to a
+	// PendingAction it proposes via ProposePayment/ProposeContractCall,
+	// and be notified once this action reaches a terminal state via a
+	// services.DomainHook registered under the same Domain string - see
+	// services.RegisterDomainHook. Empty for an ordinary group-proposed
+	// action; this package itself never reads or interprets either
+	// field beyond passing them back to the right hook.
+	Domain          string    `gorm:"size:40" json:"domain,omitempty"`
+	RelatedRecordID string    `gorm:"size:80" json:"relatedRecordId,omitempty"`
+	RejectionReason string    `gorm:"size:512" json:"rejectionReason"`
+	CreatedAt       time.Time `json:"createdAt"`
 }
 
 // PendingActionApproval is one member's off-chain co-signature of a

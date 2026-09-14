@@ -2578,6 +2578,49 @@ database):
   group for a new proposal. Full `go build`/`go vet`/`go test ./...` pass
   across the module.
 
+#### Phase 7 implementation notes (done)
+
+- **`models.PendingAction.Domain`/`RelatedRecordID`** (new, both empty for
+  an ordinary group-proposed action): the generic tagging pair §13.8
+  called for - a business component outside `sharedaccess` (crypto
+  withdrawals, tokenization, market-making, ...) sets them when it calls
+  `ProposePayment`/`ProposeContractCall` on a group's behalf, and gets
+  them back on whatever `PendingAction` its `DomainHook` receives.
+  `sharedaccess` itself never reads or interprets either field beyond
+  carrying them through - it stays exactly as domain-agnostic as §13.8
+  asked for.
+- **`Service.DomainHook`/`RegisterDomainHook`**: a `func(*models.
+  PendingAction)` registered per domain string, invoked once an action
+  tagged with that domain reaches a terminal state - `EXECUTED` (from any
+  of the three execution paths: a real Safe call, a DB-only membership
+  change, or a group disable) or `REJECTED` (a human rejection or
+  `ExpireStalePendingActions`' expiry sweep, indistinguishable to the
+  hook - both just see status `REJECTED`). Wired at boot the same way
+  this codebase already wires `kyc.OnBVNVerified` and `tokenization.
+  CreateFiatInvoice` - a post-construction callback assignment in
+  `main.go` - so neither package ever imports the other directly.
+  Registering the same domain twice panics at boot rather than silently
+  keeping only one hook, since that would hide a real wiring bug.
+  `ExpireStalePendingActions` was changed from a single bulk `UPDATE` to
+  a per-row loop specifically so its sweep can still invoke each expired
+  action's hook individually - an acceptable cost given how infrequent
+  and small a real expiry sweep should be.
+- **No business component actually registers a hook yet**: §13.8 itself
+  scoped this section to building the mechanism, not "fully speccing
+  every domain's post-processing" - crypto/tokenization/market-making
+  each still build and submit their own transactions directly today, as
+  audited in earlier phases. Wiring any of them onto this new mechanism
+  (having a withdrawal, mint, or settlement instead route through a
+  shared-access group's propose/approve/execute pipeline) is real,
+  separate follow-up work for whenever that migration is undertaken, not
+  assumed to be a mechanical consequence of this phase existing.
+- **Verification**: new tests cover a hook firing exactly once on
+  execution with the right domain/related-record values attached, firing
+  on both an ordinary rejection and an expiry-driven one, an ordinary
+  (non-domain) action never triggering any hook, and a duplicate
+  registration panicking. Full `go build`/`go vet`/`go test ./...` pass
+  across the module.
+
 ### 13.11 Activation-order dependencies (user-flagged, audited against §13.1-§13.8's design)
 
 Registration itself never requires on-chain activation - the primary
