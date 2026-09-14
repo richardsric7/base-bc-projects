@@ -1525,18 +1525,18 @@ in that codebase:
 
 | Original | Base | Carries |
 |---|---|---|
-| `X-TW-SIGNER` | `X-Signer` | the EVM address that produced the signature |
-| `X-TW-PUBLIC-KEY` | `X-Wallet` | the wallet address the request acts on (self, or a delegated one) |
+| `X-TW-SIGNER` | `X-Signer-Address` | the EVM address that produced the signature |
+| `X-TW-PUBLIC-KEY` | `X-Wallet-Address` | the wallet address the request acts on (self, or a delegated one) |
 | `X-TW-SIGNATURE` | `X-Signature` | `0x`-prefixed EIP-191 personal_sign signature (65 bytes) |
 | `X-TW-TIMESTAMP` | `X-Timestamp` | Unix seconds |
 
 `internal/middleware/cors.go` already allowlists `X-Public-Key,
 X-Timestamp, X-Signature` — a scaffold anticipating close to this exact
-scheme that was never wired up. `X-Signer` needs adding to that list;
-`X-Wallet` is a rename of the already-allowlisted `X-Public-Key` for EVM
-accuracy (an address is a hash of a public key, not the key itself) - keep
-the old header name instead if avoiding a client-side rename matters more
-than the naming precision.
+scheme that was never wired up. On Base an address is not a public key
+(it's `keccak256(pubkey)[12:]`), so "public key" terminology is retired
+entirely rather than kept as a fallback name: the allowlist entry becomes
+`X-Wallet-Address` (replacing `X-Public-Key`), and `X-Signer-Address` is
+newly added alongside it.
 
 **Message signed**: identical shape, `fullPathWithQuery + signerAddress +
 timestamp`, personal_sign in place of raw ed25519.

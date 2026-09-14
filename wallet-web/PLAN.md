@@ -648,8 +648,8 @@ server-side, this app's client code needs a corresponding change:
 - Add a per-request signing step to `api/httpClient.ts`: build
   `fullPathWithQuery + signerAddress + timestamp`, sign it with the
   **signer** role's key, attach it and the wallet/timestamp headers
-  (`X-Signer`/`X-Wallet`/`X-Signature`/`X-Timestamp`, or whatever
-  `wallet-backend` settles on) to every authenticated call.
+  (`X-Signer-Address`/`X-Wallet-Address`/`X-Signature`/`X-Timestamp`, or
+  whatever `wallet-backend` settles on) to every authenticated call.
 - `wallet-core`'s `sign_siwe_message` (`lib.rs`) is already
   message-agnostic EIP-191 personal_sign despite its name - it can sign
   this new message shape unchanged, or get renamed to
