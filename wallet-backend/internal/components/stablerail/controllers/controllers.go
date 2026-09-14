@@ -1,5 +1,5 @@
 // Package controllers wires the stablerail component's routes. Every route
-// requires a wallet-session JWT; there is no webhook here (unlike
+// requires a signed request (middleware.SignatureAuth); there is no webhook here (unlike
 // kyc/fiat) since Stablerail's API is entirely poll-driven from this
 // backend's side - see services.PollPendingOnboarding/PollPendingOnramp,
 // run from background goroutines in main.go.
@@ -22,7 +22,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	svc := services.New(gc.DB, gc.StablerailAPIKey, gc.StablerailBaseURL, gc.StablerailEnabled)
 
 	authed := router.Group("/v1/stablerail")
-	authed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
+	authed.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
 	authed.GET("/banks", listBanks(svc))
 	authed.POST("/onboard/:bvn", initiateOnboarding(svc))
 	authed.POST("/onramp/:amount", initiateOnramp(svc))

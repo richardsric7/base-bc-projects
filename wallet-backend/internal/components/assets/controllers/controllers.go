@@ -21,7 +21,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	router.GET("/v1/assets/balance/:address", getBalance(svc))
 
 	authed := router.Group("/v1/assets")
-	authed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
+	authed.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
 	authed.POST("/approve/build", buildApprove(svc))
 	authed.POST("/approve/submit", submit(svc))
 

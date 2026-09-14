@@ -29,7 +29,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	public.GET("/security-questions", listSecurityQuestions(svc))
 
 	authed := router.Group("/v1/users")
-	authed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
+	authed.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
 	authed.POST("", register(svc))
 	authed.DELETE("/:username", deleteUser(svc))
 	authed.POST("/security-answers", setSecurityAnswer(svc))
@@ -52,10 +52,12 @@ type registerRequest struct {
 	Email    string `json:"email" binding:"required"`
 }
 
-// register requires a wallet-session JWT (see internal/components/auth) and
-// takes the address to register from that verified session, never from the
-// request body - so a caller can only ever register a profile for an
-// address they've proven ownership of via SIWE.
+// register requires a signed request (middleware.SignatureAuth, PLAN.md
+// §12) and takes the address to register from that verified request,
+// never from the request body - so a caller can only ever register a
+// profile for an address they've proven ownership of via personal_sign.
+// Registration is just another signed request, with no separate auth
+// step first (PLAN.md §12.6).
 func register(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req registerRequest

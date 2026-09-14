@@ -1,6 +1,6 @@
 // Package controllers wires the kyc component's routes. The
-// verification-flow routes (levels/progress/initiate) require a
-// wallet-session JWT like the rest of the API; the two webhook routes are
+// verification-flow routes (levels/progress/initiate) require a signed
+// request (middleware.SignatureAuth) like the rest of the API; the two webhook routes are
 // deliberately unauthenticated HTTP endpoints (a vendor calls them, not a
 // logged-in user) that authenticate the request itself via a
 // vendor-specific signature header - never trust either payload without
@@ -30,7 +30,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	svc := services.New(gc.DB, gc.SumsubBaseURL, gc.SumsubToken, gc.SumsubSecretKey, gc.DojaSecretKey)
 
 	authed := router.Group("/v1/kyc")
-	authed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
+	authed.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
 	authed.GET("/sumsub/levels", listSumsubLevels(svc))
 	authed.GET("/sumsub/progress", getSumsubProgress(svc))
 	authed.POST("/sumsub/initiate/:levelName", initiateSumsubLevel(svc))

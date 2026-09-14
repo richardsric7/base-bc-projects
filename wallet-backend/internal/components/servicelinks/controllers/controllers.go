@@ -33,7 +33,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig, users *usersService
 	// Wallet-session-authenticated: the end user viewing/deciding on a
 	// pending consent request a partner asked them to approve.
 	walletAuthed := router.Group("/v1/approvals")
-	walletAuthed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
+	walletAuthed.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
 	walletAuthed.GET("/:id", getApprovalForUser(svc))
 	walletAuthed.POST("/:id/approve", approveForUser(svc))
 

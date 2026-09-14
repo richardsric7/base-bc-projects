@@ -15,8 +15,8 @@ import (
 // login/authorize/event consent flow - requesting a user's consent and
 // later redeeming it once granted. The end-user-facing half (viewing and
 // approving a pending request) is registered directly in Init under
-// /v1/approvals, since it authenticates with a wallet-session JWT rather
-// than an API key.
+// /v1/approvals, since it authenticates with a signed request
+// (middleware.SignatureAuth, PLAN.md §12) rather than an API key.
 func registerApprovalRoutes(partner *gin.RouterGroup, svc *services.Service) {
 	partner.POST("/approvals", requestApproval(svc))
 	partner.GET("/approvals/:id/verify", verifyApproval(svc))

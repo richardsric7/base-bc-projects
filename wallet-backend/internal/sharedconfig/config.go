@@ -52,9 +52,16 @@ type GlobalConfig struct {
 	GeoIP geoip.Provider
 
 	JWTSecret    string
-	JWTExpiry    time.Duration
-	SIWEDomain   string // the "domain" every SIWE sign-in message must declare
+	JWTExpiry    time.Duration // still used by AudienceAdmin tokens and the servicelinks partner-login token (PLAN.md §12.5) - no longer by user operations
 	Organisation string
+
+	// SignatureAuthToleranceSeconds bounds how far a signed request's
+	// X-Timestamp may drift from the server's clock in either direction
+	// (middleware.SignatureAuth, PLAN.md §12.3) - the entire defense
+	// against replaying a captured, otherwise-valid signature
+	// indefinitely, since this scheme has no server-side session or
+	// nonce state to invalidate instead.
+	SignatureAuthToleranceSeconds int
 
 	// GroupKeySalt seeds shared-access group key derivation (see
 	// internal/components/sharedaccess) - change this and every existing
@@ -179,7 +186,9 @@ type Env struct {
 
 	JWTSecret        string
 	JWTExpiryMinutes int
-	SIWEDomain       string
+
+	// SignatureAuthToleranceSeconds - see GlobalConfig's field doc.
+	SignatureAuthToleranceSeconds int
 
 	GroupKeySalt string
 
@@ -268,7 +277,8 @@ func LoadEnv() Env {
 
 		JWTSecret:        getEnv("JWT_SECRET", "dev-only-change-me"),
 		JWTExpiryMinutes: getEnvInt("JWT_EXPIRY_MINUTES", 60),
-		SIWEDomain:       getEnv("SIWE_DOMAIN", "localhost"),
+
+		SignatureAuthToleranceSeconds: getEnvInt("SIGNATURE_AUTH_TOLERANCE_SECONDS", 300),
 
 		GroupKeySalt: getEnv("GROUP_KEY_SALT", "dev-only-change-me"),
 

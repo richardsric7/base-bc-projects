@@ -1,8 +1,8 @@
 // Package controllers wires the shared/multi-party wallet access routes.
-// Every route requires a wallet-session JWT (issued after SIWE
-// verification, see internal/components/auth); the caller's address is
-// read from that verified session, never from the request body, so a
-// caller can never act as a group member they aren't.
+// Every route requires a signed request (middleware.SignatureAuth,
+// PLAN.md §12); the caller's address is read from that verified request,
+// never from the request body, so a caller can never act as a group
+// member they aren't.
 package controllers
 
 import (
@@ -23,7 +23,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
 	svc := services.New(gc.DB, gc.Blockchain, gc.GroupKeySalt)
 
 	group := router.Group("/v1/shared-access")
-	group.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
+	group.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
 
 	group.POST("/groups", createGroup(svc))
 	group.GET("/groups/:groupId", getGroup(svc))

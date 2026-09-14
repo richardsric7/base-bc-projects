@@ -1,5 +1,5 @@
 // Package controllers wires the market component's routes. Every route
-// requires a wallet-session JWT except the public order-book/trade-history
+// requires a signed request (middleware.SignatureAuth) except the public order-book/trade-history
 // views, which any caller (even unauthenticated) can read.
 package controllers
 
@@ -25,7 +25,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
 	public.GET("/trades", getTrades(svc))
 
 	authed := router.Group("/v1/market")
-	authed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
+	authed.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
 	authed.POST("/offers", createOffer(svc))
 	authed.GET("/offers", listMyOffers(svc))
 	authed.DELETE("/offers/:offerId", cancelOffer(svc))

@@ -66,10 +66,10 @@ const (
 
 // ServiceLinkApproval is one pending (or resolved) request/approve/verify
 // exchange: a partner requests it for a specific target user, that user's
-// own wallet app approves it (proven by their existing wallet-session JWT
-// per PLAN.md §4.11 finding 9, not a bespoke per-request signature scheme),
-// and the partner polls to collect the result - a session-issuing JWT for
-// ApprovalLogin, a plain yes/no for the other two kinds.
+// own wallet app approves it (proven by a signed request,
+// middleware.SignatureAuth, PLAN.md §14.1.1), and the partner polls to
+// collect the result - a servicelink-session JWT for ApprovalLogin, a
+// plain yes/no for the other two kinds.
 type ServiceLinkApproval struct {
 	ID            string       `gorm:"primaryKey;size:64" json:"id"`
 	CreatedAt     time.Time    `json:"createdAt"`

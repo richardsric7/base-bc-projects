@@ -52,11 +52,11 @@ type RegisterInput struct {
 }
 
 // Register creates a new user profile around an address that has already
-// proven ownership via SIWE (see internal/components/auth) - the caller
-// wires this to the address from the caller's verified session, never a
-// value taken from the request body, so a user can never register a
-// profile for an address they don't control. The server never generates or
-// handles the matching private key.
+// proven ownership via a signed request (middleware.SignatureAuth,
+// PLAN.md §12) - the caller wires this to the address resolved from that
+// verified request, never a value taken from the request body, so a user
+// can never register a profile for an address they don't control. The
+// server never generates or handles the matching private key.
 func (s *Service) Register(input RegisterInput) (*models.User, error) {
 	if !validators.IsValidUsername(input.Username) {
 		return nil, apperrors.BadRequest("username must be 3-32 alphanumeric/underscore characters")

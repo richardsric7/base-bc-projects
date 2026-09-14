@@ -34,7 +34,6 @@ import (
 
 	announcementsControllers "wallet-backend/internal/components/announcements/controllers"
 	assetsControllers "wallet-backend/internal/components/assets/controllers"
-	authControllers "wallet-backend/internal/components/auth/controllers"
 	callbacksControllers "wallet-backend/internal/components/callbacks/controllers"
 	cryptoControllers "wallet-backend/internal/components/crypto/controllers"
 	fiatControllers "wallet-backend/internal/components/fiat/controllers"
@@ -197,11 +196,12 @@ func main() {
 		Alerts:  alerts,
 		GeoIP:   geoIPProvider,
 
-		JWTSecret:    env.JWTSecret,
-		JWTExpiry:    durationFromMinutes(env.JWTExpiryMinutes),
-		SIWEDomain:   env.SIWEDomain,
-		GroupKeySalt: env.GroupKeySalt,
-		Organisation: env.Organisation,
+		JWTSecret: env.JWTSecret,
+		JWTExpiry: durationFromMinutes(env.JWTExpiryMinutes),
+
+		SignatureAuthToleranceSeconds: env.SignatureAuthToleranceSeconds,
+		GroupKeySalt:                  env.GroupKeySalt,
+		Organisation:                  env.Organisation,
 
 		RecoveryAuthoritySalt: env.RecoveryAuthoritySalt,
 		RecoveryOTPTTL:        durationFromMinutes(env.RecoveryOTPTTLMinutes),
@@ -242,7 +242,6 @@ func main() {
 	router.Static(env.StorageURL, env.StorageDir)
 
 	rootControllers.Init(router, gc)
-	authControllers.Init(router, gc)
 	usersSvc := usersControllers.Init(router, gc)
 	usersSvc.GeoIP = gc.GeoIP
 	assetsSvc := assetsControllers.Init(router, gc)

@@ -56,8 +56,8 @@ an insecure, clearly-marked `dev-only-change-me` placeholder):
 
 | Variable | Why |
 |---|---|
-| `JWT_SECRET` | Signs every session/admin token. A leaked or guessed value lets an attacker forge sessions. |
-| `SIWE_DOMAIN` | Must match your API's real public hostname, or SIWE sign-in fails outright (by design - this is the phishing-resistance property). |
+| `JWT_SECRET` | Signs the admin-surface and servicelinks partner-login tokens. A leaked or guessed value lets an attacker forge those sessions. |
+| `SIGNATURE_AUTH_TOLERANCE_SECONDS` | Bounds a signed request's allowed clock drift (PLAN.md §12.3) - the only replay defense in a scheme with no server-side session or nonce. Too wide weakens replay protection; too narrow breaks legitimate clients with imperfect clocks. Not a secret, but worth setting deliberately rather than leaving at its default. |
 | `GROUP_KEY_SALT` | Derives shared-access group wallets. **Never rotate once any group exists** - rotating changes every existing group's controlling address, permanently orphaning its funds. |
 | `RECOVERY_AUTHORITY_SALT` | Derives the account-recovery attestation key. Same rotation caution as above, scoped to recovery. |
 | `FAUCET_KEY_SALT` | Derives the activation faucet's address - fund that address before enabling activation. |
@@ -179,9 +179,11 @@ rollback.
 
 - [ ] `BASE_CHAIN_ID=8453` (mainnet) set explicitly, not left at the
       Sepolia default, once you intend to move real funds
-- [ ] `JWT_SECRET`, `SIWE_DOMAIN`, and every `*_KEY_SALT` set to real,
-      randomly generated, securely stored values (never the
+- [ ] `JWT_SECRET` and every `*_KEY_SALT` set to real, randomly
+      generated, securely stored values (never the
       `dev-only-change-me` placeholders)
+- [ ] `SIGNATURE_AUTH_TOLERANCE_SECONDS` set deliberately, not left at
+      its default without consideration (PLAN.md §12.3)
 - [ ] `DB_TYPE=postgres` with a managed/backed-up database, not SQLite
 - [ ] `STORAGE_DIR` mounted to durable storage
 - [ ] Every funded-address salt (`FAUCET_KEY_SALT`,

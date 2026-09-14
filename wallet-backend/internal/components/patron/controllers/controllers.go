@@ -21,7 +21,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	router.GET("/v1/patron/reference", getReferenceData(svc))
 
 	authed := router.Group("/v1/patron")
-	authed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
+	authed.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
 	authed.GET("", getPatronStatus(svc))
 	authed.GET("/history", getSubscriptionHistory(svc))
 	authed.POST("/subscribe", buildSubscription(svc))

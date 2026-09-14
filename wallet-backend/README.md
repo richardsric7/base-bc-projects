@@ -57,7 +57,7 @@ internal/
 ├── db/             OpenDB (postgres/sqlite), MigrateDB, connection-pool limits/stats
 ├── cache/          Cache interface + Redis impl + no-op
 ├── network/        Base/EVM integration - the only package importing go-ethereum
-├── middleware/      CORS, SIWE-session + admin JWT auth, servicelinks API-key auth
+├── middleware/      CORS, per-request signature auth + admin JWT auth, servicelinks API-key auth
 ├── cryptoutil/       secp256k1 key derivation, AES-GCM, bcrypt, hashing
 ├── apperrors/        GenericError + typed constructors
 ├── validators/       format validators (EIP-55 address checks, etc.)
@@ -71,7 +71,6 @@ internal/
 ├── contracts/        embedded Solidity ABI/bytecode + deployment helpers
 └── components/
     ├── root/          health check reporting the configured chain ID
-    ├── auth/           SIWE nonce issuance + verification -> session JWT
     ├── users/          registration, profile, security questions/recovery
     ├── assets/         curated-token catalog, balance lookup, allowance build/submit
     ├── payments/       build/submit native or ERC-20 transfer, payment history
@@ -102,25 +101,35 @@ credential for one can never be replayed against another:
 
 - **Primary API** (most `/v1/...` routes across every component - users,
   assets, payments, swaps, shared-access, tokenization, patron, and more):
-  Sign-In With Ethereum (SIWE, EIP-4361) exchanged for a session JWT.
+  a stateless per-request signature, not a session token - there is no
+  login step and nothing to expire or revoke.
 
-  1. `GET /v1/auth/nonce` → `{"nonce": "..."}`
-  2. Client builds a SIWE message (domain must match `SIWE_DOMAIN`, chain ID
-     must match `BASE_CHAIN_ID`) embedding that nonce, and signs it with the
-     wallet's `personal_sign`.
-  3. `POST /v1/auth/verify` with `{"message": "...", "signature": "0x..."}`
-     → `{"address": "0x...", "token": "<JWT>"}`
-  4. Send `Authorization: Bearer <token>` on subsequent requests.
+  1. Build the message `fullPathWithQuery + signerAddress + timestamp`
+     (the exact path and query string being requested, the signer's own
+     address, and the current Unix timestamp in seconds).
+  2. Sign it with the wallet's `personal_sign` (EIP-191).
+  3. Send four headers on the request itself:
+     `X-Signer-Address` (who signed), `X-Wallet-Address` (which wallet
+     the request acts on - the same address for a self-service call, a
+     different one when delegated via shared access), `X-Signature`, and
+     `X-Timestamp`.
+  4. The server verifies the signature fully offline
+     (`cryptoutil.VerifyPersonalSign`, no database or cache lookup) and
+     rejects the request if `X-Timestamp` has drifted from the server's
+     clock by more than `SIGNATURE_AUTH_TOLERANCE_SECONDS` - the only
+     replay defense this scheme has, since there's no session or nonce
+     to invalidate.
 
-  See `internal/components/auth/services` for the verification flow and
-  `internal/middleware/jwt_auth.go` for the session-JWT mechanics.
+  A request naming a wallet other than the signer's own is authorized
+  only if the signer holds a shared-access role on that wallet - see
+  `internal/middleware/signature_auth.go` and `PLAN.md` §12.
 
 - **Admin surface** (`/v1/admin/...` across every component - see
   "Admin surface" below): a separate-audience Bearer JWT issued via
   `middleware.IssueToken(..., middleware.AudienceAdmin, ...)` (wire up a
   real admin login flow before shipping this to production - none is
-  included in the base template). A wallet-session token can never be used
-  against an admin route or vice versa - see the `Audience*` constants in
+  included in the base template). This token can never be used against
+  any other route - see the `Audience*` constants in
   `internal/middleware/jwt_auth.go`.
 
 - **Servicelinks partner API** (`/v1/partner/...` - see "Servicelinks
@@ -156,19 +165,26 @@ checks the group wallet's balance.
 
 ## Account recovery
 
-There is no way to "re-key" a lost EVM address the way Stellar's native
-multi-sig recovery re-keys an account - on Base an address *is* its key. So
-recovery here means re-pointing a username to a new, caller-supplied
-address once two factors prove the caller is who they claim to be: every
+A bare EVM address can't be "re-keyed" the way Stellar's native multi-sig
+recovery re-keys an account - an address *is* its key. So what's
+implemented today re-points a username to a new, caller-supplied address
+once two factors prove the caller is who they claim to be: every
 configured security answer, plus a one-time code emailed to the account's
 registered address. See `PLAN.md` §4.3 for the full design.
 
+A second mechanism - true wallet recovery, preserving the *same* address
+and its sub-wallets/shared-access memberships via a Safe owner-swap once
+the primary wallet is a Safe (`PLAN.md` §13) - is planned but not yet
+implemented; see `PLAN.md` §15 for the full design of both this
+mechanism (kept as-is, "Branch A") and that one ("Branch B") coexisting
+side by side.
+
 1. A logged-in user opts in once: `POST /v1/users/account-recovery` (and
    `DELETE /v1/users/account-recovery` to opt back out) - both require a
-   wallet-session JWT, and require security answers to already be set via
-   `POST /v1/users/security-answers`.
+   signed request (`middleware.SignatureAuth`), and require security
+   answers to already be set via `POST /v1/users/security-answers`.
 2. Recovery itself is deliberately **unauthenticated** - its entire point is
-   helping someone who can no longer produce a SIWE signature at all:
+   helping someone who can no longer produce a signature at all:
    `POST /v1/account-recovery/:username/request-otp` always responds `204`
    regardless of whether the username exists or has recovery enabled, so it
    can't be used to enumerate accounts.
@@ -179,7 +195,7 @@ registered address. See `PLAN.md` §4.3 for the full design.
    `newAddress`'s own key, over the exact string
    `wallet-backend account recovery\nusername: <username>\nnew address: <newAddress>`
    - proving the caller controls that address's key, the same non-custodial
-   guarantee `Register` enforces via SIWE, so recovery can never attach a
+   guarantee `Register` enforces, so recovery can never attach a
    username to an address no one can actually sign from. On success this
    re-points the username's `User.Address` and primary `UserWallet.Address`
    to `newAddress` in one transaction, and revokes any shared-access group
@@ -557,16 +573,16 @@ Partner routes (`/v1/partner/...`, each gated by its own capability):
   login/authorize/event consent flow (one `ServiceLinkApproval` model with
   a `Kind` discriminator replaces three near-identical flows upstream). A
   `LOGIN`-kind approval, once the named user approves it, redeems into a
-  wallet-session JWT for that user.
+  servicelink-session JWT (`middleware.AudienceServiceLinkSession`) for
+  that user.
 - `POST /documents`, `GET /documents/:id`, `DELETE /documents/:id` — a
   stakeholder-document store scoped to the calling service link's own
   tenant (no ownership record at all upstream — an IDOR).
 
-The end-user side of the approval flow is wallet-session-JWT-authenticated,
-not API-key: `GET /v1/approvals/:id` and `POST /v1/approvals/:id/approve`
-require the caller to already be signed into their own wallet (the state
-they're in when scanning a partner's QR/deep link) and match the
-approval's target user.
+The end-user side of the approval flow is authenticated the same way as
+every other user route, not API-key: `GET /v1/approvals/:id` and
+`POST /v1/approvals/:id/approve` require a signed request
+(`middleware.SignatureAuth`) matching the approval's target user.
 
 Every route that names a specific user enforces
 `user.CreatedByServiceLinkID == callingServiceLink.ID` before acting on
@@ -577,9 +593,10 @@ which skipped this check entirely on `nil`.
 ## Admin surface
 
 Every admin route is JWT-authenticated with `middleware.AudienceAdmin` (a
-separate token audience from the wallet-session JWT users authenticate
-with, so a session token can never be replayed against an admin route or
-vice versa). See `PLAN.md` §4.12.
+separate token audience from every other JWT this API issues, so an admin
+token can never be replayed against another route or vice versa - and
+user operations don't use a JWT at all, see "Authentication" above). See
+`PLAN.md` §4.12.
 
 - Tokenization vetting/minting/fee-acknowledgement/sales-date-management/
   deletion — `/v1/admin/tokenization/...` (built in Phase 9, §4.9).

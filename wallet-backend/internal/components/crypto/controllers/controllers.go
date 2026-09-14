@@ -1,5 +1,5 @@
 // Package controllers wires the crypto component's routes. Every route
-// requires a wallet-session JWT; there is no webhook here (like
+// requires a signed request (middleware.SignatureAuth); there is no webhook here (like
 // stablerail) since deposit discovery is poll-driven from this backend's
 // side - see services.PollNewDeposits, run from a background goroutine in
 // main.go.
@@ -22,7 +22,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	svc := services.New(gc.DB, gc.Blockchain, gc.OneLiquidityBaseURL, gc.OneLiquidityToken, gc.CryptoWalletDomain, gc.CryptoTreasuryKeySalt, gc.CryptoWithdrawalServiceFeePercent)
 
 	authed := router.Group("/v1/crypto")
-	authed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
+	authed.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
 	authed.GET("/deposit-address/:currency", getDepositAddresses(svc))
 	authed.GET("/deposit-history", getDepositHistory(svc))
 	authed.GET("/withdrawal-networks/:currency", getWithdrawalNetworks(svc))

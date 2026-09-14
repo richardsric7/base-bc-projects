@@ -4,9 +4,9 @@ package models
 import "time"
 
 // User is an account holder. The wallet is non-custodial: Address is the
-// EVM address recovered from a successful SIWE sign-in (see
-// internal/components/auth) - the server never sees, let alone stores, the
-// matching private key.
+// EVM address recovered from a verified per-request signature
+// (middleware.SignatureAuth, PLAN.md §12) - the server never sees, let
+// alone stores, the matching private key.
 type User struct {
 	ID        uint   `gorm:"primaryKey" json:"id"`
 	Username  string `gorm:"uniqueIndex;size:32;not null" json:"username"`

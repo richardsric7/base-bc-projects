@@ -29,7 +29,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	public.GET("", getPublicReferenceData(svc))
 
 	authed := router.Group("/v1/tokenization")
-	authed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
+	authed.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
 	authed.GET("/reference", getFullReferenceData(svc))
 	authed.GET("/types", getTypesBySubSector(svc))
 	authed.POST("", submitApplication(svc))

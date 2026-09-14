@@ -18,7 +18,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	svc := services.New(gc.DB, gc.Blockchain)
 
 	authed := router.Group("/v1/payments")
-	authed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
+	authed.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
 	authed.POST("/build", buildPayment(svc))
 	authed.POST("/submit", submitPayment(svc))
 	authed.GET("/history/:address", history(svc))

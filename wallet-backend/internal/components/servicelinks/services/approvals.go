@@ -87,7 +87,7 @@ func (s *Service) GetApproval(approvalID string) (*models.ServiceLinkApproval, e
 }
 
 // Approve marks a pending approval as authorized. callerAddress must be
-// the address behind the caller's verified wallet-session JWT (see
+// the wallet address SignatureAuth resolved for the caller (see
 // controllers) - approving on behalf of anyone else is rejected, the same
 // deny-by-default discipline as requireOwnedUser.
 func (s *Service) Approve(approvalID string, callerAddress string) (*models.ServiceLinkApproval, error) {
@@ -118,10 +118,11 @@ func (s *Service) Approve(approvalID string, callerAddress string) (*models.Serv
 // VerifyApproval lets the requesting service link redeem an authorized
 // approval, exactly once - deleting it afterward closes off replaying the
 // same approval ID for a second session token. For a LOGIN request this
-// mints a wallet-session JWT for the target user, reusing this port's
-// existing SIWE-once-then-session-JWT model instead of the original's
-// bespoke per-request Ed25519 signature scheme (PLAN.md §2's first
-// substitution row). AUTHORIZE and EVENT requests return no token: it's up
+// mints a servicelink-session JWT (AudienceServiceLinkSession) for the
+// target user - a token that authenticates the *partner*, not the user's
+// own wallet operations, so it survives independently of PLAN.md §12's
+// per-request signature scheme those operations use instead (PLAN.md
+// §12.5, §14.1.1). AUTHORIZE and EVENT requests return no token: it's up
 // to the partner's own next call - which still goes through
 // requireOwnedUser - to act on the user's consent.
 func (s *Service) VerifyApproval(serviceLinkID uint, approvalID string) (*models.ServiceLinkApproval, string, error) {
@@ -142,7 +143,7 @@ func (s *Service) VerifyApproval(serviceLinkID uint, approvalID string) (*models
 		if err != nil {
 			return nil, "", err
 		}
-		sessionToken, err = middleware.IssueToken(s.JWTSecret, target.Address, middleware.AudienceWalletSession, s.JWTExpiry)
+		sessionToken, err = middleware.IssueToken(s.JWTSecret, target.Address, middleware.AudienceServiceLinkSession, s.JWTExpiry)
 		if err != nil {
 			return nil, "", apperrors.Internal("failed to issue session token")
 		}

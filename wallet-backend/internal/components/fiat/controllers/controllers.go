@@ -1,5 +1,5 @@
 // Package controllers wires the fiat component's routes: the activation
-// quote/invoice/history routes require a wallet-session JWT like the rest
+// quote/invoice/history routes require a signed request (middleware.SignatureAuth) like the rest
 // of the API; the Flutterwave webhook route is deliberately unauthenticated
 // (a vendor calls it, not a logged-in user) and authenticates the request
 // itself via Flutterwave's shared-secret header - never trust the payload
@@ -31,7 +31,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	svc := services.New(gc.DB, gc.Blockchain, gc.Rates, gc.FaucetKeySalt, gc.ActivationRewardTokenSymbol)
 
 	authed := router.Group("/v1/fiat")
-	authed.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceWalletSession))
+	authed.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
 	authed.GET("/activate", getActivationQuote(svc))
 	authed.GET("/payments", getPayments(svc))
 	authed.POST("/flutterwave/invoices", createInvoice(svc))

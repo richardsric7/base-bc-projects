@@ -1672,6 +1672,57 @@ established discipline: build clean → test → document in this file's own
 "Implementation notes" → commit and push. Implementation does not begin
 until explicitly authorized.
 
+Implementation notes (what actually shipped, beyond the design above):
+
+- Phases 1-6 are done, in one pass. `internal/middleware/signature_auth.go`
+  is exactly the design in §12.1-§12.4: header extraction
+  (`X-Signer-Address`/`X-Wallet-Address`/`X-Signature`/`X-Timestamp`),
+  the tolerance-window check (`SignatureAuthToleranceSeconds`, default
+  300s via `SIGNATURE_AUTH_TOLERANCE_SECONDS`), offline verification via
+  the already-existing `cryptoutil.VerifyPersonalSign`, self-service
+  authorization when signer and wallet match, and delegated
+  authorization via a case-insensitive `sharedaccess` `ClosedGroup`/
+  `GroupMember` lookup when they don't (any role, including `VIEW_ONLY`,
+  passes the middleware - the finer per-role distinction stays a
+  handler-level concern, unchanged). Sets both `CtxSubject` (the wallet
+  acted on) and the new `CtxSigner` (who actually signed).
+- All 14 routes previously guarded by `JWTAuth(gc.JWTSecret,
+  middleware.AudienceWalletSession)` now use `SignatureAuth(gc.DB,
+  gc.SignatureAuthToleranceSeconds)` instead - a mechanical, one-line
+  swap per file, since every handler already read the wallet address
+  from `CtxSubject` and needed no changes.
+- `internal/components/auth` (the SIWE nonce/verify component) is
+  deleted outright, along with the `github.com/spruceid/siwe-go`
+  dependency and its two transitive-only deps (confirmed via `go mod
+  tidy`). `middleware.AudienceWalletSession` is removed from
+  `jwt_auth.go` - nothing issues or guards it anymore.
+- Phase 4 (`AudienceServiceLinkSession`) is a rename only -
+  `servicelinks/services/approvals.go`'s `VerifyApproval` was already
+  behaviorally correct (§12.5), so this just gives its `LOGIN`-kind
+  token issuance its own audience distinct from the now-removed
+  wallet-session one.
+- `internal/middleware/cors.go`'s allowed-headers list swapped
+  `X-Public-Key` for `X-Signer-Address`/`X-Wallet-Address`.
+- `.env.example`, `DEPLOYMENT.md`, and `README.md` all updated - the
+  `SIWE_DOMAIN` var is gone, `SIGNATURE_AUTH_TOLERANCE_SECONDS` documented
+  in its place, and every doc comment/README passage describing the old
+  SIWE-then-JWT flow rewritten to describe the new one (README's flow
+  previously named exact now-deleted endpoints, `/v1/auth/nonce` and
+  `/v1/auth/verify` - left uncorrected, that would have been actively
+  wrong documentation, not just stale).
+- New `internal/middleware/signature_auth_test.go`: missing headers,
+  tampered signature, wrong-key signature, stale timestamp, future
+  timestamp beyond tolerance, self-service success, delegated success
+  (a signer holding `GroupMember` standing on a different wallet), and
+  delegated rejection (no standing) - all using real generated
+  secp256k1 keys and real `personal_sign` signatures through the actual
+  `gin` handler chain, not mocks.
+- Full `go build`/`go vet`/`go test ./...` pass clean; a live server
+  boot (`go run .`) confirmed the route table no longer has any
+  `/v1/auth/*` routes and every other route is wired as expected.
+- Phase 7 (`wallet-web`'s client-side changes, §12.6) remains tracked
+  there, not implemented here, per that project's own `PLAN.md`.
+
 ## 13. Multi-wallet & shared-access redesign: smart-contract accounts for sub-wallets
 
 **Decision**: replace Stellar's native weighted-signer accounts (used for

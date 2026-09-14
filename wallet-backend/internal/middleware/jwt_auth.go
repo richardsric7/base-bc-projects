@@ -15,13 +15,22 @@ import (
 // identifier for the admin surface.
 const CtxSubject = "subject"
 
-// Audiences distinguish the two trust domains that share this JWT
-// mechanism, so a wallet-session token can never be replayed against an
-// admin route (or vice versa) even though both use the same signing
-// secret in this base template.
+// Audiences distinguish the trust domains that share this JWT mechanism,
+// so a token issued for one purpose can never be replayed against a
+// route guarding another, even though all of them use the same signing
+// secret in this base template. There is no AudienceWalletSession
+// anymore - user operations authenticate via SignatureAuth (PLAN.md
+// §12), a stateless per-request scheme with no session token to issue at
+// all - only staff/admin routes and the servicelinks partner-login
+// token (PLAN.md §12.5) still mint a JWT.
 const (
-	AudienceWalletSession = "wallet-session"
-	AudienceAdmin         = "admin"
+	AudienceAdmin = "admin"
+	// AudienceServiceLinkSession scopes the token servicelinks'
+	// LOGIN-kind approval verify issues to a redeeming partner (PLAN.md
+	// §14.1.1) - it authenticates a partner, not a user's own wallet
+	// operations, so it keeps its own audience rather than inheriting
+	// the now-removed AudienceWalletSession's name.
+	AudienceServiceLinkSession = "servicelink-session"
 )
 
 // IssueToken creates a short-lived HS256 JWT scoped to one audience. This is
@@ -39,9 +48,10 @@ func IssueToken(secret, subject, audience string, ttl time.Duration) (string, er
 }
 
 // JWTAuth guards a route with a Bearer JWT, requiring it to carry
-// requiredAudience - use middleware.AudienceWalletSession for the primary
-// API (issued after a successful SIWE verification, see internal/components/auth)
-// and middleware.AudienceAdmin for staff-only routes.
+// requiredAudience - middleware.AudienceAdmin for staff-only routes, or
+// middleware.AudienceServiceLinkSession for a servicelinks partner
+// redeeming a LOGIN approval. User operations use middleware.SignatureAuth
+// instead (PLAN.md §12), not this function at all.
 func JWTAuth(secret, requiredAudience string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
