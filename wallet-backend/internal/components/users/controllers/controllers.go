@@ -22,7 +22,7 @@ import (
 // underlying Service so main.go can wire it into other components that
 // need to look up or register users (see servicelinks).
 func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
-	svc := services.New(gc.DB, gc.Mailer, gc.RecoveryAuthoritySalt, gc.RecoveryOTPTTL)
+	svc := services.New(gc.DB, gc.Mailer, gc.RecoveryAuthoritySalt, gc.RecoveryOTPTTL, gc.Blockchain, gc.PrimaryWalletDeployerKeySalt)
 
 	public := router.Group("/v1/users")
 	public.GET("/:username", getUser(svc, gc.Cache, gc.AddressWatcher))
@@ -31,6 +31,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	authed := router.Group("/v1/users")
 	authed.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
 	authed.POST("", register(svc))
+	authed.POST("/wallet/deploy", deployPrimaryWallet(svc))
 	authed.DELETE("/:username", deleteUser(svc))
 	authed.POST("/security-answers", setSecurityAnswer(svc))
 	authed.POST("/security-answers/verify", verifySecurityAnswer(svc))
@@ -53,11 +54,16 @@ type registerRequest struct {
 }
 
 // register requires a signed request (middleware.SignatureAuth, PLAN.md
-// §12) and takes the address to register from that verified request,
+// §12) and takes the signer EOA to register from that verified request,
 // never from the request body - so a caller can only ever register a
-// profile for an address they've proven ownership of via personal_sign.
-// Registration is just another signed request, with no separate auth
-// step first (PLAN.md §12.6).
+// profile keyed on an EOA they've proven ownership of via personal_sign.
+// Since no wallet exists yet to name in X-Wallet-Address, a registration
+// request is necessarily self-signed (signer == wallet, both the
+// caller's own EOA) - CtxSigner and CtxSubject are the same value here,
+// but CtxSigner is used to make explicit that this is the raw key
+// Register will compute a primary wallet Safe address from (PLAN.md
+// §13.2), not a wallet address itself. Registration is just another
+// signed request, with no separate auth step first (PLAN.md §12.6).
 func register(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req registerRequest
@@ -65,13 +71,28 @@ func register(svc *services.Service) gin.HandlerFunc {
 			apperrors.Abort(c, apperrors.BadRequest("username and email are required"))
 			return
 		}
-		address := c.GetString(middleware.CtxSubject)
-		user, err := svc.Register(services.RegisterInput{Username: req.Username, Email: req.Email, Address: address, RegistrationIP: c.ClientIP()})
+		signerAddress := c.GetString(middleware.CtxSigner)
+		user, err := svc.Register(services.RegisterInput{Username: req.Username, Email: req.Email, SignerAddress: signerAddress, RegistrationIP: c.ClientIP()})
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
 		}
 		c.JSON(http.StatusCreated, user)
+	}
+}
+
+// deployPrimaryWallet submits the on-chain deployment of the caller's own
+// primary wallet Safe (services.DeployPrimaryWallet) - idempotent, so a
+// client can call it freely (e.g. right after a funding/activation step)
+// without worrying about double-deploying.
+func deployPrimaryWallet(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, err := svc.DeployPrimaryWallet(c.Request.Context(), c.GetString(middleware.CtxSigner))
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, user)
 	}
 }
 

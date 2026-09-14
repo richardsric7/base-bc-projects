@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm"
 
 	sharedaccessModels "wallet-backend/internal/components/sharedaccess/models"
+	usersModels "wallet-backend/internal/components/users/models"
 )
 
 func newSignatureAuthTestDB(t *testing.T) *gorm.DB {
@@ -26,6 +27,9 @@ func newSignatureAuthTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("open in-memory db: %v", err)
 	}
 	if err := db.AutoMigrate(sharedaccessModels.Models...); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := db.AutoMigrate(usersModels.Models...); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
@@ -175,6 +179,26 @@ func TestSignatureAuth_DelegatedSignerWithGroupMembershipIsAuthorized(t *testing
 	rec := doSignedRequest(db, signerAddr, walletAddr, sig, ts)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 for a signer with group standing on the wallet, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSignatureAuth_SignerOwningPrimaryWalletIsAuthorized(t *testing.T) {
+	db := newSignatureAuthTestDB(t)
+	signerKey, _ := crypto.GenerateKey()
+	signerAddr := crypto.PubkeyToAddress(signerKey.PublicKey).Hex()
+
+	walletKey, _ := crypto.GenerateKey()
+	walletAddr := crypto.PubkeyToAddress(walletKey.PublicKey).Hex() // a Safe address, distinct from signerAddr
+	user := usersModels.User{Username: "alice", Email: "alice@example.com", Address: walletAddr, SignerAddress: signerAddr}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	ts := time.Now().Unix()
+	sig := signRequest(t, signerKey, "/protected", signerAddr, ts)
+	rec := doSignedRequest(db, signerAddr, walletAddr, sig, ts)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for a signer who owns the named primary wallet, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

@@ -2215,10 +2215,84 @@ database):
   order, the `v+4` rewrite, duplicate-owner rejection, and the
   contract-signature dynamic-tail layout. No network/database
   dependency - full local `go test` coverage.
-- Not yet done (later phases): nothing in this package talks to a chain
-  or a database yet - deploying a Safe, submitting `execTransaction`, and
-  collecting real owner signatures into a `PendingAction`-style flow are
-  Phases 2-6.
+- Not yet done at the time this was written (now done - see Phase 2's
+  notes just below): deploying a Safe and updating the `users` component
+  to compute and store one. Still outstanding for later phases:
+  submitting `execTransaction` and collecting real owner signatures into
+  a `PendingAction`-style flow (Phases 3-6).
+
+#### Phase 2 implementation notes (done)
+
+- **`User.SignerAddress`** (new, unique, not-null) is the EOA that proved
+  ownership via `middleware.SignatureAuth` at registration - the raw key
+  a client actually signs with. **`User.Address`** keeps its existing
+  column but changes meaning: it's now that signer's primary wallet Safe
+  address (`safe.ComputeProxyAddress(safe.SingletonAddress,
+  safe.EncodeSetupCalldata([signer], threshold=1), saltNonce=0)`),
+  computed once in `Register` and never changed except by wallet recovery
+  Branch B (§15.6, not yet built). Reusing saltNonce 0 for every user is
+  safe: Safe folds `keccak256(initializer)` into the actual CREATE2 salt,
+  and each user's initializer already differs because it names a
+  different sole owner.
+- **`User.PrimaryWalletDeployed`** (new, default false) tracks whether
+  that Safe has actually been deployed on-chain yet - always false right
+  after registration (PLAN.md §13.11: registration never requires
+  activation).
+- **`Service.DeployPrimaryWallet(ctx, signerAddress)`** (new) submits the
+  `SafeProxyFactory.createProxyWithNonce` call that deploys the caller's
+  own primary wallet at the address `Register` already computed - a
+  permissionless factory call, so it's paid for by a single
+  platform-operated key (`deriveDeployerKey`, seeded by the new
+  `PRIMARY_WALLET_DEPLOYER_KEY_SALT`, same derived-key pattern as every
+  other server-controlled role in this codebase) rather than needing any
+  authority over the wallet itself. Idempotent - a no-op success if
+  `PrimaryWalletDeployed` is already true - so a client (or a future
+  activation-flow hook) can call it freely. Exposed at
+  `POST /v1/users/wallet/deploy`, self-service only.
+  Wiring this automatically into `fiat`'s existing paid-activation flow
+  (`ProcessActivation`, which already dispenses starter gas to
+  `user.Address`) is a natural follow-up - deliberately not done in this
+  phase to keep it decoupled and independently testable; nothing about
+  deployment being manual/self-service blocks a later automatic trigger
+  from calling the same idempotent method.
+- **`middleware.SignatureAuth` self-service path rewritten**: since a
+  wallet's own address is now a Safe rather than the signer's EOA, the
+  ordinary case has `signer != wallet` even for a self-service call. A
+  new `signerIsPrimaryWalletOwner` lookup (`users.User` where
+  `Address = wallet AND SignerAddress = signer`) is checked before
+  falling through to the existing sharedaccess standing check; the
+  original `signer == wallet` fast path is kept too (not removed) since
+  it's what account-recovery Branch A's bare, undeployed post-recovery
+  identity relies on (see next bullet). This is the one change in this
+  phase with system-wide blast radius - every existing protected route
+  keeps working unchanged (they all just read `CtxSubject`), but every
+  *client* must now send the computed Safe address as
+  `X-Wallet-Address`, not the signer's own address, for every call after
+  registration.
+- **Registration flow**: `POST /v1/users` still signs
+  `signer == wallet` (there's no wallet to name yet) - the controller now
+  reads `CtxSigner` explicitly rather than `CtxSubject` to make clear
+  it's registering a raw EOA, not a wallet address.
+  `RegisterInput.Address` was renamed to `SignerAddress` throughout
+  (including servicelinks' `OnboardUser`, which onboards a partner's
+  already-provisioned EOA the same way).
+- **Account-recovery Branch A** (`recovery.go`, unchanged in behavior)
+  now also sets `SignerAddress = newAddress` alongside `Address`, not
+  just `Address` - otherwise `SignerAddress` would keep pointing at the
+  lost key forever, breaking `signerIsPrimaryWalletOwner` for exactly the
+  account that just recovered. This matches Branch A's own documented
+  intent (PLAN.md §15's table: "a fresh identity, nothing preserved") -
+  the recovered account becomes a bare, undeployed EOA-as-wallet identity
+  (signer == wallet == newAddress), exactly like every account looked
+  before this phase, not a fresh Safe.
+- **Verification**: `internal/components/users/services` tests cover
+  `Register` computing the correct Safe address (distinct from the
+  signer), `DeployPrimaryWallet`'s idempotency and failure propagation,
+  and existing recovery/security-answer flows continuing to pass
+  unchanged. `internal/middleware` tests cover the new
+  `signerIsPrimaryWalletOwner` path alongside the pre-existing
+  self-signing and shared-access-standing cases. Full `go build`/`go
+  vet`/`go test ./...` pass across the module.
 
 ### 13.11 Activation-order dependencies (user-flagged, audited against §13.1-§13.8's design)
 

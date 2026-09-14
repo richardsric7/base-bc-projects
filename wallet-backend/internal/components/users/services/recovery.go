@@ -136,7 +136,21 @@ func (s *Service) Recover(username, newAddress, newAddressSignature, otp string,
 	}
 
 	txErr := s.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&models.User{}).Where("id = ?", user.ID).Update("address", newAddress).Error; err != nil {
+		// Branch A is a fresh identity, nothing preserved (PLAN.md §15,
+		// table row 1) - newAddress becomes both Address and
+		// SignerAddress, i.e. a bare, undeployed EOA-as-wallet identity
+		// exactly like every account had before §13's Safe redesign,
+		// deliberately not the safe.ComputeProxyAddress(newAddress) a
+		// fresh Register call would compute. Setting only Address here
+		// would leave SignerAddress pointing at the lost key forever,
+		// silently reintroducing the very identity middleware.
+		// SignatureAuth's self-service check relies on - see Branch B
+		// (§15.5-§15.6) for the alternative that actually preserves the
+		// old Safe, its funds, and its sub-wallets via a real owner swap.
+		if err := tx.Model(&models.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
+			"address":        newAddress,
+			"signer_address": newAddress,
+		}).Error; err != nil {
 			return err
 		}
 		if err := tx.Model(&models.UserWallet{}).Where("user_id = ? AND is_primary = ?", user.ID, true).Update("address", newAddress).Error; err != nil {

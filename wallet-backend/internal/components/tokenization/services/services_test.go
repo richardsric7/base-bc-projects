@@ -95,10 +95,12 @@ func createTestUser(t *testing.T, db *gorm.DB, username string, kycVerified bool
 	if kycVerified {
 		level = 1
 	}
+	address := "0x" + username + "000000000000000000000000000000000"
 	user := usersModels.User{
 		Username:         username,
 		Email:            username + "@example.com",
-		Address:          "0x" + username + "000000000000000000000000000000000",
+		Address:          address,
+		SignerAddress:    address,
 		KYCVerifiedLevel: level,
 	}
 	if err := db.Create(&user).Error; err != nil {

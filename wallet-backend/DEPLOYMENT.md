@@ -60,6 +60,7 @@ an insecure, clearly-marked `dev-only-change-me` placeholder):
 | `SIGNATURE_AUTH_TOLERANCE_SECONDS` | Bounds a signed request's allowed clock drift (PLAN.md §12.3) - the only replay defense in a scheme with no server-side session or nonce. Too wide weakens replay protection; too narrow breaks legitimate clients with imperfect clocks. Not a secret, but worth setting deliberately rather than leaving at its default. |
 | `GROUP_KEY_SALT` | Derives shared-access group wallets. **Never rotate once any group exists** - rotating changes every existing group's controlling address, permanently orphaning its funds. |
 | `RECOVERY_AUTHORITY_SALT` | Derives the account-recovery attestation key. Same rotation caution as above, scoped to recovery. |
+| `PRIMARY_WALLET_DEPLOYER_KEY_SALT` | Derives the address that pays gas to deploy users' primary-wallet Safes (PLAN.md §13.10 Phase 2) - fund that address, but unlike the salts above, rotating it is harmless: it has no ongoing authority over any wallet. |
 | `FAUCET_KEY_SALT` | Derives the activation faucet's address - fund that address before enabling activation. |
 | `CRYPTO_TREASURY_KEY_SALT` | Derives the crypto-deposit treasury address - fund it with every curated token before enabling deposits. |
 | `MARKET_ESCROW_KEY_SALT` | Derives the market-making escrow address - rotating orphans standing maker approvals. |

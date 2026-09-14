@@ -75,6 +75,14 @@ type GlobalConfig struct {
 	RecoveryAuthoritySalt string
 	RecoveryOTPTTL        time.Duration
 
+	// PrimaryWalletDeployerKeySalt seeds the key that pays gas to deploy
+	// users' primary-wallet Safes on-chain (see
+	// internal/components/users/services.DeployPrimaryWallet, PLAN.md
+	// §13.10 Phase 2). Unlike GroupKeySalt/RecoveryAuthoritySalt, rotating
+	// this is harmless: the deployer has no ongoing authority over any
+	// wallet, it only ever pays for a permissionless factory call.
+	PrimaryWalletDeployerKeySalt string
+
 	// Sumsub/Doja credentials for internal/components/kyc. The upstream
 	// project stored these in a database KYCConfig table; this port keeps
 	// them as env-sourced secrets instead, consistent with every other
@@ -195,6 +203,8 @@ type Env struct {
 	RecoveryAuthoritySalt string
 	RecoveryOTPTTLMinutes int
 
+	PrimaryWalletDeployerKeySalt string
+
 	SumsubBaseURL   string
 	SumsubToken     string
 	SumsubSecretKey string
@@ -284,6 +294,8 @@ func LoadEnv() Env {
 
 		RecoveryAuthoritySalt: getEnv("RECOVERY_AUTHORITY_SALT", "dev-only-change-me"),
 		RecoveryOTPTTLMinutes: getEnvInt("RECOVERY_OTP_TTL_MINUTES", 15),
+
+		PrimaryWalletDeployerKeySalt: getEnv("PRIMARY_WALLET_DEPLOYER_KEY_SALT", "dev-only-change-me"),
 
 		SumsubBaseURL:   getEnv("SUMSUB_BASE_URL", "https://api.sumsub.com"),
 		SumsubToken:     getEnv("SUMSUB_TOKEN", ""),

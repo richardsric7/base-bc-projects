@@ -5,10 +5,13 @@ package services
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"errors"
+	"math/big"
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"gorm.io/gorm"
 
 	"wallet-backend/internal/apperrors"
@@ -17,8 +20,18 @@ import (
 	"wallet-backend/internal/cryptoutil"
 	"wallet-backend/internal/geoip"
 	"wallet-backend/internal/notify"
+	"wallet-backend/internal/safe"
 	"wallet-backend/internal/validators"
 )
+
+// BlockchainClient is the narrow slice of *network.Client this component
+// needs - just enough to submit the primary-wallet Safe deployment
+// transaction (see DeployPrimaryWallet). Narrowed to an interface, same
+// pattern as every other component that talks to the chain, so it's
+// unit-testable without a live Base RPC.
+type BlockchainClient interface {
+	SignAndSubmitTx(ctx context.Context, signer *ecdsa.PrivateKey, to *common.Address, value *big.Int, data []byte, explicitNonce *uint64) (string, error)
+}
 
 type Service struct {
 	DB                    *gorm.DB
@@ -29,17 +42,71 @@ type Service struct {
 	// risk fields below - defaults to geoip.NoopProvider (see New), so
 	// registration behaves identically with or without one configured.
 	GeoIP geoip.Provider
+	// Blockchain and DeployerKeySalt back DeployPrimaryWallet: Blockchain
+	// submits the createProxyWithNonce call, and DeployerKeySalt seeds
+	// the server-controlled key that pays its gas (cryptoutil.DeriveKey,
+	// same derived-key pattern as every other server-controlled role in
+	// this codebase - see fiat's activation faucet). Deploying a Safe via
+	// its factory is a permissionless call that needs no authority over
+	// the wallet itself, so a single platform-operated key covers every
+	// user's deployment.
+	Blockchain      BlockchainClient
+	DeployerKeySalt string
 }
 
-func New(db *gorm.DB, mailer notify.Mailer, recoveryAuthoritySalt string, recoveryOTPTTL time.Duration) *Service {
-	return &Service{DB: db, Mailer: mailer, RecoveryAuthoritySalt: recoveryAuthoritySalt, RecoveryOTPTTL: recoveryOTPTTL, GeoIP: geoip.NewNoopProvider()}
+func New(db *gorm.DB, mailer notify.Mailer, recoveryAuthoritySalt string, recoveryOTPTTL time.Duration, blockchain BlockchainClient, deployerKeySalt string) *Service {
+	return &Service{
+		DB:                    db,
+		Mailer:                mailer,
+		RecoveryAuthoritySalt: recoveryAuthoritySalt,
+		RecoveryOTPTTL:        recoveryOTPTTL,
+		GeoIP:                 geoip.NewNoopProvider(),
+		Blockchain:            blockchain,
+		DeployerKeySalt:       deployerKeySalt,
+	}
+}
+
+// deriveDeployerKey derives the single server-controlled key that pays gas
+// for deploying users' primary-wallet Safes (see DeployPrimaryWallet) -
+// the same try-and-increment derivation used for every other
+// server-controlled role in this codebase (cryptoutil.DeriveKey). An
+// operator funds this one address with ETH ahead of time; there is no
+// deployer private key at rest anywhere.
+func (s *Service) deriveDeployerKey() (*ecdsa.PrivateKey, error) {
+	return cryptoutil.DeriveKey(s.DeployerKeySalt + "|primary-wallet-deployer")
+}
+
+// primarySafeSaltNonce is the CREATE2 saltNonce every primary wallet Safe
+// is deployed with. It never needs to vary between users: Safe folds
+// keccak256(initializer) into the actual salt (see safe.ComputeProxyAddress),
+// and each user's initializer already differs because it names a
+// different sole owner (their SignerAddress) - reusing 0 here can never
+// collide two different users onto the same computed address.
+var primarySafeSaltNonce = big.NewInt(0)
+
+// computePrimaryWalletAddress deterministically derives the Safe address
+// that will control signerAddress's primary wallet - a single owner,
+// threshold 1, CompatibilityFallbackHandlerAddress installed (see
+// safe.EncodeSetupCalldata) - without requiring that Safe to exist
+// on-chain yet (PLAN.md §13.11).
+func computePrimaryWalletAddress(signerAddress common.Address) (common.Address, []byte, error) {
+	initializer, err := safe.EncodeSetupCalldata([]common.Address{signerAddress}, big.NewInt(1))
+	if err != nil {
+		return common.Address{}, nil, apperrors.Internal("failed to encode primary wallet setup calldata")
+	}
+	return safe.ComputeProxyAddress(safe.SingletonAddress, initializer, primarySafeSaltNonce), initializer, nil
 }
 
 // RegisterInput is the payload accepted by Register.
 type RegisterInput struct {
 	Username string
 	Email    string
-	Address  string
+	// SignerAddress is the EOA that proved ownership via a signed request
+	// (middleware.SignatureAuth, PLAN.md §12) - Register computes the
+	// user's actual primary wallet (a Safe owned solely by this key) from
+	// it, rather than registering this address itself as the wallet (see
+	// PLAN.md §13.2).
+	SignerAddress string
 	// CreatedByServiceLinkID is nil for a normal self-registration; a
 	// servicelinks partner onboarding one of its own users sets it to
 	// their own ServiceLink.ID (see internal/components/servicelinks).
@@ -51,12 +118,21 @@ type RegisterInput struct {
 	RegistrationIP string
 }
 
-// Register creates a new user profile around an address that has already
-// proven ownership via a signed request (middleware.SignatureAuth,
-// PLAN.md §12) - the caller wires this to the address resolved from that
-// verified request, never a value taken from the request body, so a user
-// can never register a profile for an address they don't control. The
-// server never generates or handles the matching private key.
+// Register creates a new user profile around a signer EOA that has
+// already proven ownership via a signed request (middleware.SignatureAuth,
+// PLAN.md §12) - the caller wires SignerAddress to the address resolved
+// from that verified request, never a value taken from the request body,
+// so a user can never register a profile keyed on an EOA they don't
+// control. The server never generates or handles the matching private
+// key.
+//
+// The user's actual wallet identity (Address) is not SignerAddress
+// itself: it's the Safe smart-contract account SignerAddress solely owns,
+// computed deterministically via safe.ComputeProxyAddress (PLAN.md
+// §13.2/§13.3) - permanent for the life of the account even if
+// SignerAddress is later replaced via wallet recovery (PLAN.md §15.6).
+// Registration deliberately never deploys that Safe on-chain (PLAN.md
+// §13.11) - see DeployPrimaryWallet for that.
 func (s *Service) Register(input RegisterInput) (*models.User, error) {
 	if !validators.IsValidUsername(input.Username) {
 		return nil, apperrors.BadRequest("username must be 3-32 alphanumeric/underscore characters")
@@ -64,7 +140,7 @@ func (s *Service) Register(input RegisterInput) (*models.User, error) {
 	if !validators.IsValidEmail(input.Email) {
 		return nil, apperrors.BadRequest("invalid email address")
 	}
-	if !validators.IsValidAddress(input.Address) {
+	if !validators.IsValidAddress(input.SignerAddress) {
 		return nil, apperrors.BadRequest("invalid EVM address")
 	}
 	reserved, err := s.isReservedUsername(input.Username)
@@ -75,8 +151,14 @@ func (s *Service) Register(input RegisterInput) (*models.User, error) {
 		return nil, apperrors.Conflict("this username is reserved")
 	}
 
+	primaryWalletAddress, _, err := computePrimaryWalletAddress(common.HexToAddress(input.SignerAddress))
+	if err != nil {
+		return nil, err
+	}
+	walletAddressHex := primaryWalletAddress.Hex()
+
 	var existing models.User
-	err = s.DB.Where("username = ? OR email = ? OR address = ?", input.Username, input.Email, input.Address).
+	err = s.DB.Where("username = ? OR email = ? OR signer_address = ? OR address = ?", input.Username, input.Email, input.SignerAddress, walletAddressHex).
 		First(&existing).Error
 	if err == nil {
 		return nil, apperrors.Conflict("username, email or address is already registered")
@@ -88,7 +170,8 @@ func (s *Service) Register(input RegisterInput) (*models.User, error) {
 	user := models.User{
 		Username:               input.Username,
 		Email:                  input.Email,
-		Address:                input.Address,
+		Address:                walletAddressHex,
+		SignerAddress:          input.SignerAddress,
 		KYCStatus:              "pending",
 		CreatedByServiceLinkID: input.CreatedByServiceLinkID,
 	}
@@ -100,7 +183,7 @@ func (s *Service) Register(input RegisterInput) (*models.User, error) {
 		}
 		wallet := models.UserWallet{
 			UserID:    user.ID,
-			Address:   input.Address,
+			Address:   walletAddressHex,
 			Label:     "primary",
 			IsPrimary: true,
 		}
@@ -110,6 +193,59 @@ func (s *Service) Register(input RegisterInput) (*models.User, error) {
 		return nil, apperrors.Internal("failed to create user")
 	}
 
+	return &user, nil
+}
+
+// DeployPrimaryWallet submits the on-chain createProxyWithNonce call that
+// actually deploys callerSignerAddress's primary wallet Safe at the
+// address Register already computed and stored - a no-op success if it's
+// already deployed, so calling this more than once (a retried client
+// request, a duplicate activation webhook) never double-submits. Gas is
+// paid by the platform's own deriveDeployerKey, not the user's own
+// balance: deploying a Safe via its factory is a permissionless call that
+// grants the caller no authority over the resulting wallet.
+//
+// This is the one on-chain activation step PLAN.md §13.11 requires before
+// a primary wallet can do anything beyond passively receiving funds:
+// fund a sub-wallet from it, enable shared access on it, or be named as
+// another wallet's owner all call a Safe method, which needs code at the
+// address to call into.
+func (s *Service) DeployPrimaryWallet(ctx context.Context, callerSignerAddress string) (*models.User, error) {
+	if !validators.IsValidAddress(callerSignerAddress) {
+		return nil, apperrors.BadRequest("invalid EVM address")
+	}
+	var user models.User
+	if err := s.DB.Where("signer_address = ?", callerSignerAddress).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperrors.NotFound("user profile not found - register first")
+		}
+		return nil, apperrors.Internal("failed to load user")
+	}
+	if user.PrimaryWalletDeployed {
+		return &user, nil
+	}
+
+	_, initializer, err := computePrimaryWalletAddress(common.HexToAddress(user.SignerAddress))
+	if err != nil {
+		return nil, err
+	}
+	calldata, err := safe.EncodeCreateProxyWithNonceCalldata(safe.SingletonAddress, initializer, primarySafeSaltNonce)
+	if err != nil {
+		return nil, apperrors.Internal("failed to encode primary wallet deployment calldata")
+	}
+	deployerKey, err := s.deriveDeployerKey()
+	if err != nil {
+		return nil, apperrors.Internal("failed to derive the primary wallet deployer key")
+	}
+	factoryAddr := safe.ProxyFactoryAddress
+	if _, err := s.Blockchain.SignAndSubmitTx(ctx, deployerKey, &factoryAddr, big.NewInt(0), calldata, nil); err != nil {
+		return nil, apperrors.Internal("failed to deploy primary wallet: " + err.Error())
+	}
+
+	if err := s.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("primary_wallet_deployed", true).Error; err != nil {
+		return nil, apperrors.Internal("failed to record primary wallet deployment")
+	}
+	user.PrimaryWalletDeployed = true
 	return &user, nil
 }
 

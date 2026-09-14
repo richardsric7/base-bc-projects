@@ -60,13 +60,13 @@ func (m *capturingMailer) extractOTP(t *testing.T) string {
 func newRecoveryTestService(t *testing.T, ttl time.Duration) (*Service, *capturingMailer) {
 	t.Helper()
 	mailer := &capturingMailer{}
-	svc := New(newTestDB(t), mailer, "test-recovery-authority-salt", ttl)
+	svc := New(newTestDB(t), mailer, "test-recovery-authority-salt", ttl, &fakeBlockchain{}, "test-deployer-salt")
 	return svc, mailer
 }
 
 func registerWithRecoveryEnabled(t *testing.T, svc *Service, username string) (*models.User, []SecurityAnswerInput) {
 	t.Helper()
-	user, err := svc.Register(RegisterInput{Username: username, Email: username + "@example.com", Address: randomAddress(t)})
+	user, err := svc.Register(RegisterInput{Username: username, Email: username + "@example.com", SignerAddress: randomAddress(t)})
 	if err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestRequestRecoveryOTP_SilentlyNoOpsForUnknownUsername(t *testing.T) {
 
 func TestRequestRecoveryOTP_SilentlyNoOpsWhenRecoveryDisabled(t *testing.T) {
 	svc, mailer := newRecoveryTestService(t, 15*time.Minute)
-	if _, err := svc.Register(RegisterInput{Username: "dave", Email: "dave@example.com", Address: randomAddress(t)}); err != nil {
+	if _, err := svc.Register(RegisterInput{Username: "dave", Email: "dave@example.com", SignerAddress: randomAddress(t)}); err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
 	if err := svc.RequestRecoveryOTP("dave"); err != nil {
@@ -184,7 +184,7 @@ func TestRecover_Success_RepointsAddressAndRevokesGroupMembership(t *testing.T) 
 
 func TestRecover_RejectsWhenRecoveryNotEnabled(t *testing.T) {
 	svc, _ := newRecoveryTestService(t, 15*time.Minute)
-	if _, err := svc.Register(RegisterInput{Username: "eve", Email: "eve@example.com", Address: randomAddress(t)}); err != nil {
+	if _, err := svc.Register(RegisterInput{Username: "eve", Email: "eve@example.com", SignerAddress: randomAddress(t)}); err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
 	newAddress, newAddressSig := newRecoveryAddress(t, "eve")
@@ -322,7 +322,7 @@ func TestRecover_RejectsForgedNewAddressSignature(t *testing.T) {
 
 func TestEnableDisableAccountRecovery(t *testing.T) {
 	svc, _ := newRecoveryTestService(t, 15*time.Minute)
-	user, err := svc.Register(RegisterInput{Username: "kevin", Email: "kevin@example.com", Address: randomAddress(t)})
+	user, err := svc.Register(RegisterInput{Username: "kevin", Email: "kevin@example.com", SignerAddress: randomAddress(t)})
 	if err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
@@ -355,7 +355,7 @@ func TestRegister_RejectsReservedUsername(t *testing.T) {
 		t.Fatalf("create reserved name: %v", err)
 	}
 
-	_, err := svc.Register(RegisterInput{Username: "admin", Email: "admin@example.com", Address: randomAddress(t)})
+	_, err := svc.Register(RegisterInput{Username: "admin", Email: "admin@example.com", SignerAddress: randomAddress(t)})
 	if err == nil {
 		t.Fatal("expected an error for a reserved username")
 	}

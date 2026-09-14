@@ -206,6 +206,8 @@ func main() {
 		RecoveryAuthoritySalt: env.RecoveryAuthoritySalt,
 		RecoveryOTPTTL:        durationFromMinutes(env.RecoveryOTPTTLMinutes),
 
+		PrimaryWalletDeployerKeySalt: env.PrimaryWalletDeployerKeySalt,
+
 		SumsubBaseURL:   env.SumsubBaseURL,
 		SumsubToken:     env.SumsubToken,
 		SumsubSecretKey: env.SumsubSecretKey,

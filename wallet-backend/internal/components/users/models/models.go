@@ -3,16 +3,39 @@ package models
 
 import "time"
 
-// User is an account holder. The wallet is non-custodial: Address is the
-// EVM address recovered from a verified per-request signature
+// User is an account holder. The wallet is non-custodial: SignerAddress is
+// the EVM EOA recovered from a verified per-request signature
 // (middleware.SignatureAuth, PLAN.md §12) - the server never sees, let
-// alone stores, the matching private key.
+// alone stores, the matching private key. Address is that signer's
+// primary wallet: a Gnosis Safe smart-contract account (PLAN.md §13.2/
+// §13.3) whose sole owner is SignerAddress, computed once at registration
+// via safe.ComputeProxyAddress and never changed afterward. Splitting the
+// two is what makes wallet recovery (PLAN.md §15.6) possible at all:
+// losing SignerAddress's key only ever requires swapping Address's Safe
+// owner to a new key - the permanent identity every other wallet's owner
+// list, every counterparty, and every stored balance already references
+// never has to move.
 type User struct {
-	ID        uint   `gorm:"primaryKey" json:"id"`
-	Username  string `gorm:"uniqueIndex;size:32;not null" json:"username"`
-	Email     string `gorm:"uniqueIndex;size:255;not null" json:"email"`
-	Address   string `gorm:"uniqueIndex;size:42;not null" json:"address"`
-	KYCStatus string `gorm:"size:32;default:pending" json:"kycStatus"`
+	ID       uint   `gorm:"primaryKey" json:"id"`
+	Username string `gorm:"uniqueIndex;size:32;not null" json:"username"`
+	Email    string `gorm:"uniqueIndex;size:255;not null" json:"email"`
+	Address  string `gorm:"uniqueIndex;size:42;not null" json:"address"`
+	// SignerAddress is the EOA currently authorized to operate the
+	// primary wallet - the key middleware.SignatureAuth accepts as the
+	// signer for a request naming Address as X-Wallet-Address (see that
+	// middleware's usersModels lookup). Unique for the same reason
+	// Address is: two users can never share a controlling key any more
+	// than they can share an identity.
+	SignerAddress string `gorm:"uniqueIndex;size:42;not null" json:"signerAddress"`
+	// PrimaryWalletDeployed records whether Address has actually been
+	// deployed on-chain yet (a createProxyWithNonce call has succeeded) -
+	// always false immediately after registration, since registration
+	// deliberately never requires on-chain activation (PLAN.md §13.11).
+	// Required before this wallet can execute anything at all: fund a
+	// sub-wallet, enable shared access, or be named as another wallet's
+	// owner - see services.DeployPrimaryWallet.
+	PrimaryWalletDeployed bool   `gorm:"default:false" json:"primaryWalletDeployed"`
+	KYCStatus             string `gorm:"size:32;default:pending" json:"kycStatus"`
 	// KYCVerifiedLevel is the highest identity-verification level this user
 	// has completed with either vendor (see internal/components/kyc) - 0
 	// means unverified. Ported from the original's User.KYCVerified; other

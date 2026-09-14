@@ -25,7 +25,7 @@ func newTestServiceWithReferenceModels(t *testing.T) *Service {
 	if err := db.AutoMigrate(referenceModels.Models...); err != nil {
 		t.Fatalf("migrate reference models: %v", err)
 	}
-	svc := New(db, nil, "test-recovery-salt", 0)
+	svc := New(db, nil, "test-recovery-salt", 0, &fakeBlockchain{}, "test-deployer-salt")
 	return svc
 }
 
@@ -33,7 +33,7 @@ func TestRegister_SetsRegistrationCountryCodeFromGeoIP(t *testing.T) {
 	svc := newTestServiceWithReferenceModels(t)
 	svc.GeoIP = fakeGeoIPProvider{countryCode: "NG"}
 
-	user, err := svc.Register(RegisterInput{Username: "alice", Email: "alice@example.com", Address: randomAddress(t), RegistrationIP: "1.2.3.4"})
+	user, err := svc.Register(RegisterInput{Username: "alice", Email: "alice@example.com", SignerAddress: randomAddress(t), RegistrationIP: "1.2.3.4"})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestRegister_FlagsHighRiskCountry(t *testing.T) {
 		t.Fatalf("seed country config: %v", err)
 	}
 
-	user, err := svc.Register(RegisterInput{Username: "bob", Email: "bob@example.com", Address: randomAddress(t), RegistrationIP: "5.6.7.8"})
+	user, err := svc.Register(RegisterInput{Username: "bob", Email: "bob@example.com", SignerAddress: randomAddress(t), RegistrationIP: "5.6.7.8"})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestRegister_SucceedsWhenGeoIPLookupFails(t *testing.T) {
 	svc := newTestServiceWithReferenceModels(t)
 	svc.GeoIP = fakeGeoIPProvider{err: context.DeadlineExceeded}
 
-	user, err := svc.Register(RegisterInput{Username: "carol", Email: "carol@example.com", Address: randomAddress(t), RegistrationIP: "9.9.9.9"})
+	user, err := svc.Register(RegisterInput{Username: "carol", Email: "carol@example.com", SignerAddress: randomAddress(t), RegistrationIP: "9.9.9.9"})
 	if err != nil {
 		t.Fatalf("expected Register to succeed despite a geo-IP failure, got: %v", err)
 	}

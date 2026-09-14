@@ -28,10 +28,12 @@ func newTestDB(t *testing.T) *gorm.DB {
 
 func createTestUser(t *testing.T, db *gorm.DB, username string) usersModels.User {
 	t.Helper()
+	address := "0x" + username + "0000000000000000000000000000000000"
 	user := usersModels.User{
-		Username: username,
-		Email:    username + "@example.com",
-		Address:  "0x" + username + "0000000000000000000000000000000000",
+		Username:      username,
+		Email:         username + "@example.com",
+		Address:       address,
+		SignerAddress: address,
 	}
 	if err := db.Create(&user).Error; err != nil {
 		t.Fatalf("create test user: %v", err)

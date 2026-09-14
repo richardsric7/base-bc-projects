@@ -120,9 +120,26 @@ credential for one can never be replayed against another:
      replay defense this scheme has, since there's no session or nonce
      to invalidate.
 
-  A request naming a wallet other than the signer's own is authorized
-  only if the signer holds a shared-access role on that wallet - see
-  `internal/middleware/signature_auth.go` and `PLAN.md` §12.
+  Since every user's primary wallet is a Gnosis Safe smart-contract
+  account rather than the signer's own EOA (`PLAN.md` §13.2), `signer` and
+  `wallet` are ordinarily *different* addresses even for a self-service
+  call: `POST /v1/users` (registration) computes and returns the primary
+  wallet's Safe address from the signer key you register with, and every
+  later self-service call names that Safe address as `X-Wallet-Address`
+  while continuing to sign with the same EOA as `X-Signer-Address`. A
+  request is authorized if the signer *is* that wallet's registered
+  owner (`User.SignerAddress`), *equals* the wallet address outright (the
+  bare, undeployed identity an account-recovery Branch A swap produces -
+  see "Account recovery" below), or holds a shared-access role on that
+  wallet - see `internal/middleware/signature_auth.go` and `PLAN.md` §12
+  and §13.
+
+  A freshly registered primary wallet is a *counterfactual* Safe: its
+  address is known and can receive funds immediately, but nothing can be
+  executed from it until it's actually deployed on-chain via
+  `POST /v1/users/wallet/deploy` (idempotent - safe to call more than
+  once). See `PLAN.md` §13.11 for exactly which operations require this
+  first.
 
 - **Admin surface** (`/v1/admin/...` across every component - see
   "Admin surface" below): a separate-audience Bearer JWT issued via

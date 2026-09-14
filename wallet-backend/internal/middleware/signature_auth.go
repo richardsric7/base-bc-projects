@@ -12,6 +12,7 @@ import (
 
 	"wallet-backend/internal/apperrors"
 	sharedaccessModels "wallet-backend/internal/components/sharedaccess/models"
+	usersModels "wallet-backend/internal/components/users/models"
 	"wallet-backend/internal/cryptoutil"
 	"wallet-backend/internal/validators"
 )
@@ -45,11 +46,18 @@ const (
 // captured, valid signature indefinitely - the confirmed gap in the
 // original that this design closes rather than reproduces.
 //
-// A request naming a wallet other than the signer's own is authorized
-// only if the signer holds any sharedaccess GroupMember role on that
-// wallet (PLAN.md §12.4) - the finer distinction between view/initiate/
-// approve stays a handler-level concern, exactly as in the original,
-// rather than being duplicated here.
+// Since PLAN.md §13.2, a wallet's own address is a Safe smart-contract
+// account, never the signer's own EOA - so the ordinary case now always
+// has signer != wallet, and is authorized by the signer being that
+// wallet's owning User.SignerAddress (see signerIsPrimaryWalletOwner)
+// rather than by the equal-address fast path below, which mainly exists
+// today for account-recovery Branch A's bare, undeployed identities
+// (PLAN.md §15) where signer and wallet are deliberately the same
+// address. A request naming a wallet the signer neither equals nor owns
+// is authorized only if the signer holds any sharedaccess GroupMember
+// role on that wallet (PLAN.md §12.4) - the finer distinction between
+// view/initiate/approve stays a handler-level concern, exactly as in the
+// original, rather than being duplicated here.
 func SignatureAuth(db *gorm.DB, toleranceSeconds int) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		signer := c.GetHeader(headerSignerAddress)
@@ -99,14 +107,21 @@ func SignatureAuth(db *gorm.DB, toleranceSeconds int) gin.HandlerFunc {
 		walletAddr := common.HexToAddress(wallet).Hex()
 
 		if !strings.EqualFold(signerAddr, walletAddr) {
-			authorized, err := signerHasStandingOn(db, walletAddr, signerAddr)
+			isOwner, err := signerIsPrimaryWalletOwner(db, walletAddr, signerAddr)
 			if err != nil {
 				apperrors.AbortAny(c, err)
 				return
 			}
-			if !authorized {
-				apperrors.Abort(c, apperrors.Forbidden("signer is not authorized to act on this wallet"))
-				return
+			if !isOwner {
+				authorized, err := signerHasStandingOn(db, walletAddr, signerAddr)
+				if err != nil {
+					apperrors.AbortAny(c, err)
+					return
+				}
+				if !authorized {
+					apperrors.Abort(c, apperrors.Forbidden("signer is not authorized to act on this wallet"))
+					return
+				}
 			}
 		}
 
@@ -114,6 +129,24 @@ func SignatureAuth(db *gorm.DB, toleranceSeconds int) gin.HandlerFunc {
 		c.Set(CtxSigner, signerAddr)
 		c.Next()
 	}
+}
+
+// signerIsPrimaryWalletOwner reports whether signerAddr is the
+// User.SignerAddress currently authorized to operate the primary wallet
+// at walletAddr (PLAN.md §13.2) - the ordinary self-service case now that
+// a wallet's own address is a Safe rather than the signer's own EOA. A
+// lookup miss here (walletAddr isn't any user's primary wallet at all -
+// it's a sub-wallet or shared-access group instead) is not an error: the
+// caller falls through to signerHasStandingOn next.
+func signerIsPrimaryWalletOwner(db *gorm.DB, walletAddr, signerAddr string) (bool, error) {
+	var count int64
+	err := db.Model(&usersModels.User{}).
+		Where("LOWER(address) = LOWER(?) AND LOWER(signer_address) = LOWER(?)", walletAddr, signerAddr).
+		Count(&count).Error
+	if err != nil {
+		return false, apperrors.Internal("failed to resolve wallet owner")
+	}
+	return count > 0, nil
 }
 
 // signerHasStandingOn reports whether signerAddr holds any sharedaccess

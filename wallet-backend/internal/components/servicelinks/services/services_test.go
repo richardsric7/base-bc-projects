@@ -70,7 +70,7 @@ func newTestDB(t *testing.T) *gorm.DB {
 func newTestService(t *testing.T) (*Service, *gorm.DB) {
 	t.Helper()
 	db := newTestDB(t)
-	usersSvc := usersServices.New(db, notify.NewConsoleMailer(), "test-recovery-salt", time.Hour)
+	usersSvc := usersServices.New(db, notify.NewConsoleMailer(), "test-recovery-salt", time.Hour, nil, "test-deployer-salt")
 	paymentsSvc := paymentsServices.New(db, (*network.Client)(nil))
 	assetsSvc := assetsServices.New(db, (*network.Client)(nil))
 	tokenizationSvc := tokenizationServices.New(db, fakeTokenizationBlockchain{}, nil, "issuer-salt", "distribution-salt", decimal.Zero)
@@ -88,6 +88,7 @@ func createTestUser(t *testing.T, db *gorm.DB, username, address string, created
 		Username:               username,
 		Email:                  username + "@example.com",
 		Address:                address,
+		SignerAddress:          address,
 		CreatedByServiceLinkID: createdByServiceLinkID,
 	}
 	if err := db.Create(&user).Error; err != nil {
