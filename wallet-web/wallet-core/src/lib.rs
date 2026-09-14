@@ -140,11 +140,15 @@ fn require_unlocked(role: &str) -> Result<[u8; 32], JsValue> {
     })
 }
 
-/// Signs a SIWE message (EIP-191 `personal_sign`) with `role`'s key - used
-/// for the signer's login (PLAN.md §2, §3) and any future shared-access
-/// approval signature.
+/// Signs an arbitrary message (EIP-191 `personal_sign`) with `role`'s key.
+/// Used for wallet-backend's per-request SignatureAuth headers (PLAN.md
+/// §2, §11: `fullPathWithQuery + signerAddress + timestamp`, always
+/// signed with the "signer" role's key) and any future shared-access
+/// approval signature. Renamed from `sign_siwe_message` once SIWE itself
+/// was removed (PLAN.md §11) - this function was always message-agnostic
+/// EIP-191 `personal_sign`, never SIWE-specific itself.
 #[wasm_bindgen]
-pub fn sign_siwe_message(role: &str, message: &str) -> Result<String, JsValue> {
+pub fn sign_request_message(role: &str, message: &str) -> Result<String, JsValue> {
     let secret = require_unlocked(role)?;
     signing::sign_personal_message(&secret, message).map_err(to_js_err)
 }
@@ -161,10 +165,10 @@ pub fn sign_transaction(role: &str, unsigned_tx_json: &str) -> Result<String, Js
 
 /// Signs the PLAN.md §3 "link primary wallet" proof-of-control message
 /// with the **primary wallet's** key specifically (never the signer's) -
-/// a thin, semantically-named wrapper over `sign_siwe_message` so callers
-/// can't accidentally pass the wrong role for this one security-critical
-/// message.
+/// a thin, semantically-named wrapper over `sign_request_message` so
+/// callers can't accidentally pass the wrong role for this one
+/// security-critical message.
 #[wasm_bindgen]
 pub fn sign_link_primary_message(message: &str) -> Result<String, JsValue> {
-    sign_siwe_message("primary", message)
+    sign_request_message("primary", message)
 }

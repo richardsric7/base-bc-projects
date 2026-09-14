@@ -1,7 +1,14 @@
-// A thin fetch wrapper for wallet-backend's REST API (PLAN.md §2). Every
-// call here is a plain JSON request/response - the non-custodial parts
-// (signing) never happen in this file, only in core/walletCoreClient.ts.
+// A thin fetch wrapper for wallet-backend's REST API (PLAN.md §2). Signing
+// itself still happens only in core/walletCoreClient.ts (via the Worker) -
+// this file just knows *when* a request needs a signature and builds the
+// exact message wallet-backend's SignatureAuth middleware expects
+// (PLAN.md §11, internal/middleware/signature_auth.go): every
+// authenticated request signs `fullPathWithQuery + signerAddress +
+// timestamp` with the signer role's key and attaches the result as four
+// headers - there is no session/login step or bearer token in this
+// scheme, unlike the SIWE+JWT approach this replaced.
 import { getNetworkConfig } from '../config/network';
+import { getKnownAddress, signRequestMessage } from '../core/walletCoreClient';
 
 export class ApiError extends Error {
   status: number;
@@ -22,13 +29,47 @@ export function getBaseUrl(): string {
 interface RequestOptions {
   method?: 'GET' | 'POST' | 'DELETE';
   body?: unknown;
-  token?: string | null;
+  /**
+   * The wallet address this request acts on (wallet-backend's
+   * `X-Wallet-Address`) - required for every SignatureAuth-protected
+   * route, omitted for public ones. The request is always signed with
+   * the **signer** role's key (PLAN.md §11), regardless of which wallet
+   * `walletAddress` names - e.g. a payment sent from the primary wallet
+   * is still authorized by the signer's own signature, the same way a
+   * shared-access member acts on a group wallet they don't themselves
+   * own. For a registration request (no wallet exists yet to name),
+   * pass the signer's own address - wallet-backend requires signer ===
+   * wallet in that one case (see usersApi.ts's registerUser).
+   */
+  walletAddress?: string;
+}
+
+async function buildSignatureAuthHeaders(
+  path: string,
+  walletAddress: string,
+): Promise<Record<string, string>> {
+  const signerAddress = await getKnownAddress('signer');
+  if (!signerAddress) {
+    throw new Error('Signer wallet is locked or not set up - unlock it before making this request.');
+  }
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  // Must match wallet-backend's own construction exactly:
+  // c.Request.URL.RequestURI() + signer + timestampStr - i.e. `path`
+  // here already includes any query string, with no method/host/scheme.
+  const message = path + signerAddress + timestamp;
+  const signature = await signRequestMessage('signer', message);
+  return {
+    'X-Signer-Address': signerAddress,
+    'X-Wallet-Address': walletAddress,
+    'X-Signature': signature,
+    'X-Timestamp': timestamp,
+  };
 }
 
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (options.token) {
-    headers.Authorization = `Bearer ${options.token}`;
+  if (options.walletAddress) {
+    Object.assign(headers, await buildSignatureAuthHeaders(path, options.walletAddress));
   }
 
   let response: Response;

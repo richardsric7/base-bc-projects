@@ -14,7 +14,8 @@ import { signTransaction } from '../../core/walletCoreClient';
 // something wallet-web should bake in as a naive default.
 export default function Swap() {
   const isOnline = useIsOnline();
-  const sessionToken = useAppSelector((s) => s.auth.sessionToken);
+  const primaryAddress = useAppSelector((s) => s.wallet.primary.address);
+  const signerUnlocked = useAppSelector((s) => s.wallet.signer.isUnlocked);
 
   const [routerAddress, setRouterAddress] = useState('');
   const [routerAbi, setRouterAbi] = useState('');
@@ -27,8 +28,8 @@ export default function Swap() {
 
   const handleSwap = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!sessionToken) {
-      setError('You must be signed in to swap.');
+    if (!primaryAddress || !signerUnlocked) {
+      setError('Unlock your signer wallet before swapping.');
       return;
     }
     setError('');
@@ -37,13 +38,13 @@ export default function Swap() {
       const args = JSON.parse(argsJson || '[]');
 
       setStatus('building');
-      const unsignedTx = await buildSwap(sessionToken, { routerAddress, routerAbi, method, args, valueWei });
+      const unsignedTx = await buildSwap(primaryAddress, { routerAddress, routerAbi, method, args, valueWei });
 
       setStatus('signing');
       const signedTx = await signTransaction('primary', JSON.stringify(unsignedTx));
 
       setStatus('submitting');
-      const { hash } = await submitSwap(sessionToken, signedTx);
+      const { hash } = await submitSwap(primaryAddress, signedTx);
 
       setTxHash(hash);
       setStatus('done');

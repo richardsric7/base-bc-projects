@@ -8,10 +8,13 @@ export interface User {
   kycStatus: string;
 }
 
-// POST /v1/users (authed) - address comes from the verified SIWE session
-// server-side, never from this body (PLAN.md §2).
-export function registerUser(token: string, username: string, email: string): Promise<User> {
-  return apiRequest<User>('/v1/users', { method: 'POST', token, body: { username, email } });
+// POST /v1/users (SignatureAuth) - the registered address comes from the
+// verified request signature server-side, never from this body (PLAN.md
+// §2/§11/§12). No wallet exists yet to name in X-Wallet-Address, so this
+// is necessarily self-signed: pass the signer's own address as
+// signerAddress, used as both X-Signer-Address and X-Wallet-Address.
+export function registerUser(signerAddress: string, username: string, email: string): Promise<User> {
+  return apiRequest<User>('/v1/users', { method: 'POST', walletAddress: signerAddress, body: { username, email } });
 }
 
 export function getUser(username: string): Promise<User> {
@@ -33,7 +36,7 @@ export class LinkPrimaryNotSupportedError extends Error {
  * showing a raw network error.
  */
 export async function linkPrimaryWallet(
-  token: string,
+  signerAddress: string,
   address: string,
   message: string,
   signature: string,
@@ -41,7 +44,7 @@ export async function linkPrimaryWallet(
   try {
     await apiRequest<void>('/v1/users/wallets/link-primary', {
       method: 'POST',
-      token,
+      walletAddress: signerAddress,
       body: { address, message, signature },
     });
   } catch (err) {

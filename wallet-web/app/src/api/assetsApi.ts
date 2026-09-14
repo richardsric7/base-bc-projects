@@ -24,7 +24,7 @@ export function getBalance(address: string, tokenAddress?: string): Promise<stri
 }
 
 export async function buildApprove(
-  token: string,
+  walletAddress: string,
   tokenAddress: string,
   spender: string,
   amount: string,
@@ -32,11 +32,15 @@ export async function buildApprove(
   await assertOnline();
   return apiRequest<UnsignedTx>('/v1/assets/approve/build', {
     method: 'POST',
-    token,
+    walletAddress,
     body: { tokenAddress, spender, amount },
   });
 }
 
-export function submitApprove(token: string, signedTx: string): Promise<{ hash: string }> {
-  return apiRequest<{ hash: string }>('/v1/assets/approve/submit', { method: 'POST', token, body: { signedTx } });
+export function submitApprove(walletAddress: string, signedTx: string): Promise<{ hash: string }> {
+  return apiRequest<{ hash: string }>('/v1/assets/approve/submit', {
+    method: 'POST',
+    walletAddress,
+    body: { signedTx },
+  });
 }

@@ -699,44 +699,61 @@ Phases 1-13 are implemented as designed above, with the following notes:
   backend/chain the app targets, not what auth scheme it speaks to that
   backend.
 
-## 11. Pending: `wallet-backend`'s auth redesign (tracked, not yet implemented here)
+## 11. `wallet-backend`'s auth redesign - implemented
 
-`wallet-backend/PLAN.md` §12 documents a decision to replace SIWE+session-
-JWT with the original Trovo app's own per-request signature model,
-restored on Base's cryptography (personal_sign/secp256k1 in place of
-ed25519, with the same two-header signer/wallet split). Once that lands
-server-side, this app's client code needs a corresponding change:
+`wallet-backend/PLAN.md` §12 replaced SIWE+session-JWT with a per-request
+signature model (personal_sign/secp256k1, a signer/wallet header split).
+This app's client code has been updated to match:
 
-- Remove `api/siwe.ts`, `api/authFlow.ts`'s SIWE-specific functions,
-  `api/authApi.ts`'s nonce/verify calls, `authSlice.ts`'s `sessionToken`,
-  and the onboarding wizard's separate "sign in" step (§3's flow moves
-  straight from vault creation to registration - no login round trip).
-- Add a per-request signing step to `api/httpClient.ts`: build
-  `fullPathWithQuery + signerAddress + timestamp`, sign it with the
-  **signer** role's key, attach it and the wallet/timestamp headers
-  (`X-Signer-Address`/`X-Wallet-Address`/`X-Signature`/`X-Timestamp`, or
-  whatever `wallet-backend` settles on) to every authenticated call.
-- `wallet-core`'s `sign_siwe_message` (`lib.rs`) is already
-  message-agnostic EIP-191 personal_sign despite its name - it can sign
-  this new message shape unchanged, or get renamed to
-  `sign_request_message` for clarity once SIWE-specific signing is gone
-  entirely. No change needed to `vault.rs`/`mnemonic.rs`/`signing.rs`
-  themselves - this is a client-orchestration change, not a cryptographic
-  one.
-- One property is traded away, not lost by oversight: SIWE's `domain`
-  field lets a signing wallet show "you are signing in to
-  wallet.example.com" - a real phishing signal. A generic
-  path+address+timestamp message has no such binding. This doesn't matter
-  for this app's own embedded signer (§4.1 - it already signs silently in
-  a Worker with no human-reviewed prompt either way), but would matter if
-  a browser-extension wallet (MetaMask et al.) were ever added as a second
-  client against the same API, since that class of client *does* show the
-  user what they're signing.
+- Removed `api/siwe.ts`, `api/authFlow.ts` (deleted entirely - both were
+  SIWE-specific), `api/authApi.ts` (deleted - its only exports were the
+  nonce/verify calls), `authSlice.ts`'s `sessionToken` (the slice now
+  only tracks `username`, set by a new `profileRegistered` action), and
+  the onboarding wizard's separate "sign in" step - it moves straight
+  from `createVault('signer', ...)` to checking whether a profile
+  already exists (`getUser`) or registering one, no login round trip.
+- `api/httpClient.ts` now signs every authenticated request itself:
+  `apiRequest`'s `token` option became `walletAddress` (the wallet the
+  request acts on, wallet-backend's `X-Wallet-Address`); when present it
+  builds `path + signerAddress + timestamp` (`path` already includes any
+  query string, matching `internal/middleware/signature_auth.go`'s
+  `c.Request.URL.RequestURI() + signer + timestampStr` exactly), signs it
+  with the **signer** role's key via the Worker, and attaches
+  `X-Signer-Address`/`X-Wallet-Address`/`X-Signature`/`X-Timestamp`. Every
+  call site in `usersApi.ts`/`assetsApi.ts`/`paymentsApi.ts`/
+  `swapsApi.ts` and their callers (`OnboardingWizard.tsx`, `Send.tsx`,
+  `Swap.tsx`) updated accordingly - `Send`/`Swap` now gate on the signer
+  vault being unlocked and a primary wallet address being known, rather
+  than a session token.
+- `wallet-core`'s `sign_siwe_message` renamed to `sign_request_message`
+  (`lib.rs`) now that SIWE-specific signing is gone entirely - it was
+  always message-agnostic EIP-191 `personal_sign`, so this is a rename
+  only, no behavior change; `wasm-pkg` rebuilt via `wasm-pack build
+  --release --target web`. `vault.rs`/`mnemonic.rs`/`signing.rs`
+  themselves needed no change - this was a client-orchestration change,
+  not a cryptographic one. All 21 `wallet-core` Rust tests still pass.
+- The property called out below as traded away (SIWE's `domain` binding)
+  is accepted as-is - still true, still only matters if a
+  browser-extension wallet is ever added as a second client.
+- **Verified with a real, live round trip**, not just a build/typecheck:
+  booted an actual `wallet-backend` instance (SQLite) locally, built this
+  app against it, and drove the real onboarding UI end-to-end with
+  Playwright + Chromium (real WASM signing in the real Worker, not
+  mocked) - `GET /v1/users/:address` correctly 404s for a fresh signer
+  address, and `POST /v1/users` returns `201 Created` with the
+  SignatureAuth headers this app now builds, confirming the message
+  format matches wallet-backend's middleware exactly and the flow
+  reaches the primary-wallet step with no login step in between.
 
-Not implemented here - tracked as a dependency this app's own
-implementation will need once `wallet-backend`'s side lands, the same way
-`wallet-payment-history-engine/PLAN.md` §6 and this file's own §3 each
-flagged their own `wallet-backend` dependencies.
+One property is traded away, not lost by oversight: SIWE's `domain`
+field lets a signing wallet show "you are signing in to
+wallet.example.com" - a real phishing signal. A generic
+path+address+timestamp message has no such binding. This doesn't matter
+for this app's own embedded signer (§4.1 - it already signs silently in
+a Worker with no human-reviewed prompt either way), but would matter if
+a browser-extension wallet (MetaMask et al.) were ever added as a second
+client against the same API, since that class of client *does* show the
+user what they're signing.
 
 ## 12. `wallet-core` gains an FFI target and an EIP-712 signer (tracked, shared with `wallet-mobile`)
 

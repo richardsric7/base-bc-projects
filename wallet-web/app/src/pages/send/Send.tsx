@@ -13,7 +13,8 @@ import { signTransaction } from '../../core/walletCoreClient';
 // itself immediately before proceeding regardless.
 export default function Send() {
   const isOnline = useIsOnline();
-  const sessionToken = useAppSelector((s) => s.auth.sessionToken);
+  const primaryAddress = useAppSelector((s) => s.wallet.primary.address);
+  const signerUnlocked = useAppSelector((s) => s.wallet.signer.isUnlocked);
   const [tokens, setTokens] = useState<CuratedToken[]>([]);
   const [destination, setDestination] = useState('');
   const [amount, setAmount] = useState('');
@@ -30,22 +31,22 @@ export default function Send() {
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!sessionToken) {
-      setError('You must be signed in to send a payment.');
+    if (!primaryAddress || !signerUnlocked) {
+      setError('Unlock your signer wallet before sending a payment.');
       return;
     }
     setError('');
     setTxHash('');
     try {
       setStatus('building');
-      const unsignedTx = await buildPayment(sessionToken, destination, amount, tokenAddress || undefined);
+      const unsignedTx = await buildPayment(primaryAddress, destination, amount, tokenAddress || undefined);
 
       setStatus('signing');
       const signedTx = await signTransaction('primary', JSON.stringify(unsignedTx));
 
       setStatus('submitting');
       const idempotencyKey = crypto.randomUUID();
-      const record = await submitPayment(sessionToken, idempotencyKey, signedTx, destination, amount, tokenAddress || undefined);
+      const record = await submitPayment(primaryAddress, idempotencyKey, signedTx, destination, amount, tokenAddress || undefined);
 
       setTxHash(record.txHash);
       setStatus('done');

@@ -28,7 +28,7 @@ export interface PaymentHistoryRecord {
 }
 
 export async function buildPayment(
-  token: string,
+  walletAddress: string,
   destination: string,
   amount: string,
   tokenAddress?: string,
@@ -37,13 +37,13 @@ export async function buildPayment(
   await assertOnline(); // PLAN.md §6.4: re-verified here, not just at the UI layer
   return apiRequest<UnsignedTx>('/v1/payments/build', {
     method: 'POST',
-    token,
+    walletAddress,
     body: { destination, tokenAddress: tokenAddress ?? '', amount, nonce },
   });
 }
 
 export function submitPayment(
-  token: string,
+  walletAddress: string,
   idempotencyKey: string,
   signedTx: string,
   destination: string,
@@ -52,7 +52,7 @@ export function submitPayment(
 ): Promise<PaymentHistoryRecord> {
   return apiRequest<PaymentHistoryRecord>('/v1/payments/submit', {
     method: 'POST',
-    token,
+    walletAddress,
     body: { idempotencyKey, signedTx, destination, tokenAddress: tokenAddress ?? '', amount },
   });
 }

@@ -13,12 +13,11 @@ import {
   createVault,
   signLinkPrimaryMessage,
 } from '../../core/walletCoreClient';
-import { signInWithSiwe } from '../../api/authFlow';
 import { registerUser, linkPrimaryWallet, LinkPrimaryNotSupportedError, getUser } from '../../api/usersApi';
 import { ApiError } from '../../api/httpClient';
 import { useAppDispatch } from '../../store/hooks';
 import { vaultCreated, setPrimarySameAsSigner } from '../../store/walletSlice';
-import { signedIn } from '../../store/authSlice';
+import { profileRegistered } from '../../store/authSlice';
 
 type Step =
   | 'choose-signer'
@@ -49,7 +48,6 @@ export default function OnboardingWizard() {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [signerAddress, setSignerAddress] = useState('');
-  const [sessionToken, setSessionToken] = useState('');
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [primaryNote, setPrimaryNote] = useState('');
@@ -93,14 +91,14 @@ export default function OnboardingWizard() {
       setSignerAddress(address);
       dispatch(vaultCreated({ role: 'signer', address }));
 
-      const { token } = await signInWithSiwe('signer', address);
-      setSessionToken(token);
-      dispatch(signedIn({ sessionToken: token, username: null }));
-
-      // If a profile already exists for this address (re-importing a
-      // known wallet), skip straight to primary-wallet setup.
+      // No login round trip (PLAN.md §11) - every request is signed
+      // independently, so a freshly-created (or re-imported) signer
+      // vault can call the API immediately. If a profile already exists
+      // for this address (re-importing a known wallet), skip straight to
+      // primary-wallet setup.
       try {
-        await getUser(address);
+        const user = await getUser(address);
+        dispatch(profileRegistered({ username: user.username }));
         setStep('primary-choice');
       } catch {
         setStep('account');
@@ -110,8 +108,8 @@ export default function OnboardingWizard() {
   const handleAccountSubmit = () =>
     runStep(async () => {
       if (!username || !email) throw new Error('Username and email are required.');
-      const user = await registerUser(sessionToken, username, email);
-      dispatch(signedIn({ sessionToken, username: user.username }));
+      const user = await registerUser(signerAddress, username, email);
+      dispatch(profileRegistered({ username: user.username }));
       setStep('primary-choice');
     });
 
@@ -163,7 +161,7 @@ export default function OnboardingWizard() {
       try {
         const message = `Link ${address} as the primary wallet for signer ${signerAddress}.`;
         const signature = await signLinkPrimaryMessage(message);
-        await linkPrimaryWallet(sessionToken, address, message, signature);
+        await linkPrimaryWallet(signerAddress, address, message, signature);
         setPrimaryNote('Primary wallet linked with wallet-backend.');
       } catch (err) {
         if (err instanceof LinkPrimaryNotSupportedError || (err instanceof ApiError && err.status === 404)) {

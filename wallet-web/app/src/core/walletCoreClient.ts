@@ -90,8 +90,13 @@ export function getKnownAddress(role: WalletRole): Promise<string | null> {
   return call({ type: 'GET_KNOWN_ADDRESS', role }).then((r) => r.address);
 }
 
-export function signSiweMessage(role: WalletRole, message: string): Promise<string> {
-  return call({ type: 'SIGN_SIWE', role, message }).then((r) => r.signature);
+/** Signs an arbitrary message (EIP-191 personal_sign) with `role`'s key -
+ * used for wallet-backend's per-request SignatureAuth headers (PLAN.md
+ * §11: `fullPathWithQuery + signerAddress + timestamp`, always signed
+ * with the "signer" role's key regardless of which wallet a request acts
+ * on) and any future shared-access approval signature. */
+export function signRequestMessage(role: WalletRole, message: string): Promise<string> {
+  return call({ type: 'SIGN_MESSAGE', role, message }).then((r) => r.signature);
 }
 
 export function signTransaction(role: WalletRole, unsignedTxJson: string): Promise<string> {

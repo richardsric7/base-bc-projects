@@ -18,7 +18,7 @@ export type WorkerRequest =
   | { type: 'IS_UNLOCKED'; role: WalletRole }
   | { type: 'HAS_VAULT'; role: WalletRole }
   | { type: 'GET_KNOWN_ADDRESS'; role: WalletRole }
-  | { type: 'SIGN_SIWE'; role: WalletRole; message: string }
+  | { type: 'SIGN_MESSAGE'; role: WalletRole; message: string }
   | { type: 'SIGN_TRANSACTION'; role: WalletRole; unsignedTxJson: string }
   | { type: 'SIGN_LINK_PRIMARY'; message: string }
   | { type: 'WIPE'; role: WalletRole };
@@ -34,7 +34,7 @@ export interface WorkerResponsePayloads {
   IS_UNLOCKED: { unlocked: boolean };
   HAS_VAULT: { hasVault: boolean };
   GET_KNOWN_ADDRESS: { address: string | null };
-  SIGN_SIWE: { signature: string };
+  SIGN_MESSAGE: { signature: string };
   SIGN_TRANSACTION: { signedTx: string };
   SIGN_LINK_PRIMARY: { signature: string };
   WIPE: Record<string, never>;

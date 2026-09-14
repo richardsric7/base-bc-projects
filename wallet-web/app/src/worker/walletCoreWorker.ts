@@ -57,10 +57,10 @@ async function handle(message: WorkerMessage): Promise<WorkerReply> {
         await putVaultRecord(record);
         // Unlock immediately using the password already in hand, so a
         // freshly-created wallet is ready to sign right away (e.g. the
-        // SIWE sign-in that follows signer creation) without asking for
-        // the same password a second time in the same flow - not a new
-        // capability, since creating the vault already required the
-        // plaintext phrase.
+        // registration request that follows signer creation) without
+        // asking for the same password a second time in the same flow -
+        // not a new capability, since creating the vault already
+        // required the plaintext phrase.
         walletCore.unlock(message.role, recordJson, message.password);
         return { id: message.id, ok: true, result: { address: record.address } };
       }
@@ -104,8 +104,8 @@ async function handle(message: WorkerMessage): Promise<WorkerReply> {
         const record = await getVaultRecord(message.role);
         return { id: message.id, ok: true, result: { address: record?.address ?? null } };
       }
-      case 'SIGN_SIWE': {
-        const signature = walletCore.sign_siwe_message(message.role, message.message);
+      case 'SIGN_MESSAGE': {
+        const signature = walletCore.sign_request_message(message.role, message.message);
         return { id: message.id, ok: true, result: { signature } };
       }
       case 'SIGN_TRANSACTION': {

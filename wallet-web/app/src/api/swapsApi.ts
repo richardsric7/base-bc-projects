@@ -18,11 +18,11 @@ export interface BuildSwapInput {
   nonce?: number;
 }
 
-export async function buildSwap(token: string, input: BuildSwapInput): Promise<UnsignedTx> {
+export async function buildSwap(walletAddress: string, input: BuildSwapInput): Promise<UnsignedTx> {
   await assertOnline();
-  return apiRequest<UnsignedTx>('/v1/swaps/build', { method: 'POST', token, body: input });
+  return apiRequest<UnsignedTx>('/v1/swaps/build', { method: 'POST', walletAddress, body: input });
 }
 
-export function submitSwap(token: string, signedTx: string): Promise<{ hash: string }> {
-  return apiRequest<{ hash: string }>('/v1/swaps/submit', { method: 'POST', token, body: { signedTx } });
+export function submitSwap(walletAddress: string, signedTx: string): Promise<{ hash: string }> {
+  return apiRequest<{ hash: string }>('/v1/swaps/submit', { method: 'POST', walletAddress, body: { signedTx } });
 }
