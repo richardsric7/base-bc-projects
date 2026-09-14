@@ -10,8 +10,8 @@ This app is the mobile counterpart to `wallet-web` - same backend
 (`wallet-backend`), same visual identity as the original
 `trovo-wallet-monorepo/mobile` app, same business logic wherever Base's
 blockchain model allows it to survive unchanged, ported wherever it
-doesn't (sub-wallets, shared access, servicelinks - see `wallet-backend/
-PLAN.md` §12-§14, which this plan depends on throughout).
+doesn't (sub-wallets, shared access, servicelinks, wallet recovery - see
+`wallet-backend/PLAN.md` §12-§15, which this plan depends on throughout).
 
 ## 1. Source audit summary (what the original actually is)
 
@@ -108,10 +108,21 @@ Phase 106-109) with exactly the primitives a mobile client needs:
 (`mnemonic.rs`), `encrypt_vault`/`unlock`/`lock`/`lock_all`/`is_unlocked`
 (`vault.rs`, an encrypted-at-rest vault keyed by password, one unlocked
 role's key ever held in memory, zeroized on lock), and
-`sign_siwe_message`/`sign_transaction`/`sign_link_primary_message`
-(`signing.rs`). This is real, working code already exposed via
-`wasm-bindgen` for the browser - the task here is exposing the *same*
-crate to Dart, not writing a second implementation.
+`sign_siwe_message`/`sign_transaction` (`signing.rs`). This is real,
+working code already exposed via `wasm-bindgen` for the browser - the
+task here is exposing the *same* crate to Dart, not writing a second
+implementation.
+
+**Only one role/key exists: the signer** - `wallet-web/PLAN.md` §3 was
+corrected to drop a "primary wallet" mnemonic/role and its
+`sign_link_primary_message` function entirely, once `wallet-backend/
+PLAN.md` §13 made the primary wallet a Safe smart-contract account with
+no private key of its own (needed for §15's wallet-recovery feature -
+recovering a lost signer means *replacing* the Safe's owner, which only
+makes sense if the wallet is a Safe rather than a bare EOA). The same
+correction applies here unchanged: this app only ever generates, stores,
+and unlocks one mnemonic per user, and the primary wallet's address is
+computed (CREATE2), not imported.
 
 ### 4.1 FFI binding tool
 
@@ -132,8 +143,8 @@ target.
 | `generate_mnemonic`, `validate_mnemonic`, `derive_preview_address` | Reuse as-is |
 | `encrypt_vault`, `unlock`, `lock`, `lock_all`, `is_unlocked` | Reuse as-is - this becomes mobile's answer to the original's plaintext-sembast problem (§4.3) |
 | `sign_siwe_message` | Reused for the new per-request signature scheme too, despite the name - `wallet-backend/PLAN.md` §12.6 already flags this function as message-agnostic EIP-191 `personal_sign`; consider the rename to `sign_request_message` mentioned there happening once, shared by both apps, not twice |
-| `sign_transaction` (EIP-1559) | Reused for ordinary payment/swap submission |
-| **New: EIP-712 typed-data signing** | Needed once `wallet-backend/PLAN.md` §13's Safe-based shared-access lands - approving a pending action means signing a `SafeTxHash` (EIP-712), not a plain `personal_sign` message. This is a `wallet-core` gap on **both** platforms today (`wallet-web` doesn't have it either) - tracked here and in `wallet-web/PLAN.md` as one shared addition to `signing.rs`, not a mobile-only one. |
+| `sign_transaction` (EIP-1559) | Narrower role than originally scoped - kept for any plain-EOA signing need, but no longer how primary-wallet or sub-wallet payments/swaps are authorized (see below) |
+| **New: EIP-712 typed-data signing** (`sign_typed_data`) | Needed for **every** payment or swap this app submits, not just shared-access approvals - once the primary wallet is a Safe (`wallet-backend/PLAN.md` §13.3, extended from sub-wallets-only by §15's recovery design), authorizing any transaction sourced from it means signing that transaction's `SafeTxHash` (EIP-712), not a plain `personal_sign`/raw EIP-1559 signature. This is a `wallet-core` gap on **both** platforms today (`wallet-web` doesn't have it either) - tracked here and in `wallet-web/PLAN.md` §12 as one shared addition to `signing.rs`, not a mobile-only one. |
 
 ### 4.3 Fixing the original's plaintext-storage gap, not reproducing it
 
@@ -218,7 +229,36 @@ handles carries over:
 - `register`/`tokenizedAsset` carry over as their own existing flows,
   unaffected by this redesign.
 
-## 9. Business-logic parity map
+## 9. Wallet recovery: screens and flow
+
+The original's `screens/account_recovery/` (§1) covers what
+`wallet-backend/PLAN.md` §15 calls wallet-**signer** recovery (distinct
+from a forgotten-username flow) - a paid, opt-in feature letting a user
+who's lost their device/key regain control of their *existing* wallets,
+same address, new key. This port needs two screen groups, not ported
+line-for-line from the original but matching its actual identity-proof
+factors:
+
+- **Enable/disable settings**: security-question setup, a plain-language
+  explanation of what the recovery service can and cannot do (especially
+  worth advertising if `wallet-backend/PLAN.md` §15.3's recommended Safe
+  Guard - restricting the recovery service to owner-management calls
+  only, never a direct transfer - is implemented), and the one-off fee
+  disclosure.
+- **Recovery execution - reachable without being logged in**, since by
+  definition the user has no working signer key: security questions,
+  email OTP, then `wallet-core` generates a **fresh** mnemonic/vault
+  right there in this flow (before any successful login exists) and
+  produces a `personal_sign` proof from that new key
+  (`wallet-backend/PLAN.md` §15.5 step 1). Per §15.2 of that document,
+  nothing about sub-wallets or shared-access memberships needs touching
+  in this flow or its screens - the backend's nested-ownership design
+  means swapping the primary wallet's signer is the only on-chain change
+  that ever happens, so there's no "select which wallets to recover"
+  step to build, unlike what the original's own multi-wallet-loop
+  behavior might suggest.
+
+## 10. Business-logic parity map
 
 | Original (Dart/Flutter, Stellar) | wallet-mobile (Dart/Flutter, Base) | Where it lives |
 |---|---|---|
@@ -230,19 +270,21 @@ handles carries over:
 | Shared-access grant/approve screens | same screens, EIP-712 approval signing | app screen + `wallet-core` |
 | `processDeepLink` action switch | same switch, `+event` case, new QR source | app (`storage/`) |
 | Theme (`custom_bloc_observer/`) | ported palette/typography, same token names where practical | app (`theme/`) |
+| `screens/account_recovery/` | wallet-signer recovery (§9) | app screen + `wallet-core` + `wallet-backend` §15 |
 
-## 10. Cross-project dependencies (tracked here, resolved elsewhere)
+## 11. Cross-project dependencies (tracked here, resolved elsewhere)
 
 - Needs `wallet-backend/PLAN.md` §12 (per-request signature auth), §13
-  (Safe-based sub-wallets/shared-access), and §14 (servicelinks QR)
-  implemented and stable before this app's networking/sub-wallet/
-  shared-access/servicelinks layers can be built against real endpoints.
+  (Safe-based sub-wallets/shared-access, now covering the primary wallet
+  too), §14 (servicelinks QR), and §15 (wallet recovery) implemented and
+  stable before this app's networking/sub-wallet/shared-access/
+  servicelinks/recovery layers can be built against real endpoints.
 - Needs `wallet-core` to grow: FFI bindings (§4.1), EIP-712 typed-data
   signing (§4.2 - shared with `wallet-web`, tracked in that project's own
   `PLAN.md` too so it isn't built twice), and the request-signing
   function rename if `wallet-backend`/`wallet-web` settle on one.
 
-## 11. Open decisions
+## 12. Open decisions
 
 - `flutter_rust_bridge` vs `uniffi` for the FFI layer (§4.1 recommends
   the former).
@@ -253,7 +295,7 @@ handles carries over:
 - `APPROVER` vs `AUTHORIZER` naming, shared with `wallet-backend/
   PLAN.md` §13.8/§13.9.
 
-## 12. Phased build roadmap (not started - design only)
+## 13. Phased build roadmap (not started - design only)
 
 | Phase | Scope | Depends on |
 |---|---|---|
@@ -264,7 +306,8 @@ handles carries over:
 | 5 | Dashboard, send/receive, swap - straightforward ports | Phase 4 |
 | 6 | Sub-wallets (§6), shared access (§7) | `wallet-backend` §13 shipped |
 | 7 | Servicelinks QR scanning + approval screens, including the new `EVENT` case (§8) | `wallet-backend` §14 shipped |
-| 8 | KYC, subscriptions, asset tokenization, account recovery, backup/delete-account | Phase 5 |
-| 9 | Full integration pass against Base Sepolia; push | Everything above |
+| 8 | Wallet recovery enable/disable + execution screens (§9) | `wallet-backend` §15 shipped |
+| 9 | KYC, subscriptions, asset tokenization, backup/delete-account | Phase 5 |
+| 10 | Full integration pass against Base Sepolia; push | Everything above |
 
 Implementation does not begin until explicitly authorized.

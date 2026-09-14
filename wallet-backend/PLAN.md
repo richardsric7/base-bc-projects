@@ -1777,17 +1777,55 @@ address to *be a smart contract*, not an EOA.
 
 ### 13.3 Decision: Safe smart accounts as the one primitive for both features
 
-**Recommendation**: every sub-wallet - and, by extension, every wallet
-that ever needs more than one controlling address - is deployed as a
-[Safe](https://safe.global) smart account (the audited, canonical
-M-of-N smart contract wallet, deployed on Base mainnet and Sepolia at
-well-known cross-chain addresses via its own CREATE2 factory). This one
-primitive replaces *both* of the original's two different mechanisms
-(the ad hoc "add primary as signer" sub-wallet trick, and the fuller
-`SetOptions`-based shared-access signer management) with a single
-concept: **a sub-wallet is an address with an owner set and a threshold,
-full stop - the same account, whether it currently has one owner (just
-the primary) or several (once shared access is enabled).**
+**Recommendation, corrected from an earlier draft of this section**:
+**every wallet - including the primary, not just sub-wallets** - is
+deployed as a [Safe](https://safe.global) smart account (the audited,
+canonical M-of-N smart contract wallet, deployed on Base mainnet and
+Sepolia at well-known cross-chain addresses via its own CREATE2 factory).
+An earlier pass at this section treated the primary wallet as a bare EOA
+with no contract involved, which works fine in isolation but breaks once
+wallet recovery (§15) is accounted for: recovery only makes sense if the
+wallet whose controlling key is being replaced can *have* its controlling
+key replaced, and a bare EOA cannot - an EVM address, unlike a Stellar
+account, *is* its key. Making the primary wallet a Safe too, with a
+separate signer EOA behind it, is what makes recovery possible at all,
+and - see below - turns out to simplify everything else in this section
+as well, not just enable §15.
+
+This one primitive (every wallet is a Safe) replaces *all three* of the
+original's separate mechanisms (Stellar's native account-level signer
+weights used for: the primary wallet's own key, the ad hoc "add primary
+as signer" sub-wallet trick, and the fuller `SetOptions`-based
+shared-access signer management) with a single concept: **every wallet -
+primary, sub-wallet, or shared-access group - is an address with an
+owner set and a threshold, full stop.** What differs between them is not
+their type, only what currently sits in that owner set.
+
+**The load-bearing mechanic: every wallet's owner is the controlling
+user's *primary wallet address*, never a raw signer key.** Safe supports
+EIP-1271 "contract signatures" - an owner can itself be a smart contract
+rather than an EOA, in which case Safe resolves a submitted signature by
+calling that contract's own `isValidSignature`. Using this
+recursively - a sub-wallet's owner is the primary wallet's Safe address;
+a shared-access wallet's member entries are each participant's primary
+wallet Safe address - means:
+- **The primary wallet's own internal owner (the actual signer EOA) is
+  the *only* raw key referenced anywhere in the whole system.** Every
+  other wallet a user controls or has been granted access to points at
+  their permanent primary-wallet address, and resolves through it.
+- **Rotating a user's signer key touches exactly one Safe: their own
+  primary wallet.** No sub-wallet, and no shared-access wallet they
+  participate in, needs any on-chain update when this happens - the next
+  time anything checks "is this a valid signature from that owner," it
+  transparently re-resolves through the primary wallet's *current*
+  internal owner. This is what makes wallet recovery (§15) collapse from
+  the original's "loop over every eligible wallet and individually swap
+  its signer" into "swap the signer on one Safe, done" - and it
+  simultaneously explains, precisely, why "the user you want to grant
+  shared access to must already have their wallet activated on-chain"
+  (this section's user-supplied requirement): EIP-1271 resolution calls
+  a contract's code, and a counterfactual (undeployed) Safe has none to
+  call. §13.11 spells out every activation-order consequence of this.
 
 Why Safe over a bespoke minimal multisig contract: this is a financial
 custody product, and Safe is the most heavily audited, most widely
@@ -1800,12 +1838,24 @@ recommendation, not a foreclosed decision - flag if a custom minimal
 contract is wanted instead once implementation starts, but Safe is what
 the rest of this section assumes.
 
-**A structural simplification Base's design gives us, not something we
-have to engineer**: a Safe's initial owner set is passed as constructor/
-initializer data to a *permissionless* factory call
-(`createProxyWithNonce`) - there is no "existing owner" yet at deployment
-time, so nothing needs to co-sign the act of setting the initial owners.
-Concretely, this means:
+**One and only one raw keypair still needs to exist: the signer behind
+the primary wallet's Safe.** Registration generates it exactly as
+before - a mnemonic-derived EOA - and that EOA becomes the *sole initial
+owner* of the primary wallet's own Safe (`owners: [signerEOA], threshold:
+1`). This is the direct continuation of the original's `User.PublicKey`
+(permanent identity) vs. `User.PrimarySigner` (the currently-operating
+key) split, which an earlier draft of this section had incorrectly
+collapsed into one and the same address - reinstated here as `User.Address`
+(the primary wallet's Safe address, permanent) vs. a new field carrying
+the signer EOA (replaceable, exactly what §15's recovery feature
+replaces).
+
+**A structural simplification Base's design gives us for every wallet
+*other than* the primary, not something we have to engineer**: a Safe's
+initial owner set is passed as constructor/initializer data to a
+*permissionless* factory call (`createProxyWithNonce`) - there is no
+"existing owner" yet at deployment time, so nothing needs to co-sign the
+act of setting the initial owners. Concretely, this means:
 - **The mobile app never needs to generate a throwaway keypair for a new
   sub-wallet at all.** On Stellar, the new account's address *was* a
   keypair's public key, so one had to exist somewhere, if only to be
@@ -1814,42 +1864,55 @@ Concretely, this means:
   keypair, ever. The backend can pick the salt itself.
 - **There is no second signature to collect at sub-wallet creation.**
   Where the original needs `PrimarySignature` *and* `SubWalletSignature`
-  before submitting, deploying a Safe with `owners: [primaryAddress],
+  before submitting, deploying a Safe with `owners: [primaryWalletAddress],
   threshold: 1` needs zero owner signatures - only an authenticated
   *request* from the primary asking for it (via §12's per-request
   signature auth), not a transaction-level co-signature from a wallet
-  that doesn't exist yet.
+  that doesn't exist yet. Note the owner named here is the **primary
+  wallet's Safe address**, not the signer EOA directly - the nested
+  EIP-1271 mechanic described above.
 - This satisfies "disable the sub-wallet from signing its own
   transactions" more strictly than the original's own audited behavior
   (§13.1) does for ordinary sub-wallets: there is no sub-wallet key to
   disable, because one is never created.
 - The address is knowable **before** deployment (a standard "counterfactual"
   Safe) - it can be shown to the user, and can even receive deposits,
-  before the contract is actually deployed on-chain. Deployment can be
-  deferred to the wallet's first outgoing transaction if desired, saving
-  the deployment gas entirely for a sub-wallet that's only ever a deposit
-  address.
+  before the contract is actually deployed on-chain. A sub-wallet can
+  even be *deployed* naming an as-yet-undeployed primary wallet as its
+  owner (the constructor doesn't check that the owner address has code)
+  - but it cannot be *operated* (any `execTransaction` against it) until
+  the primary wallet is actually deployed, since resolving the nested
+  EIP-1271 signature requires code to call. §13.11 covers this and every
+  other activation-order consequence precisely.
 
 ### 13.4 Schema mapping
 
 | Original | Base equivalent |
 |---|---|
-| `User.PublicKey`/`PrimarySigner` (identical at registration) | `User.Address` (already exists) - the primary wallet **is** the user's EOA, no contract involved |
-| `UserWallet.ID == Signer` ⇒ primary wallet | Primary wallet: `Address == User.Address`, no Safe deployment - it's the bare EOA |
-| `UserWallet.ID` (sub-wallet address, a keypair) | Sub-wallet: `Address` = the Safe's CREATE2 address (never a keypair) |
-| `UserWallet.Signer` | Not meaningful the same way once ownership is a Safe owner *set* rather than a single delegate - see below |
+| `User.PublicKey` (permanent identity) | `User.Address` (already exists) - the primary wallet's **Safe** CREATE2 address, corrected from an earlier draft's "it's the bare EOA" |
+| `User.PrimarySigner` (the currently-operating key) | New field, e.g. `User.SignerAddress` - the EOA that is currently the primary wallet Safe's sole (or, post-recovery-enrollment, one of two) owner. This is the field §15's recovery feature replaces; `User.Address` never changes |
+| `UserWallet.ID == Signer` ⇒ primary wallet | Primary wallet: a `ClosedGroup` row whose `Address == User.Address`, `owners: [User.SignerAddress]`, `threshold: 1` - deployed as a Safe like everything else, not a bare EOA |
+| `UserWallet.ID` (sub-wallet address, a keypair) | Sub-wallet: `Address` = its own Safe's CREATE2 address (never a keypair) |
+| `UserWallet.Signer` | `GroupMember.MemberAddress` for the entry representing "the wallet's owner" - and this is always the owning user's **primary wallet Safe address** (`User.Address`), never their signer EOA directly. Same rule for every `GroupMember` row on any shared-access wallet: it names participants by their permanent primary-wallet identity, resolved through nested EIP-1271, so a participant's own signer rotation (their own recovery event, §15) never requires touching a wallet they merely participate in |
 | `SharedAccessEnabled`, `NumberOfApprovalsNeeded` | `ClosedGroup.Disabled` (inverted), `ClosedGroup.Threshold` - **already exist** in the built `sharedaccess` component, reusable as-is |
-| `WalletPermission` (grantee, wallet, permission) | `GroupMember` (`GroupID`, `MemberAddress`, `Role`) - **already exists**, `GroupRole` enum already has `INITIATOR`/`APPROVER`/`VIEW_ONLY` |
+| `WalletPermission` (grantee, wallet, permission) | `GroupMember` (`GroupID`, `MemberAddress`, `Role`) - **already exists**, `GroupRole` enum already has `INITIATOR`/`APPROVER`/`VIEW_ONLY`. `MemberAddress` semantics corrected per the row above |
 | `PendingAuth` | `PendingAction` - **already exists**, needs the gaps in §13.7 closed |
 | `PendingTransactionSignature` | `PendingActionApproval` - **already exists** |
 
 **A model-level decision this section proposes**: fold "sub-wallet" and
 "shared-access group" into the *same* table rather than keeping them as
 the original's two separate concepts (`UserWallet` vs `ClosedGroup`).
-Every wallet beyond the primary is a `ClosedGroup` row from the moment
-it's created - a freshly created sub-wallet is simply a group with one
-member (the primary, role `INITIATOR`+`APPROVER` combined, threshold 1);
-"enabling shared access" is just adding more `GroupMember` rows and
+**Every** wallet - the primary included - is a `ClosedGroup` row from the
+moment it's created. The primary wallet's row has one member: the
+signer EOA itself (the one place a raw key, not a nested primary-wallet
+reference, is the `MemberAddress` - it has to be, since it's the root of
+the whole resolution chain). Every other wallet's row - sub-wallet or
+shared-access group - has member(s) that are primary-wallet addresses
+(§13.3's nested EIP-1271 mechanic), never raw signer EOAs. A freshly
+created sub-wallet is simply a group with one member (the creating
+user's primary wallet address, role `INITIATOR`+`APPROVER` combined,
+threshold 1); "enabling shared access" is just adding more `GroupMember`
+rows (each naming another participant's *primary wallet* address) and
 raising `Threshold`, not a different feature bolted onto a different
 table. This removes the original's two-different-mechanisms design
 entirely rather than porting it twice.
@@ -1877,26 +1940,37 @@ the backend that submits the call is honest.
 
 ### 13.6 Sub-wallet creation flow on Base
 
+0. **Precondition**: the requesting user's primary wallet must already
+   be deployed on-chain - see §13.11. The initial owner named in step 2
+   is the primary wallet's *Safe address*, and while the sub-wallet's own
+   deployment doesn't strictly require that address to already have code
+   (a constructor argument is just a value), the sub-wallet cannot
+   actually be *used* until it does, and the funding transfer in step 3
+   (if sourced from the primary's own balance, §13.7) cannot execute at
+   all without it.
 1. Primary requests sub-wallet creation (authenticated via §12's
    per-request signature, naming a tag/description - no public key to
    submit, since none needs generating).
 2. Backend picks a salt (e.g. derived from `userID + tag`), computes the
    Safe's CREATE2 address off-chain (deterministic, no chain call
-   needed), and returns it immediately - this can already be shown to
-   the user and can receive funds.
+   needed) with `owners: [primaryWalletAddress]` (the primary's Safe
+   address, not its signer EOA), and returns it immediately - this can
+   already be shown to the user and can receive funds.
 3. Deployment (via the canonical `SafeProxyFactory.createProxyWithNonce`,
    pointed at Base's already-deployed `SafeL2` singleton - no need to
    deploy our own) happens either right away or lazily on first outgoing
    transaction; either way it needs no owner signature, only a submitted
    transaction from *some* funded address (see §13.7 for who pays gas).
 4. On confirmed deployment, insert the `ClosedGroup` row (`Address` =
-   the Safe address, `Threshold: 1`) and a `GroupMember` row (primary,
-   role covering both initiate and approve at threshold 1).
+   the Safe address, `Threshold: 1`) and a `GroupMember` row naming the
+   primary wallet's address, role covering both initiate and approve at
+   threshold 1.
 5. Wallet lookup "by user ID" is a `ClosedGroup`/`GroupMember` join on
-   `MemberAddress`; "by signer" is the same join filtered to a specific
-   address - both straightforward once §13.4's unified table is in place
-   (the original's `db/user_go.go` `id/temp_public_key/signer` OR-query
-   collapses to one join).
+   `MemberAddress`; "by signer" (in the sense of "wallets this user's
+   *current* signer key can ultimately operate") resolves through
+   `User.Address` first, then the same join - both straightforward once
+   §13.4's unified table is in place (the original's `db/user_go.go`
+   `id/temp_public_key/signer` OR-query collapses to one join).
 
 ### 13.7 Economical activation - gas options
 
@@ -1967,6 +2041,22 @@ migration itself):
   the user's own vocabulary for this feature. No functional impact
   either way.
 
+**A consequence flagged here, not fully designed here**: the already-built
+`payments` and `swaps` components (early phases of this project) build
+and submit ordinary EIP-1559 transactions, under the assumption - correct
+at the time - that the primary wallet is a bare EOA. Once the primary
+wallet is a Safe (§13.3), every payment and swap sourced from it (and
+from any sub-wallet) needs to become a Safe transaction instead: `/build`
+returns Safe-transaction fields plus EIP-712 typed data instead of a raw
+`network.UnsignedTx`; `/submit` accepts a signature over `SafeTxHash`
+and relays it as `execTransaction`, gas-sponsored per §13.7, rather than
+broadcasting an already-fully-signed raw transaction. This touches both
+`payments` and `swaps` end to end and is real, non-trivial follow-up
+work - out of scope for this section to fully redesign, but explicitly
+called out so it isn't discovered as a surprise once §13's core work is
+underway. `wallet-web/PLAN.md` §6.3 already reflects the client-side
+half of this change.
+
 ### 13.9 Open decisions needing a call before implementation
 
 - Safe vs. a custom minimal multisig contract (§13.3 recommends Safe).
@@ -1979,18 +2069,54 @@ migration itself):
   call once the exact query patterns other components rely on
   (`UserWallet` is referenced well beyond `sharedaccess` - payments,
   assets, swaps) are inventoried.
+- Scope and timing of the `payments`/`swaps` Safe-transaction rework
+  flagged above - a follow-up design pass of its own, not detailed in
+  this document.
 
 ### 13.10 Phased roadmap (not started - design only)
 
 | Phase | Scope |
 |---|---|
-| 1 | Safe factory/singleton wiring on Base (address constants, CREATE2 address computation helper, deployment call) |
-| 2 | Unified sub-wallet/group schema migration (§13.4), sub-wallet creation flow (§13.6) replacing `POST /v1/users/subwallet`'s two-phase XDR dance |
-| 3 | Gas-refund float wiring (§13.7 Option A) and relayer submission path |
-| 4 | Member management + group disable (§13.8), routed through the existing propose/approve/execute pipeline |
-| 5 | Generic per-domain post-processing hook (§13.8); wire crypto/tokenization/market-making initiators onto it |
-| 6 | Cross-wallet listing + curated-asset-filtered balance summary (§13.8) |
-| 7 | Full build/vet/test/tidy pass; a live smoke test creating a sub-wallet, enabling shared access, and driving one action through propose→approve→execute on Base Sepolia |
+| 1 | Safe factory/singleton wiring on Base (address constants, CREATE2 address computation helper, deployment call), EIP-1271 nested-signature construction/verification helper |
+| 2 | Primary wallet becomes a Safe: `User.SignerAddress` field, primary-wallet Safe deployment flow (§13.11), migrating registration off "primary is a bare EOA" |
+| 3 | Unified sub-wallet/group schema migration (§13.4), sub-wallet creation flow (§13.6) replacing `POST /v1/users/subwallet`'s two-phase XDR dance, owned by the primary wallet's Safe address |
+| 4 | Gas-refund float wiring (§13.7 Option A) and relayer submission path |
+| 5 | Member management + group disable (§13.8), routed through the existing propose/approve/execute pipeline, `GroupMember.MemberAddress` always a participant's primary-wallet address (§13.4) with an activation precondition check (§13.11) |
+| 6 | Generic per-domain post-processing hook (§13.8); wire crypto/tokenization/market-making initiators onto it |
+| 7 | Cross-wallet listing + curated-asset-filtered balance summary (§13.8) |
+| 8 | Full build/vet/test/tidy pass; a live smoke test deploying a primary wallet, creating a sub-wallet, enabling shared access, and driving one action through propose→approve→execute on Base Sepolia |
+
+### 13.11 Activation-order dependencies (user-flagged, audited against §13.1-§13.8's design)
+
+Registration itself never requires on-chain activation - the primary
+wallet's Safe address is computed (CREATE2) and stored the moment a
+user registers, exactly like a sub-wallet's counterfactual address
+(§13.3). But several *later* operations have a real, unavoidable
+ordering requirement, each for a different mechanical reason - worth
+listing explicitly rather than leaving as something to discover during
+implementation:
+
+| Operation | Requires primary wallet already deployed? | Why |
+|---|---|---|
+| Register | No | The Safe address is computed, not deployed - counterfactual, same as any sub-wallet |
+| Create a sub-wallet (the deploy call itself, §13.6 step 2-3) | No, strictly | The constructor just records an owner address as data - it doesn't check that address has code |
+| Fund a new sub-wallet's gas float from the primary's own balance (§13.7 Option A) | **Yes** | Moving value out of a Safe means calling `execTransaction` on it - an undeployed Safe has no code to call |
+| Operate (execute anything from) a sub-wallet at all | **Yes** | Resolving the sub-wallet's owner (the primary wallet's address) via EIP-1271 means calling `isValidSignature` on that address - nothing to call if it isn't deployed yet |
+| Enable wallet recovery (§15) | **Yes** | Adding the recovery service as a second owner of the primary wallet is itself an `execTransaction` call *on the primary wallet* |
+| Be added as a member of someone else's shared-access wallet | **Yes, for the invitee specifically** | The inviter's wallet stores the invitee's *primary wallet address* as a `GroupMember` (§13.4) - resolving that member's signature via EIP-1271 later requires the invitee's Safe to have code. This is precisely the user-stated requirement: "the user you want to add must have their wallet already activated on-chain" |
+
+**Open decision**: should primary-wallet deployment be explicit (a visible
+"activate your wallet" onboarding step, matching the original's own
+transparent "X will be deducted to activate..." messaging pattern) or
+lazy (silently bundled into the first operation that needs it - creating
+a funded sub-wallet, enabling recovery, or being invited to shared
+access elsewhere)? Recommendation: **explicit**, surfaced once during
+onboarding right after registration, gas-sponsored per §13.7's chosen
+option - a user shouldn't discover an unexpected extra on-chain step
+bundled invisibly into an unrelated action's cost. Lazy deployment as a
+fallback (for a user who skipped the explicit step and then tries an
+operation that needs it) is still worth supporting, just not as the
+primary path.
 
 Implementation does not begin until explicitly authorized.
 
@@ -2176,5 +2302,233 @@ JWT-session scheme to begin with, so nothing there moves.
 | 3 | Async, retried callback dispatch on `Approve` | Phase 2 |
 | 4 | `AudienceServiceLinkSession` rename (shared with §12.7 Phase 4) | §12.7 Phase 3 |
 | 5 | Test, document, push | 1-4 |
+
+Implementation does not begin until explicitly authorized.
+
+## 15. Wallet recovery: replacing a lost signer without losing the wallet
+
+This is a distinct feature from the already-built `recovery.go` (which
+handles a **forgotten username/lost device** - OTP plus security
+questions, re-pointing a username to a caller-supplied address). This
+section covers a different, paid, opt-in feature the original calls
+account recovery internally but which is really **wallet-signer**
+recovery: letting a user who has lost their actual private key regain
+control of their *existing* wallets - same address, new key - rather
+than starting over on a fresh one.
+
+### 15.1 What the original actually does (audited directly)
+
+`internal/components/users/services/account_recovery.go` (~1000 lines:
+`EnableAccountRecovery`, `DisableAccountRecovery`, `DoAccountRecovery`,
+`DoInactiveAccountRecover`):
+
+- **Enrollment** (`EnableAccountRecovery`): a deterministic, per-user
+  recovery keypair - derived from one global secret
+  (`MNEMONIC_ACCOUNT_RECOVERY` plus salts, never stored per-user, see
+  `blockchainalgofuncs/algofuncs.go:13-35`) - is added as a weight-1
+  `SetOptions` signer to the primary wallet and every sub-wallet that
+  either has no shared access, or has shared access enabled with
+  `NumberOfApprovalsNeeded == 0` (i.e. no real independent approver
+  exists yet - confirming the user's own framing precisely).
+  Market-making/bulk-payment wallets (already-custodial, higher-threshold
+  wallet types) get the recovery signer at weight 3 instead of 1, to
+  match their own higher operating threshold rather than being a fixed
+  constant. Wallets under genuine N-of-M shared access are explicitly
+  skipped - recovery never unilaterally inserts itself into a wallet
+  other real parties jointly control.
+- **Execution** (`DoAccountRecovery`): identity is proven **not** by
+  anything from the lost key - by three factors instead: every
+  configured security answer, a valid emailed OTP, and (implicitly,
+  since the caller must supply it) a new signer address. The recovery
+  keypair itself then submits a swap (add the new signer at weight 1,
+  then remove the old one) on the primary wallet and every eligible
+  wallet, deletes the recovering user's `APPROVER` grants on *other*
+  people's wallets (their old identity can no longer honor them, and the
+  original does not attempt to transfer them), and requires an explicit
+  flag to actually remove the old signer from the *primary* wallet - by
+  default the lost key stays valid there even after "recovery."
+- **Real bugs in the original, flagged rather than reproduced**:
+  the eligibility/removal boundary is checked inconsistently across
+  three different call sites - `EnableAccountRecovery` and
+  `DoAccountRecovery` use `NumberOfApprovalsNeeded == 0`,
+  `generateCreateSharedAccessXdr` (in `shared_access.go`) uses `> 1`
+  approvers, `generateModifySharedAccessXdr` uses `> 0` - meaning a
+  wallet can end up with `NumberOfApprovalsNeeded == 1` while the
+  recovery signer is still live on it, a real drift between the DB's
+  intent and the chain's actual signer set. Separately, the per-request
+  signature middleware on `DoAccountRecovery`/`DoInactiveAccountRecover`
+  is "decorative" - it verifies *a* valid signature exists, but never
+  binds the signer to `payload.Username`, since by construction the
+  caller may not control any registered signer at all. The actual gate
+  on those two routes is the security-answer/OTP check alone.
+
+### 15.2 Why this needs a real redesign, not a port of §15.1
+
+Two independent reasons converge on the same fix:
+
+1. **The already-built `recovery.go` cannot be extended to do this.** Its
+   own doc comment states the design assumption directly: *"unlike a
+   Stellar account, an EVM address is its key, so there is no
+   're-key the same address' operation to perform"* - so it re-points the
+   username to an entirely new address instead, abandoning the old
+   wallet's identity (and never touches sub-wallets at all). That
+   assumption was correct for a bare EOA and is exactly what §13's
+   Safe redesign changes: **once the primary wallet is a Safe
+   (§13.3), re-keying the same address is possible on Base too** -
+   `swapOwner`. `recovery.go`'s security-question/OTP/new-address-
+   personal_sign machinery is directly reusable as the *identity-proof
+   front door*; what changes underneath is everything past that point.
+2. **§13.3's nested-EIP-1271-ownership design collapses the original's
+   whole "which wallets are eligible" question.** Because every
+   sub-wallet and every shared-access `GroupMember` entry names a
+   participant's *primary wallet address*, never their signer key
+   directly (§13.4), swapping the signer on **just the primary wallet's
+   Safe** is instantly, transparently reflected everywhere that user is
+   referenced - every sub-wallet they own, and every shared-access
+   wallet they participate in as owner or approver - with **zero**
+   additional on-chain transactions and **no per-wallet eligibility
+   logic at all**. This is not an approximation of the original's intent,
+   it's a strictly cleaner realization of it: the original has to loop
+   over every wallet and individually decide whether to touch it (and,
+   per §15.1, sometimes gets that boundary wrong); the Base design has
+   nothing to loop over, because there's only ever one place a signer
+   swap needs to happen.
+
+### 15.3 The recovery service itself: what it can do, stated plainly
+
+Enabling recovery means adding a second owner to the primary wallet's
+Safe: `owners: [signerEOA, recoveryServiceAddress], threshold: 1`. Since
+Safe has no per-owner "this key may only do X" restriction natively,
+this owner - like the original's weight-1 Stellar signer on a
+threshold-1 account - can authorize *anything* on the primary wallet,
+not just a signer swap, for as long as it remains an owner. This is the
+same centralization tradeoff the original has (a paid recovery service
+is, necessarily, a party capable of real signing power), not a new one
+introduced by porting it - but Base's programmability offers a genuine
+improvement the original's ledger cannot:
+
+- **Recommendation: put a Safe [Guard](https://docs.safe.global/advanced/smart-account-guards)
+  on the primary wallet that restricts what a transaction co-signed by
+  the recovery service's owner slot may call** - permitting only
+  owner-management functions (`swapOwner`, and nothing that transfers
+  value or calls arbitrary contracts) whenever the recovery service is
+  one of the signers on that transaction. This narrows the recovery
+  service's real-world blast radius from "can do anything the user could
+  do" down to "can only ever rotate the signer," a strictly stronger
+  guarantee than the original provides, made possible by Base's
+  programmability rather than something Stellar's native multisig could
+  express. Worth building even though it's not a parity requirement.
+- **Recommendation: the recovery service's own address should itself be
+  a Safe with a robust internal N-of-M among the platform's own trusted
+  operators** (or HSM-backed signers), not a single hot key - referenced
+  on every enrolled primary wallet via the same nested EIP-1271
+  mechanic used everywhere else in this design (§13.3), rather than the
+  original's single global-secret-derived keypair (`MNEMONIC_ACCOUNT_
+  RECOVERY` compromise today would compromise every enrolled user
+  simultaneously - the same single-point-of-failure shape already
+  flagged for the pre-redesign `sharedaccess` component in §13.5).
+
+### 15.4 Eligibility, simplified
+
+Given §15.2's point 2, eligibility stops being "which wallets does
+recovery need to touch" (the original's error-prone question) and
+becomes "does the *primary* wallet's own Safe already have a threshold
+the primary's single owner can satisfy alone" - which is always true for
+this design (`threshold: 1` from creation, §13.3) unless the primary
+wallet itself has been given additional independent owners some other
+way (not part of this plan's current scope). **Recovery enrollment
+is therefore a single operation on a single Safe, full stop** - no
+per-sub-wallet, per-shared-wallet loop, no `NumberOfApprovalsNeeded`
+boundary check, and consequently none of §15.1's boundary-inconsistency
+bug surface exists to reproduce. Market-making/bulk-payment-style
+higher-threshold custodial wallets (§13.1's `WalletType 2/3`) are simply
+out of scope for recovery under this design, by construction - not
+because of a special-cased exclusion rule, but because they were never
+reached through the primary wallet's owner chain to begin with. Flagging
+this as a deliberate simplification worth confirming rather than a gap.
+
+### 15.5 Recovery execution flow
+
+1. Locked-out user proves identity via `recovery.go`'s existing
+   mechanism: every configured security answer, a valid emailed OTP, and
+   a `personal_sign` proof from the **new** signer key over a recovery
+   message (never from the old one - it's lost, by definition). This
+   part of `recovery.go` is retained essentially as-is.
+2. Instead of `recovery.go`'s current `UPDATE users SET address =
+   newAddress` (which changes the wallet's permanent identity), the
+   service builds and submits a Safe `swapOwner(prevOwner, oldSigner,
+   newSigner)` call against the **primary wallet's Safe** - `User.Address`
+   never changes; only `User.SignerAddress` does, in step with the
+   Safe's actual on-chain owner.
+3. Per §15.4, no other wallet needs any on-chain transaction. The
+   recovering user's `GroupMember` rows on *other* people's shared-access
+   wallets (where they hold `APPROVER`) don't need deleting either -
+   unlike the original, those entries reference the recovering user's
+   *primary wallet address*, which hasn't changed, so they keep working
+   automatically the next time that wallet's owner resolves through
+   EIP-1271. This is a genuine behavioral improvement worth calling out:
+   the original manually revokes those grants (`account_recovery.go`
+   lines 825-846) specifically *because* it re-points the whole identity
+   to a new address; this design doesn't create that problem in the
+   first place.
+4. Whether to force-remove the old signer from the primary wallet, or
+   leave it valid alongside the new one (the original's actual default
+   behavior, gated behind a flag it defaults to skipping): **recommend
+   always removing the old signer as part of the swap** rather than
+   making it optional - a "recovery" that can leave a known-lost key
+   still authorized is a materially weaker guarantee, and `swapOwner`
+   makes atomic remove-and-add a single call rather than the original's
+   two separate ops, so there's no operational reason left to keep it
+   optional.
+
+### 15.6 Interaction with §12's authorization model
+
+`POST /v1/users/account/recover`-equivalent is a deliberate exception to
+§12's general rule (self-service, or delegated via a `GroupMember`
+role): the whole premise is that the caller does **not** control any
+address currently authorized on the target account. The route still
+parses a well-formed §12-style signature (so the HTTP layer is uniform),
+but that signature only has to be internally valid, not tied to the
+target account - authorization for *this* route comes entirely from
+§15.5 step 1's identity factors, exactly matching the original's actual
+(if under-documented) behavior audited in §15.1. Enable/Disable, by
+contrast, **do** fit §12's normal model cleanly (the caller must already
+be the account's current signer) and need no exception.
+
+### 15.7 Fee model
+
+The original charges a one-off `ServiceFee` (`ACCOUNT_RECOVERY_FEE`) on
+enable, not an enforced subscription - `AccountRecoveryExpiresOn` is set
+but never read back anywhere in the codebase (a half-built,
+never-finished renewal feature). Recommendation: port only what's
+actually enforced - a one-off enrollment fee - rather than building
+unused expiry/renewal machinery to match a field the original itself
+never wired up.
+
+### 15.8 What happens to the existing `recovery.go`
+
+Superseded, not deleted-and-forgotten: its OTP model
+(`AccountRecoveryEmailVerification`), security-question verification
+(`verifyAllSecurityAnswers`), and the `personal_sign`-proof-of-the-new-
+address pattern (`verifyNewAddressOwnership`/`RecoveryMessage`) are the
+right identity-proof primitives and carry forward into §15.5 step 1
+unchanged in spirit. What gets replaced is everything past identity
+verification: `Recover`'s `UPDATE users SET address = newAddress` (and
+its now-unnecessary `GroupMember` deletion, per §15.5 point 3) becomes
+the `swapOwner` call in §15.5 step 2. `buildRecoveryLog`'s
+tamper-evident attestation (signed by a `cryptoutil.DeriveKey`-derived
+authority key) is worth keeping as an audit trail regardless of the
+mechanism underneath.
+
+### 15.9 Phased roadmap (not started - design only)
+
+| Phase | Scope | Depends on |
+|---|---|---|
+| 1 | Recovery-service Safe: its own internal N-of-M ownership, deployed once as platform infrastructure | §13's Safe wiring |
+| 2 | Safe Guard contract restricting the recovery-service owner to owner-management calls only (§15.3) | Phase 1 |
+| 3 | `EnableAccountRecovery`/`DisableAccountRecovery` equivalents: add/remove the recovery-service Safe as a second owner of the caller's primary wallet, gated by the one-off fee (§15.7) | §13.11 (primary wallet must already be deployed) |
+| 4 | Rework `Recover` to perform `swapOwner` on the primary wallet instead of re-pointing `User.Address`; drop the now-unnecessary `GroupMember` cleanup (§15.5 point 3) | Phase 3 |
+| 5 | `DoInactiveAccountRecover`-equivalent for a never-yet-activated primary wallet: no on-chain call needed at all (nothing deployed yet) - just recompute the counterfactual Safe address for the new signer and update the DB row, fixing the original's misleadingly-named `OneWeekAgo` (actually "24 hours from now") window bug along the way rather than reproducing it | — |
+| 6 | Test, document, push | 1-5 |
 
 Implementation does not begin until explicitly authorized.

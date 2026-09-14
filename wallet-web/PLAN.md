@@ -141,48 +141,64 @@ build-unsigned/sign-locally/submit-signed round trip. `wallet-web`'s only
 new job is to be a correct, hardened place to do the "sign locally" step
 and to hold the key material that step needs.
 
-## 3. Signer vs. Primary Wallet — the two-mnemonic model
+## 3. Signer and Primary Wallet — corrected: one mnemonic, not two
 
-`wallet-backend`'s current `Register` (`internal/components/users/
-services/services.go:60-114`) always sets the SIWE-verified address as
-*both* `User.Address` (the signer/login identity) *and* the sole
-`UserWallet` row, flagged `IsPrimary: true`. There is no existing path to
-register with a signer different from the primary wallet — `RegisterWallet`
-(`services.go:176-185`) only adds *additional*, non-primary addresses.
+**This section is rewritten from an earlier draft, which proposed a
+`link-primary` endpoint and a genuinely-separate importable "primary
+wallet" mnemonic. That design assumed the primary wallet was, like the
+signer, a bare EOA with its own private key someone could hold and sign
+with directly. `wallet-backend/PLAN.md` §13 (the Base sub-wallet/
+shared-access redesign, extended to cover wallet recovery in §15) makes
+the primary wallet a Safe smart-contract account instead - specifically
+so a lost signer key can be replaced without losing the wallet, the way
+the original's own Stellar-native multisig allows. A Safe has no private
+key of its own. There is nothing to import, and nothing for
+`sign_link_primary_message` to prove control of - so that whole
+mechanism is withdrawn, not merely deferred.**
 
-To honor a genuinely separate signer/primary-wallet import, `wallet-web`
-needs one small, explicit `wallet-backend` addition — flagged here as a
-required coordination change, the same way `wallet-payment-history-
-engine/PLAN.md` §6 flagged its own `wallet-backend` dependency, not
-implemented by this plan:
+The corrected model has exactly **one** mnemonic/key in the whole system:
+the **signer**. `wallet-backend`'s registration flow derives the signer
+EOA from it, then computes (CREATE2, off-chain, no chain call) a Safe
+address with `owners: [signerEOA], threshold: 1` - that computed address
+*is* `User.Address`, the permanent primary-wallet identity
+(`wallet-backend/PLAN.md` §13.3/§13.4). The signer key is never
+"the primary wallet's key" in the sense of directly holding the funds'
+private key; it's the key that currently *operates* the primary wallet's
+Safe, and - per §15's recovery design - can be swapped out later without
+`User.Address` ever changing.
 
-- **`POST /users/wallets/link-primary`** (authed as the signer): body
-  `{address, signature, message}`, where `message` is a domain-bound,
-  nonce-scoped statement ("Link {address} as the primary wallet for
-  signer {signerAddress}. Nonce: {nonce}. Expires: {ts}.") signed by the
-  **primary wallet's own key** — proving control of that address without
-  ever transmitting or storing its private key, mirroring the exact
-  nonce-issue/consume and `ecrecover`-based verification `auth/services/
-  services.go` already implements for SIWE. On success, the service sets
-  (or replaces) the `IsPrimary` `UserWallet` row for that user to the
-  linked address, decoupling it from `User.Address`.
+Practical consequences for this app:
 
-Until that lands, `wallet-web`'s import flow supports two modes:
-
-1. **Same mnemonic for both** (default, and the only mode that works
-   against `wallet-backend` unmodified today): one mnemonic derives one
-   keypair, used both to SIWE-sign-in and to sign payments/swaps.
-2. **Separate mnemonics**: the signer mnemonic registers/logs in as
-   today; the primary-wallet mnemonic's address and a link-signature are
-   held ready to call `link-primary` the moment that endpoint exists.
-   `wallet-web`'s own implementation does not block on this landing, but
-   its UI and `wallet-core` API are both built for it from day one so no
-   rework is needed later.
-
-Either way, every subsequent payment/swap for the primary wallet's funds
-is signed with the **primary wallet's** key, never the signer's — the
-signer key only ever produces SIWE signatures and (per §8) future
-shared-access approval signatures.
+- `wallet-core` only ever needs to hold **one** role's key, not two - see
+  §4.2's corrected API surface below.
+- Signing a payment/swap sourced from the primary wallet no longer means
+  "sign a raw EIP-1559 transaction with the primary wallet's key" (there
+  is no such key) - it means building and EIP-712-signing a **Safe
+  transaction** with the signer's key, then submitting it (with that
+  signature) for `wallet-backend` to relay as the Safe's
+  `execTransaction` call. §6.3 below is updated accordingly, and this is
+  the same EIP-712 signing capability §12 already tracks as a
+  `wallet-core` addition - it turns out to be needed for *every*
+  primary-wallet transaction now, not only shared-access approvals as
+  originally scoped there.
+- **A genuinely different, smaller feature is still worth keeping in
+  mind for later, without conflating it with "primary wallet"**: letting
+  a user point this app at an *external*, already-existing address purely
+  to view its balance/history (read-only "watch an address"), with no
+  claim of control and nothing to sign. If wanted, that's a separate,
+  optional feature to design when asked for - not a substitute for, or a
+  revival of, the withdrawn two-mnemonic model.
+- **This is real rework, not just a documentation fix.** §9's "Phased
+  build roadmap" and §10's "Implementation notes" below are left as an
+  accurate historical record of what Phases 1-11 actually built - a
+  two-mnemonic import flow, a `link-primary` client stub, and
+  `sign_transaction`-only payment/swap signing - all under the
+  since-corrected assumption. None of that is wrong to have built at the
+  time; it's what needs a follow-up implementation pass (import flow,
+  `POST /users/wallets/link-primary` client code, and the payment/swap
+  signing flow itself per §6.3) once `wallet-backend`'s §13 redesign is
+  authorized and this app's own rework is scheduled - not a surprise to
+  discover mid-migration.
 
 ## 4. `wallet-core`: a WASM module as the sole key-holding boundary
 
@@ -231,14 +247,22 @@ the main thread never imports the WASM module directly:
 generate_mnemonic(word_count: 12 | 24) -> String
 validate_mnemonic(phrase: &str) -> bool
 derive_preview_address(phrase: &str) -> String   // BIP-44 m/44'/60'/0'/0/0 — see §4.4
-encrypt_and_store(role: "signer"|"primary", phrase: &str, password: &str) -> VaultRecord
+encrypt_and_store(role: "signer", phrase: &str, password: &str) -> VaultRecord
 unlock(role, password: &str) -> UnlockResult { address }   // decrypts into worker-local memory only
 lock(role)                                                  // zeroizes the in-memory key immediately
 sign_siwe_message(role: "signer", message: &str) -> HexSignature
-sign_transaction(role: "signer"|"primary", unsignedTxJson: &str) -> HexRawSignedTx
-sign_link_primary_message(message: &str) -> HexSignature    // §3's link-primary proof, signed by the primary-wallet key
+sign_transaction(role: "signer", unsignedTxJson: &str) -> HexRawSignedTx
+sign_typed_data(role: "signer", typedDataJson: &str) -> HexSignature   // EIP-712 — needed for every primary-wallet Safe transaction now (§3, §6.3), tracked as a real gap in §12
 wipe(role)                                                  // deletes that role's vault record entirely (remove wallet)
 ```
+
+Corrected from an earlier draft: `role` only ever takes one value,
+`"signer"` - §3 above explains why the `"primary"` role and
+`sign_link_primary_message` (which existed solely to prove control of a
+primary-wallet private key that no longer exists) are withdrawn rather
+than kept as unused options. `sign_typed_data` is new relative to the
+originally-built `signing.rs` (§12) and is what actually authorizes a
+primary-wallet payment/swap now, in place of `sign_transaction` alone.
 
 No function returns a mnemonic or raw private key once `encrypt_and_store`
 has completed for that role — from that point on, the only way back to
@@ -289,15 +313,17 @@ custom or non-standard path is acceptable for v1.
 critically, `localStorage` is synchronously readable by any same-origin
 script including a same-origin XSS payload with no `await` needed, while
 IndexedDB access is at least async and easier to keep entirely
-worker-side): one record per role (`signer`, `primary`), written and read
-*only* from within the Worker (§4.1) — the main thread never touches
-IndexedDB for vault data directly, only asks the worker to.
+worker-side): one record for the `signer` role (§3 - no `primary` role
+exists to store, since the primary wallet has no private key of its
+own), written and read *only* from within the Worker (§4.1) — the main
+thread never touches IndexedDB for vault data directly, only asks the
+worker to.
 
 Each `VaultRecord`:
 
 ```
 {
-  role: "signer" | "primary",
+  role: "signer",
   address: string,              // derived address, safe to expose - not secret
   kdf: "argon2id",
   kdfParams: { memoryKiB, iterations, parallelism },  // tuned per §5.2
@@ -404,22 +430,42 @@ and worth a lightweight lint rule or code-review checklist item at
 implementation time (e.g. grep for `mnemonic`/`secretKey`/`privateKey` in
 any `store/*Slice.ts` action payload type).
 
-### 6.3 Transaction signing flow (payments/swaps)
+### 6.3 Transaction signing flow (payments/swaps) — corrected for a Safe-based primary wallet
+
+Since `wallet-backend/PLAN.md` §13 makes the primary wallet a Safe
+smart-contract account (§3 above), a primary-wallet payment/swap is a
+Safe transaction, not a directly-signed EIP-1559 send:
 
 1. UI calls `wallet-backend`'s `POST /payments/build` (or `/swaps/
-   approve/build`) → gets back a `network.UnsignedTx` JSON.
-2. UI passes that JSON to `walletCoreClient.signTransaction(role,
-   unsignedTxJson)`.
-3. The Worker's `wallet-core` instance (already unlocked for that role,
-   or the UI prompts for the password first if not) signs it and returns
-   only the raw signed transaction hex.
-4. UI calls `POST /payments/submit` (or `/swaps/approve/submit`) with the
-   signed hex. `wallet-backend` broadcasts it; `wallet-payment-history-
-   engine` picks up the resulting on-chain event independently.
+   approve/build`) → gets back a Safe transaction to sign: the
+   `to`/`value`/`data`/`nonce` fields plus the EIP-712 domain/type data
+   needed to compute its `SafeTxHash`, rather than a bare
+   `network.UnsignedTx`.
+2. UI passes that JSON to `walletCoreClient.signTypedData(role,
+   typedDataJson)` (§4.2's new export) - always `role: "signer"`, since
+   that's the only key that exists; there is no separate primary-wallet
+   key to choose between anymore.
+3. The Worker's `wallet-core` instance (already unlocked, or the UI
+   prompts for the password first if not) signs the typed data and
+   returns only the signature.
+4. UI calls `POST /payments/submit` (or `/swaps/approve/submit`) with
+   that signature. `wallet-backend` assembles and submits the Safe's
+   `execTransaction` call (gas-sponsored per `wallet-backend/PLAN.md`
+   §13.7); `wallet-payment-history-engine` picks up the resulting
+   on-chain event independently.
 
-At no point does any signed-transaction payload, mnemonic, or private key
-touch `wallet-backend` — only addresses, unsigned tx requests, and signed
-tx hex ever cross the network boundary, in either direction.
+A sub-wallet's payment/swap (once sub-wallets are supported in this
+app's UI - tracked, not yet scheduled) follows the identical shape: the
+signature is still produced by the `signer` role's key, resolved through
+the sub-wallet's nested EIP-1271 ownership chain back to the primary
+wallet (`wallet-backend/PLAN.md` §13.3) - nothing about *this app's*
+signing flow changes between "pay from my primary wallet" and "pay from
+my sub-wallet."
+
+At no point does any signature, mnemonic, or private key touch
+`wallet-backend` in a form it could reuse — only addresses, unsigned
+transaction/typed-data requests, and signatures ever cross the network
+boundary, in either direction.
 
 ### 6.4 Connectivity awareness: offline login/view, online-only transactions
 
@@ -501,7 +547,7 @@ numbers.
 | Session left unlocked on a shared/public machine | Idle-timeout auto-lock, cross-tab lock propagation, always-locked-on-load (§5.3) |
 | Phishing (fake site asking for a mnemonic) | SIWE's own domain-binding (`wallet-backend`'s `Verify` already checks `msg.GetDomain()`) gives users a real signal to check; onboarding copy explicitly warns "this app will never ask for your mnemonic anywhere except the one-time import screen" |
 | Imported mnemonic derives an unexpected address | Standard BIP-44 path only, no custom derivation (§4.4); `derive_preview_address` shown before committing to import |
-| Malicious page script abusing a legitimate unlocked session | Narrow, fixed WASM API surface (§4.2) — no generic "sign arbitrary bytes" primitive exposed beyond the specific SIWE/tx/link-primary message shapes the app itself constructs |
+| Malicious page script abusing a legitimate unlocked session | Narrow, fixed WASM API surface (§4.2) — no generic "sign arbitrary bytes" primitive exposed beyond the specific SIWE/tx/typed-data shapes the app itself constructs |
 | Compromised CDN serving a tampered WASM binary | Self-hosted, same-origin `wallet-core.wasm` (matching the existing `web` app's own nginx/Docker self-hosting pattern, `web/Dockerfile`, `nginx.conf.template`) rather than a third-party CDN; reproducible build in CI |
 | Inline-script injection | Strict CSP (`script-src 'self'`, no `unsafe-inline`, no `unsafe-eval` — WASM instantiation via `instantiateStreaming` does not require `unsafe-eval`) |
 | Clipboard-based mnemonic exfiltration during import | Paste is allowed (blocking it is often more theater than defense and hurts recovery-phrase-restore UX), but the app clears the OS clipboard automatically a short time after any of its own copy-to-clipboard actions and never programmatically reads the clipboard itself |
@@ -681,16 +727,19 @@ reusing this crate rather than re-implementing its own crypto) both
 create requirements on `wallet-core` that belong here, in the crate's own
 project, not duplicated into either consumer's plan:
 
-- **New: EIP-712 typed-data signing.** Approving a Safe-based
-  shared-access pending action means signing that transaction's
-  `SafeTxHash` (EIP-712), not a plain EIP-191 `personal_sign` message -
-  `signing.rs` only has `sign_personal_message`/`sign_eip1559_transaction`
-  today. This is needed by **this app** too, not just `wallet-mobile` -
-  whichever surface first needs to approve a shared-access action (a
-  dashboard "approve" button here, or the mobile approval screen there)
-  is what actually forces this addition; either way, it's built once,
-  here, and consumed by both `#[wasm_bindgen]` (this app) and the FFI
-  binding (`wallet-mobile`).
+- **New: EIP-712 typed-data signing - broader than originally scoped
+  here.** Originally flagged as needed only for approving a Safe-based
+  shared-access pending action (`SafeTxHash` signing, EIP-712, not plain
+  EIP-191 `personal_sign` - `signing.rs` only has
+  `sign_personal_message`/`sign_eip1559_transaction` today). Once
+  `wallet-backend/PLAN.md` §13 makes the *primary* wallet a Safe too (not
+  only sub-wallets - a correction driven by §15's wallet-recovery
+  design), this app's own §6.3 needs it for **every** primary-wallet
+  payment and swap, not only shared-access approvals - this app's own
+  `sign_transaction` (raw EIP-1559) call for payments/swaps is being
+  replaced by this function, not supplemented by it. This is now a
+  same-priority dependency as the FFI target below, not a
+  `wallet-mobile`-driven nice-to-have.
 - **New: an FFI binding target** (`wallet-mobile/PLAN.md` §4.1 recommends
   `flutter_rust_bridge`) alongside the existing `wasm-pack` build - this
   is an additional build target for the same source, not a fork of it.
@@ -703,8 +752,35 @@ project, not duplicated into either consumer's plan:
   neither consumer drifts from the other's expectation of the function's
   name.
 
-Not implemented here - this app's own client code doesn't need EIP-712
-signing or an FFI target for anything it does today; this section exists
-so the crate-level work isn't planned twice in two different consumers'
-documents once `wallet-backend`'s shared-access redesign (§13 there)
-actually starts.
+Not implemented here - §4.2/§6.3 above already describe the corrected,
+target API and flow; this section exists so the crate-level
+implementation work itself isn't planned twice in two different
+consumers' documents once `wallet-backend`'s Safe-based redesign (§13
+there) actually starts.
+
+## 13. Wallet recovery UI (tracked, not yet implemented here)
+
+`wallet-backend/PLAN.md` §15 documents a paid, opt-in wallet-recovery
+feature: enroll a recovery-service Safe as a second owner of the primary
+wallet, so a lost signer key can later be replaced (`swapOwner`) without
+losing the wallet's address or its sub-wallets/shared-access
+memberships (§13.3's nested-ownership design means recovery only ever
+touches the primary wallet's own Safe - nothing else needs re-pointing).
+Once that lands server-side, this app needs:
+
+- An enable/disable settings screen (security questions setup, the
+  one-off fee disclosure, and a plain-language explanation of what the
+  recovery service can and cannot do per §15.3 - especially if the
+  recommended Safe Guard restricting it to owner-management calls only
+  is implemented, since that's a genuine, worth-advertising guarantee).
+- A recovery execution flow reachable *without* being logged in (by
+  definition, the user has no working signer key at this point): security
+  questions, email OTP, and a **new** signer key generated fresh in
+  `wallet-core` right there in that flow, ending with a `personal_sign`
+  proof from that new key (`wallet-backend/PLAN.md` §15.5 step 1) - this
+  is the one place in this app where a brand-new vault gets created
+  *before* any successful login, not after one.
+
+Not implemented here - tracked as a dependency this app's own
+implementation will need once `wallet-backend`'s §15 lands, the same way
+§11/§12 track that project's other pending dependencies.
