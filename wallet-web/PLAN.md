@@ -671,3 +671,40 @@ Not implemented here - tracked as a dependency this app's own
 implementation will need once `wallet-backend`'s side lands, the same way
 `wallet-payment-history-engine/PLAN.md` §6 and this file's own §3 each
 flagged their own `wallet-backend` dependencies.
+
+## 12. `wallet-core` gains an FFI target and an EIP-712 signer (tracked, shared with `wallet-mobile`)
+
+`wallet-backend/PLAN.md` §13 (Base equivalent of the original's
+sub-wallet/shared-access multisig, using Safe smart accounts) and the new
+`wallet-mobile/PLAN.md` (a Flutter port of the original's mobile app,
+reusing this crate rather than re-implementing its own crypto) both
+create requirements on `wallet-core` that belong here, in the crate's own
+project, not duplicated into either consumer's plan:
+
+- **New: EIP-712 typed-data signing.** Approving a Safe-based
+  shared-access pending action means signing that transaction's
+  `SafeTxHash` (EIP-712), not a plain EIP-191 `personal_sign` message -
+  `signing.rs` only has `sign_personal_message`/`sign_eip1559_transaction`
+  today. This is needed by **this app** too, not just `wallet-mobile` -
+  whichever surface first needs to approve a shared-access action (a
+  dashboard "approve" button here, or the mobile approval screen there)
+  is what actually forces this addition; either way, it's built once,
+  here, and consumed by both `#[wasm_bindgen]` (this app) and the FFI
+  binding (`wallet-mobile`).
+- **New: an FFI binding target** (`wallet-mobile/PLAN.md` §4.1 recommends
+  `flutter_rust_bridge`) alongside the existing `wasm-pack` build - this
+  is an additional build target for the same source, not a fork of it.
+  No function this app calls today changes shape because of this.
+- **Possible rename**: `sign_siwe_message` is already message-agnostic
+  EIP-191 `personal_sign` (§11 above) and is the function both
+  `wallet-backend`'s new per-request signature scheme (§11) and
+  `wallet-mobile`'s equivalent networking layer sign against. If it gets
+  renamed for clarity (e.g. `sign_request_message`), do it once here so
+  neither consumer drifts from the other's expectation of the function's
+  name.
+
+Not implemented here - this app's own client code doesn't need EIP-712
+signing or an FFI target for anything it does today; this section exists
+so the crate-level work isn't planned twice in two different consumers'
+documents once `wallet-backend`'s shared-access redesign (§13 there)
+actually starts.

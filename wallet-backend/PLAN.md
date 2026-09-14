@@ -1597,19 +1597,33 @@ every caller class):
   two designs already in place - not being undone just to match the
   original's blanket middleware application.
 
-**Needs a small, related fix, not a redesign**: `servicelinks/services/
-approvals.go`'s `VerifyApproval` currently mints a wallet-session JWT for
-a `LOGIN`-kind approval (`middleware.IssueToken(...,
-AudienceWalletSession, ...)`) - its own doc comment already flags this as
-a deliberate departure from "the original's bespoke per-request Ed25519
-signature scheme." With no session token concept left to issue, this
-becomes: `VerifyApproval` simply confirms the approval and returns the
-target user's info (matching what the original's own
-`GetServicelinksAppAuthorizeVerify...` handler actually does - it returns
-`userInfo` directly, never a token); the partner's subsequent calls on
-that user's behalf continue authenticating as themselves via their
-existing API key, passing the target user's address the same way
-`requireOwnedUser`-guarded routes already do elsewhere in servicelinks.
+**Correction after auditing the original's actual servicelinks code (§14
+below did this properly - the assessment below supersedes what an earlier
+draft of this section assumed without having read that code yet)**:
+`servicelinks/services/approvals.go`'s `VerifyApproval` currently mints a
+session JWT only for a `LOGIN`-kind approval, and returns just the
+approval record (no token) for `AUTHORIZE`/`EVENT` - its own doc comment
+frames this as a departure from "the original's bespoke per-request
+Ed25519 signature scheme." Having now read the original's actual
+`getServicelinksLoginVerify...` handler, **this port's current behavior
+is already correct, not a bug**: the original's own LOGIN-verify calls
+`LogUserIn`, which issues exactly this kind of access/refresh token pair
+to the requesting partner; its AUTHORIZE-verify returns only
+`{"message": "success"}`, no token, exactly matching what this port does
+today. **No code change is needed here.**
+
+The one real follow-up this section's redesign creates: once
+`AudienceWalletSession` is removed (§12.5 above), the constant this
+LOGIN-verify token currently rides on disappears, but the token itself
+must not - it authenticates a *partner*, not the wallet's own end-user
+API calls, so it isn't touched by "no more session tokens for user
+operations." Phase 4 below is now: give this one remaining token issuer
+its own explicit audience (e.g. `AudienceServiceLinkSession`) instead of
+quietly inheriting a name that no longer means anything once every other
+`AudienceWalletSession` issuer is gone - a naming cleanup, not a behavior
+change. See §14.3 for the rest of servicelinks' parity gaps (QR
+generation, callback dispatch), which are unrelated to this auth
+redesign and don't block it either way.
 
 ### 12.6 `wallet-web` impact (tracked here, implemented there)
 
@@ -1648,7 +1662,7 @@ plan/implementation:
 | 1 | `internal/middleware/signature_auth.go`: header extraction, timestamp tolerance, `cryptoutil.VerifyPersonalSign` call, self-service authorization, `CtxSubject`/`CtxSigner` wiring | — |
 | 2 | Delegated authorization: `sharedaccess` `GroupMember` role check when `wallet != signer` | Phase 1 |
 | 3 | Wire the new middleware onto every route currently guarded by `JWTAuth(..., AudienceWalletSession)`; remove `internal/components/auth`, `siwe-go`, related config | Phase 1, 2 |
-| 4 | Fix `servicelinks/services/approvals.go`'s `VerifyApproval` per §12.5 | Phase 3 |
+| 4 | Give the servicelinks LOGIN-verify token its own `AudienceServiceLinkSession` audience per §12.5 (no behavior change - `VerifyApproval` itself is already correct) | Phase 3 |
 | 5 | Update `.env.example`/`DEPLOYMENT.md` for the new config, remove the retired SIWE ones | Phase 3, 4 |
 | 6 | Full build/vet/test/tidy pass; a live smoke test exercising a signed request end-to-end | Everything above |
 | 7 (tracked, not implemented here) | `wallet-web`'s own client-side changes (§12.6) | This phase's completion |
@@ -1657,3 +1671,390 @@ Each phase, when implementation is authorized, follows this project's
 established discipline: build clean → test → document in this file's own
 "Implementation notes" → commit and push. Implementation does not begin
 until explicitly authorized.
+
+## 13. Multi-wallet & shared-access redesign: smart-contract accounts for sub-wallets
+
+**Decision**: replace Stellar's native weighted-signer accounts (used for
+both sub-wallet ownership and shared-access authorization) with Base
+smart-contract accounts (Safe), and replace the already-built
+`sharedaccess` component's server-held-key design with real on-chain
+multisig enforcement.
+
+### 13.1 What the original actually does (audited directly)
+
+**Sub-wallet creation** (`internal/components/users/services/
+subwallets.go`, audited in full):
+- `users`/`user_wallets` schema: `User.PublicKey`/`PrimarySigner` (both
+  set to the same address at registration); `UserWallet.ID` (the wallet's
+  own address), `.Signer` (whoever controls it - **the row's own doc
+  comment says "if ID is same as Signer, it's a primary wallet"**),
+  `.PrimaryWallet` (an explicit redundant flag), `.SharedAccessEnabled`,
+  `.NumberOfApprovalsNeeded` (the threshold), `.Permissions
+  []WalletPermission` (the approver/initiator/viewer list - approver
+  *count* is derived by filtering this, never stored as its own column).
+- Sub-wallet creation is a two-phase call to the same endpoint
+  (`POST /v1/users/subwallet`): phase 1 (no signatures) returns an
+  unsigned XDR that (a) `CreateAccount`s the new address funded from the
+  primary's balance (default 6 XLM, DB-configurable per wallet type via
+  an `ActivationAmount` table, gated by a `minBalance` floor - default 3,
+  env-overridable), and (b) `SetOptions{Signer: primary, Weight: 1}` on
+  the new account. Phase 2 (with `PrimarySignature` + `SubWalletSignature`)
+  submits it; `txnbuild.AddSignatureBase64` cryptographically validates
+  each signature before submission, and the DB row is inserted inside a
+  transaction that's rolled back if submission fails.
+- **Correction to this design's original working assumption**: for an
+  ordinary (`WalletType == 0`) sub-wallet, the original does **not**
+  actually revoke the sub-wallet's own signing weight - it only *adds*
+  the primary as an additional weight-1 signer alongside the sub-wallet's
+  untouched default weight-1 key. Nothing on-chain stops that discarded
+  key from signing its own account's transactions later; the "operated
+  only via the primary" property is a client/backend convention (the app
+  discards the key after the one co-signing call), not an on-chain
+  guarantee. Only the two custodial types - market-making and
+  bulk-payment - actually raise `LowThreshold`/`MediumThreshold`/
+  `HighThreshold` to 3 with a weight-3 custodial signer, which functionally
+  outranks the sub-wallet's own weight-1 key. Worth knowing before treating
+  "the original locks out the sub-wallet's own key" as ground truth to
+  replicate for ordinary sub-wallets - it doesn't, for that path.
+
+**Shared access** (`users/services/shared_access.go`,
+`users/models/user.go`, audited in full):
+- Permission is a free-text column (no Go enum), three literal values in
+  use: `"VIEW-ONLY"`, `"INITIATOR"`, `"APPROVER"` (the user's own message
+  calls the third one "AUTHORIZER" - same role, different word; worth
+  deciding whether to rename in the port, purely cosmetic either way).
+- `CreateSharedWalletAccess`/`ModifySharedWalletAccess` build real
+  `SetOptions` signer/weight/remove-signer operations against the
+  wallet's account - so shared-access approvers, unlike sub-wallet
+  creation's primary signer, genuinely do become real Stellar multisig
+  signers with real weight, and the threshold really is
+  `NumberOfApprovalsNeeded`. This part of the original **is** real
+  on-chain multisig.
+- Pending multi-approval work is tracked in `PendingAuth` (one row per
+  in-flight action: `TransactionType`, `ApprovalsNeeded`,
+  `ApprovalsGotten`, `TransactionStatus` PENDING→COMPLETED/REJECTED,
+  `TransactionXdr`) and `PendingTransactionSignature` (one row per
+  authorizer's submitted co-signature, unique per `(PendingAuthID,
+  Approver)` to block double-approval). Each `POST /v1/shared-access/
+  approval/:ID` call appends a signature, increments `ApprovalsGotten`,
+  and - only once `ApprovalsGotten >= ApprovalsNeeded` - the *same*
+  request that supplied the last needed signature triggers
+  `SubmitApprovalsXdrWithSignaturesReturnsTrx` in one step. `TransactionType`
+  spans `PAYMENT`, `SWAP`, `MODIFY SHARED ACCESS`, `DISABLE SHARED
+  ACCESS`, `MAKE MARKET OFFER`, `CRYPTO WITHDRAWAL`, `TOKENIZE ASSET`,
+  `ASSET SUBSCRIPTION`, `TOKENIZED ASSET EARLY EXIT` - each with its own
+  post-submission processing block (fee/VAT rows, webhook callbacks,
+  domain-record creation) keyed off that string.
+- Modifying or disabling shared access, once approvers already exist,
+  itself goes through this same pending-approval mechanism (`MODIFY
+  SHARED ACCESS`/`DISABLE SHARED ACCESS` transaction types) rather than
+  applying immediately - changing the signer set is itself a
+  signer-set-guarded operation.
+- Routes live under `/v1/shared-access/...` (confirmed: `.../users/
+  account` for grant/modify/disable, `.../approval(s)` for the approval
+  queue, plus per-domain initiator routes like `.../payment`,
+  `.../swap`, `.../crypto/withdrawals`); all guarded by the same
+  universal signature middleware, with VIEW-ONLY/INITIATOR/APPROVER
+  checked by hand inside each handler against `WalletsSharedWithUser`,
+  not by a role-aware middleware layer.
+- **No curated-asset filtering exists on the balance endpoint** in the
+  original - `getSharedAccessWalletBalancesHandler` returns every Horizon
+  balance line, native and every trustline, unfiltered; the curated-asset
+  table is only used elsewhere for pricing/image lookups on a swap
+  picklist. The filtered-to-curated-assets balance view described in this
+  redesign's brief is a genuine improvement over the original's actual
+  behavior, not a parity requirement - worth building as asked, just
+  flagged here as a deliberate departure rather than a faithful port.
+
+### 13.2 The problem: Base has no native weighted-signer account
+
+A Stellar account is natively a multisig primitive - any address can
+carry N signers with weights and a threshold, changeable by a signed
+`SetOptions` operation. A Base EOA has none of this: it is controlled by
+exactly one private key, full stop. Replicating "an address whose signer
+set and threshold can be configured and changed" on Base requires that
+address to *be a smart contract*, not an EOA.
+
+### 13.3 Decision: Safe smart accounts as the one primitive for both features
+
+**Recommendation**: every sub-wallet - and, by extension, every wallet
+that ever needs more than one controlling address - is deployed as a
+[Safe](https://safe.global) smart account (the audited, canonical
+M-of-N smart contract wallet, deployed on Base mainnet and Sepolia at
+well-known cross-chain addresses via its own CREATE2 factory). This one
+primitive replaces *both* of the original's two different mechanisms
+(the ad hoc "add primary as signer" sub-wallet trick, and the fuller
+`SetOptions`-based shared-access signer management) with a single
+concept: **a sub-wallet is an address with an owner set and a threshold,
+full stop - the same account, whether it currently has one owner (just
+the primary) or several (once shared access is enabled).**
+
+Why Safe over a bespoke minimal multisig contract: this is a financial
+custody product, and Safe is the most heavily audited, most widely
+deployed contract of exactly this shape in the entire EVM ecosystem.
+Writing a smaller custom contract would shave some gas per execution but
+introduces novel signature-validation/replay/reentrancy surface this
+project would have to design, implement, and audit itself for a first
+time - a bad trade against Base's already-low L2 gas costs. This is a
+recommendation, not a foreclosed decision - flag if a custom minimal
+contract is wanted instead once implementation starts, but Safe is what
+the rest of this section assumes.
+
+**A structural simplification Base's design gives us, not something we
+have to engineer**: a Safe's initial owner set is passed as constructor/
+initializer data to a *permissionless* factory call
+(`createProxyWithNonce`) - there is no "existing owner" yet at deployment
+time, so nothing needs to co-sign the act of setting the initial owners.
+Concretely, this means:
+- **The mobile app never needs to generate a throwaway keypair for a new
+  sub-wallet at all.** On Stellar, the new account's address *was* a
+  keypair's public key, so one had to exist somewhere, if only to be
+  discarded. A Safe's address is a CREATE2 hash of `(factory, singleton,
+  initializer calldata, salt nonce)` - it doesn't correspond to any
+  keypair, ever. The backend can pick the salt itself.
+- **There is no second signature to collect at sub-wallet creation.**
+  Where the original needs `PrimarySignature` *and* `SubWalletSignature`
+  before submitting, deploying a Safe with `owners: [primaryAddress],
+  threshold: 1` needs zero owner signatures - only an authenticated
+  *request* from the primary asking for it (via §12's per-request
+  signature auth), not a transaction-level co-signature from a wallet
+  that doesn't exist yet.
+- This satisfies "disable the sub-wallet from signing its own
+  transactions" more strictly than the original's own audited behavior
+  (§13.1) does for ordinary sub-wallets: there is no sub-wallet key to
+  disable, because one is never created.
+- The address is knowable **before** deployment (a standard "counterfactual"
+  Safe) - it can be shown to the user, and can even receive deposits,
+  before the contract is actually deployed on-chain. Deployment can be
+  deferred to the wallet's first outgoing transaction if desired, saving
+  the deployment gas entirely for a sub-wallet that's only ever a deposit
+  address.
+
+### 13.4 Schema mapping
+
+| Original | Base equivalent |
+|---|---|
+| `User.PublicKey`/`PrimarySigner` (identical at registration) | `User.Address` (already exists) - the primary wallet **is** the user's EOA, no contract involved |
+| `UserWallet.ID == Signer` ⇒ primary wallet | Primary wallet: `Address == User.Address`, no Safe deployment - it's the bare EOA |
+| `UserWallet.ID` (sub-wallet address, a keypair) | Sub-wallet: `Address` = the Safe's CREATE2 address (never a keypair) |
+| `UserWallet.Signer` | Not meaningful the same way once ownership is a Safe owner *set* rather than a single delegate - see below |
+| `SharedAccessEnabled`, `NumberOfApprovalsNeeded` | `ClosedGroup.Disabled` (inverted), `ClosedGroup.Threshold` - **already exist** in the built `sharedaccess` component, reusable as-is |
+| `WalletPermission` (grantee, wallet, permission) | `GroupMember` (`GroupID`, `MemberAddress`, `Role`) - **already exists**, `GroupRole` enum already has `INITIATOR`/`APPROVER`/`VIEW_ONLY` |
+| `PendingAuth` | `PendingAction` - **already exists**, needs the gaps in §13.7 closed |
+| `PendingTransactionSignature` | `PendingActionApproval` - **already exists** |
+
+**A model-level decision this section proposes**: fold "sub-wallet" and
+"shared-access group" into the *same* table rather than keeping them as
+the original's two separate concepts (`UserWallet` vs `ClosedGroup`).
+Every wallet beyond the primary is a `ClosedGroup` row from the moment
+it's created - a freshly created sub-wallet is simply a group with one
+member (the primary, role `INITIATOR`+`APPROVER` combined, threshold 1);
+"enabling shared access" is just adding more `GroupMember` rows and
+raising `Threshold`, not a different feature bolted onto a different
+table. This removes the original's two-different-mechanisms design
+entirely rather than porting it twice.
+
+### 13.5 The critical existing gap: `sharedaccess` isn't real multisig today
+
+The already-built `internal/components/sharedaccess` component (Phase
+29-33 of this project) does **not** provide on-chain multisig security
+today, and this needs fixing as part of this redesign, not carried
+forward: `CreateGroup` derives the group's on-chain address via
+`cryptoutil.DeriveKey` - a deterministic **EOA private key held and used
+server-side**. `tallyAndMaybeExecute`/`executeAction` re-derive that same
+key and call `Blockchain.SignAndSubmitTx` once enough `PendingActionApproval`
+rows exist. This means the actual security boundary today is "does the
+backend's approval-counting logic decide to sign," not "does the
+blockchain itself refuse to move funds without N real signatures" - a
+compromised or buggy backend can move every group's funds regardless of
+how many approvals exist, because the backend holds the one key that
+controls everything. This is a materially weaker security model than
+the original's real Stellar multisig, and directly contradicts the
+premise of "shared access" as a security feature. §13.3's Safe-based
+design fixes this: the contract itself enforces the threshold via
+`execTransaction`'s own signature verification, independent of whether
+the backend that submits the call is honest.
+
+### 13.6 Sub-wallet creation flow on Base
+
+1. Primary requests sub-wallet creation (authenticated via §12's
+   per-request signature, naming a tag/description - no public key to
+   submit, since none needs generating).
+2. Backend picks a salt (e.g. derived from `userID + tag`), computes the
+   Safe's CREATE2 address off-chain (deterministic, no chain call
+   needed), and returns it immediately - this can already be shown to
+   the user and can receive funds.
+3. Deployment (via the canonical `SafeProxyFactory.createProxyWithNonce`,
+   pointed at Base's already-deployed `SafeL2` singleton - no need to
+   deploy our own) happens either right away or lazily on first outgoing
+   transaction; either way it needs no owner signature, only a submitted
+   transaction from *some* funded address (see §13.7 for who pays gas).
+4. On confirmed deployment, insert the `ClosedGroup` row (`Address` =
+   the Safe address, `Threshold: 1`) and a `GroupMember` row (primary,
+   role covering both initiate and approve at threshold 1).
+5. Wallet lookup "by user ID" is a `ClosedGroup`/`GroupMember` join on
+   `MemberAddress`; "by signer" is the same join filtered to a specific
+   address - both straightforward once §13.4's unified table is in place
+   (the original's `db/user_go.go` `id/temp_public_key/signer` OR-query
+   collapses to one join).
+
+### 13.7 Economical activation - gas options
+
+Base's L2 fees are already low (typically well under a cent per
+transaction), so "economical" here is about avoiding *unnecessary*
+overhead on top of that floor, and about who fronts it:
+
+| Option | How it works | Tradeoff |
+|---|---|---|
+| **A - Safe's built-in gas refund (recommended to start)** | `execTransaction`'s own `gasPrice`/`gasToken`/`refundReceiver` parameters let the Safe reimburse whoever submits the call, paid from the Safe's *own* ETH balance. A small ETH top-up at creation time (directly analogous to the original's DB-configurable `ActivationAmount`) funds this float; a backend-operated relayer submits transactions and gets reimbursed by each Safe it acts for. | Needs a relayer service (can be the same account submitting on behalf of many wallets) and each wallet needs a small ETH float, refilled periodically - closely mirrors the original's "activates using the primary wallet's balance" framing, since the top-up itself is typically funded by a transfer from the primary at creation time. |
+| **B - Primary EOA pays gas directly** | Primary wallet holds a small ETH balance and submits `execTransaction` itself as an ordinary sender. | Simplest to build, but pushes a "keep some ETH around" UX requirement onto the user - the exact thing Stellar's model doesn't require of end users, since the original abstracts even the *native-asset* activation amount away as an internal bookkeeping detail. |
+| **C - ERC-4337 (account abstraction) + Paymaster** | A `UserOperation` flow where a project-funded paymaster sponsors gas entirely - zero ETH ever required from the user for this. | Real engineering lift (bundler integration, paymaster contract/service) beyond what this feature needs on day one; worth keeping as a documented future upgrade path once volume justifies it, not a blocker now. |
+
+**Recommendation**: start with Option A - it reuses the existing
+`ActivationAmount`-style config pattern almost verbatim (a small,
+per-wallet-type configurable ETH top-up) and keeps gas UX fully backend-
+managed, matching the original's "user never thinks about the reserve
+requirement" experience. Document C as the natural next step if a fully
+gasless product experience becomes a priority later.
+
+### 13.8 Shared-access parity: closing the gaps in what's already built
+
+Per the existing-implementation audit, the built `sharedaccess` component
+already gets right: the three-role model, threshold-derived-from-
+membership (not a separate stored count, matching the original), the
+proposal→approval→tally→execute pipeline, and duplicate-approval
+protection. What needs adding for full parity (beyond the §13.5 Safe
+migration itself):
+
+- **Member management** - the original's `ModifySharedWalletAccess`/
+  `CreateSharedWalletAccess` let an owner add/remove/re-role members and
+  change the threshold after the fact, itself gated through the same
+  pending-approval mechanism once approvers already exist (a `MODIFY
+  SHARED ACCESS` pending action, mapped here to a Safe `addOwnerWithThreshold`/
+  `removeOwner`/`swapOwner`/`changeThreshold` call proposed and approved
+  exactly like any other action). Today's `sharedaccess` has no such
+  operation at all - membership is fixed at `CreateGroup` time.
+- **Group disable/revoke** - the original's `DELETE /v1/shared-access/
+  users/account` (a `DISABLE SHARED ACCESS` pending action, blocked while
+  another shared-access change is already pending) has no equivalent
+  today.
+- **Generic per-domain post-processing hook** - the original's
+  `TransactionType` switch creates a domain record (fee row, withdrawal
+  request, market offer, tokenization record, etc.) after each
+  successful execution. The built `PendingAction.Kind` today only
+  distinguishes `payment`/`swap`/`contract_call` - since a Safe
+  transaction is inherently generic (`to`/`value`/`data`), the cleanest
+  port is to keep this infrastructure domain-agnostic and let each
+  business component (crypto withdrawals, tokenization, market-making)
+  create its own `PendingAction` referencing its own record and register
+  a callback invoked on execution - this needs a small mechanism (an
+  `OnExecuted` hook or a `RelatedRecordID`+`Domain` pair the caller reads
+  back), which does not exist yet and is worth designing at
+  implementation time rather than fully speccing every domain's
+  post-processing here.
+- **Cross-wallet listing** - "all wallets belonging to a user, both
+  owned and shared to them" (the original's `GetAllWallets` +
+  `WalletsSharedWithUser` reverse association) has no equivalent
+  aggregator in the port today; add one query joining owned wallets with
+  `GroupMember` rows keyed by the caller's address.
+- **Curated-asset-filtered balance summary** - genuinely new relative to
+  the original (§13.1's finding), but a reasonable ask on its own terms:
+  a per-wallet balance endpoint that iterates the existing curated-token
+  catalog (`assets.CuratedToken`/`ListCurated()`, already built) and
+  returns only those balances, ignoring anything not on the curated list.
+- **Naming**: purely cosmetic, but worth a decision before implementation
+  - keep `APPROVER` (already in code) or rename to `AUTHORIZER` to match
+  the user's own vocabulary for this feature. No functional impact
+  either way.
+
+### 13.9 Open decisions needing a call before implementation
+
+- Safe vs. a custom minimal multisig contract (§13.3 recommends Safe).
+- Gas-sponsorship model for deployment/execution (§13.7 recommends
+  Option A to start).
+- `APPROVER` vs `AUTHORIZER` naming (§13.8, cosmetic).
+- Whether the unified sub-wallet/group table (§13.4) fully replaces
+  `UserWallet` for non-primary wallets, or whether `UserWallet` stays as
+  a thin index row pointing at a `ClosedGroup` - an implementation-time
+  call once the exact query patterns other components rely on
+  (`UserWallet` is referenced well beyond `sharedaccess` - payments,
+  assets, swaps) are inventoried.
+
+### 13.10 Phased roadmap (not started - design only)
+
+| Phase | Scope |
+|---|---|
+| 1 | Safe factory/singleton wiring on Base (address constants, CREATE2 address computation helper, deployment call) |
+| 2 | Unified sub-wallet/group schema migration (§13.4), sub-wallet creation flow (§13.6) replacing `POST /v1/users/subwallet`'s two-phase XDR dance |
+| 3 | Gas-refund float wiring (§13.7 Option A) and relayer submission path |
+| 4 | Member management + group disable (§13.8), routed through the existing propose/approve/execute pipeline |
+| 5 | Generic per-domain post-processing hook (§13.8); wire crypto/tokenization/market-making initiators onto it |
+| 6 | Cross-wallet listing + curated-asset-filtered balance summary (§13.8) |
+| 7 | Full build/vet/test/tidy pass; a live smoke test creating a sub-wallet, enabling shared access, and driving one action through propose→approve→execute on Base Sepolia |
+
+Implementation does not begin until explicitly authorized.
+
+## 14. Servicelinks: QR-driven login/2FA/event authorization parity
+
+### 14.1 What's already correct (confirmed against the original's actual code)
+
+The built `servicelinks` component already gets the important structural
+decisions right, now confirmed against the original rather than assumed:
+route separation (wallet-session-authed `/v1/approvals/...` for the app
+side vs. API-key-authed `/v1/partner/...` for the third party, never
+both on the same route - matching the original's own split), the
+`ApprovalKind` discriminator (`LOGIN`/`AUTHORIZE`/`EVENT`, matching the
+original's three kinds exactly), and `VerifyApproval`'s behavior (issues
+a session token only for `LOGIN`, returns just the approval record for
+`AUTHORIZE`/`EVENT` - this is not a bug, §12.5 above corrects an earlier
+draft of this document that assumed otherwise). The granular
+`CanLogin`/`CanRequestAuthorization`/`CanRegisterEvents`/... capability
+flags on `ServiceLink` are, if anything, a cleaner design than the
+original's own same-shaped-but-differently-named permission booleans -
+no change needed there.
+
+### 14.2 Gaps to close
+
+1. **QR code generation is entirely missing from this component.** The
+   original generates a dynamic link embedding an `action` query
+   parameter (`login`/`authorize`/`event`) plus the relevant ID(s), then
+   renders that link as a QR PNG (`internal/dynamiclinks`) - this `action`
+   parameter is the *only* thing the original mobile app actually reads
+   to decide which approval screen to show (confirmed - there is no
+   separate "get approval details" endpoint that returns a kind field).
+   This port already has an equivalent QR/short-link component built for
+   an unrelated purpose (`internal/components/shortlink`, Phase 13) -
+   the fix is to reuse it, not build QR support twice: on
+   `RequestApproval`, mint a shortlink whose target encodes
+   `action=login|authorize|event` plus the approval ID and service-link
+   ID, and return that shortlink's QR image URL alongside the approval
+   response.
+2. **No callback dispatch.** `ServiceLinkApproval.CallbackURL` is stored
+   but never read back anywhere in the reviewed code - the original
+   fires an async, retried webhook POST to the partner's callback URL
+   the moment a user approves (`callBackRetryChan`). Add the same:
+   on `Approve`, dispatch the callback asynchronously with retry: this
+   is the piece that lets a partner learn "approved" without polling
+   `verify` in a loop.
+3. **`AudienceServiceLinkSession` rename** - tracked already in §12.5/
+   §12.7 Phase 4, not a new item, just cross-referenced here since it's
+   this component's file that changes.
+4. **`EVENT` action on the mobile side is untested territory even in
+   the original** - the original mobile app's own deep-link dispatcher
+   (`processDeepLink` in `storage/state.dart`) has no `'event'` case at
+   all; only `login`/`payment`/`authorize`/`register`/`tokenizedAsset`
+   are wired, despite the backend having a real `EVENT` kind. This is a
+   gap in the *original's own mobile app*, not something to reproduce -
+   `wallet-mobile` (see its own `PLAN.md`) will add the missing case
+   properly rather than carry the original's oversight forward.
+
+### 14.3 Phased roadmap
+
+| Phase | Scope | Depends on |
+|---|---|---|
+| 1 | Wire `RequestApproval` to mint a shortlink + QR via the existing `shortlink` component, embedding `action`+IDs the same way the original's dynamic links do | §12.7 Phase 3 not required, but naturally lands alongside it |
+| 2 | Async, retried callback dispatch on `Approve` | Phase 1 |
+| 3 | `AudienceServiceLinkSession` rename (shared with §12.7 Phase 4) | §12.7 Phase 3 |
+| 4 | Test, document, push | 1-3 |
+
+Implementation does not begin until explicitly authorized.
