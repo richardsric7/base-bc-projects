@@ -1994,52 +1994,125 @@ migration itself):
 
 Implementation does not begin until explicitly authorized.
 
-## 14. Servicelinks: QR-driven login/2FA/event authorization parity
+## 14. Servicelinks: QR-driven login/2FA/event/payment-request parity
+
+The original's servicelinks subsystem is **four** distinct client-facing
+capabilities, not three - an earlier pass at this section only tracked
+the `ApprovalKind` enum's three values (`LOGIN`/`AUTHORIZE`/`EVENT`) and
+missed the fourth, differently-shaped one (payment-request links, §14.1a
+below), since it isn't part of that enum at all. Status of each, audited
+directly against the original's actual handlers:
+
+| Capability | Original mechanism | Port status |
+|---|---|---|
+| **Login verification** | `LOGIN`-kind approval; `VerifyApproval` calls the original's `LogUserIn`, issuing a real access/refresh token pair to the redeeming partner | **Already correct** - confirmed in §12.5 above; the port's `VerifyApproval` does exactly this for `LOGIN` today. Only needs the `AudienceServiceLinkSession` rename (§12.5/§12.7 Phase 4), not a behavior change |
+| **Authorize (2FA / generic approval)** | `AUTHORIZE`-kind approval; verify returns `{"message":"success"}`, no token | **Already correct** - confirmed in §12.5; no change needed |
+| **Event** | `EVENT`-kind approval; backend supports it, but the original's own mobile app never wired a `'event'` case in its deep-link dispatcher | Backend: already correct. Mobile-side gap in the *original app itself* - `wallet-mobile` closes it (§14.2 item 5) |
+| **Payment-request link** ("service link payment authorization") | **Not an approval at all** - see §14.1a. A stateless, Redis-cached QR/deep-link generator embedding a specific payment's destination/asset/amount/memo, requested by a partner on a named user's behalf. No `ServiceLinkApproval` row, no signature-based approve/verify step - the wallet owner reviews and signs the resulting payment themselves through the ordinary payment flow when they scan it | **Missing entirely from this port** - genuinely new work, §14.1a/§14.2 item 1 |
 
 ### 14.1 What's already correct (confirmed against the original's actual code)
 
 The built `servicelinks` component already gets the important structural
-decisions right, now confirmed against the original rather than assumed:
-route separation (wallet-session-authed `/v1/approvals/...` for the app
-side vs. API-key-authed `/v1/partner/...` for the third party, never
-both on the same route - matching the original's own split), the
-`ApprovalKind` discriminator (`LOGIN`/`AUTHORIZE`/`EVENT`, matching the
-original's three kinds exactly), and `VerifyApproval`'s behavior (issues
-a session token only for `LOGIN`, returns just the approval record for
-`AUTHORIZE`/`EVENT` - this is not a bug, §12.5 above corrects an earlier
-draft of this document that assumed otherwise). The granular
-`CanLogin`/`CanRequestAuthorization`/`CanRegisterEvents`/... capability
-flags on `ServiceLink` are, if anything, a cleaner design than the
-original's own same-shaped-but-differently-named permission booleans -
-no change needed there.
+decisions right for the three `ApprovalKind` capabilities, now confirmed
+against the original rather than assumed: route separation
+(`/v1/approvals/...` for the app side vs. API-key-authed `/v1/partner/...`
+for the third party, never both on the same route - matching the
+original's own split), the `ApprovalKind` discriminator itself
+(`LOGIN`/`AUTHORIZE`/`EVENT`, matching the original's three kinds
+exactly), and `VerifyApproval`'s behavior (see the table above). The
+granular `CanLogin`/`CanRequestAuthorization`/`CanRegisterEvents`/...
+capability flags on `ServiceLink` are, if anything, a cleaner design than
+the original's own same-shaped-but-differently-named permission
+booleans - no change needed there.
+
+### 14.1a Payment-request links (audited, not previously covered)
+
+The original's `GET /v1/servicelinks/payment/request/:targetUser`
+(app-signed) and `GET /v1/trovo-api/payment/request/:targetUser`
+(API-key-only, for a partner calling server-to-server) are two entry
+points to the *same* handler shape
+(`dynamiclinks.GeneratePaymentData`): given `paymentDestination`,
+`assetCode`, `assetIssuer`, `amount`, `memo` as query parameters (with
+XLM-specific validation - asset code length, decimal truncation to 7
+places, a 28-byte memo cap that will need Base-appropriate equivalents,
+not identical numbers), it builds a dynamic link embedding
+`action=payment` plus those same fields, renders it as a QR (cached in
+Redis for 20 minutes so repeat requests for the same link are free), and
+returns it - gated only by the requesting service link's
+`PaymentPermission` flag. Two things worth being precise about, since
+they're easy to get wrong porting this:
+- **This is a "receive/request payment" QR, not an "authorize a payment"
+  flow.** There is no server-side pending record and no separate verify/
+  redeem step for a partner to poll - unlike `LOGIN`/`AUTHORIZE`/`EVENT`,
+  nothing here waits for the user to approve anything on the backend.
+  The mobile app's `processDeepLink` (`action == 'payment'`) simply
+  pre-fills the ordinary send-payment screen from the decoded query
+  parameters; the actual authorization is the user reviewing and signing
+  that payment themselves through the normal payment endpoint, same as
+  if they'd typed the destination in by hand. Do not build a
+  `ServiceLinkApproval`-style record for this - it would be inventing
+  state the original never has.
+  - **A dead/commented-out check worth not reviving**: the original's
+    handler for the app-signed variant has a commented-out
+    `mInfo.PublicKey != middleware.ExtractPublicKey(c)` identity check -
+    i.e. even the "signed" route never actually verifies the caller's
+    identity against anything beyond the service link's own API key.
+    The Base port's version doesn't need to reproduce this dead code
+    either way, but should decide deliberately whether the signed
+    variant should check the caller matches `targetUser` (tighter than
+    the original) rather than silently inheriting the original's
+    no-op check.
+
+**Header/verification note, stated explicitly rather than left
+implicit**: `/v1/approvals/...` is one of the routes §12.7 Phase 3
+re-points from `JWTAuth(..., AudienceWalletSession)` onto the new
+middleware - once that phase lands, the app side of servicelinks
+authenticates the exact same stateless way as every other user route:
+`X-Signer-Address`/`X-Wallet-Address`/`X-Signature`/`X-Timestamp` (§12.2),
+verified offline against `cryptoutil.VerifyPersonalSign` with no
+server-side session lookup (§12.3) - there is no separate carve-out or
+leftover JWT path for servicelinks specifically. `/v1/partner/...` keeps
+`APIKeyAuth` unchanged (§12.5) - that side was never part of the
+JWT-session scheme to begin with, so nothing there moves.
 
 ### 14.2 Gaps to close
 
-1. **QR code generation is entirely missing from this component.** The
+1. **Payment-request links don't exist in this port at all** (§14.1a) -
+   add a route pair mirroring the original's two entry points (app-signed
+   via §12's new middleware; partner-side via the existing `APIKeyAuth`),
+   gated on a `CanSendPayments`-style capability flag (the port's
+   `ServiceLink` model already has `CanSendPayments`/`CanReadBalances` -
+   reuse rather than add a redundant flag), reusing the same
+   shortlink/QR mechanism from item 2 below and encoding
+   `to`/`tokenAddress`/`amount`/`memo` in EVM terms instead of
+   `paymentDestination`/`assetCode`/`assetIssuer`/`amount`/`memo` in
+   Stellar terms. No `ServiceLinkApproval` row - this stays a stateless,
+   cached link generator per §14.1a.
+2. **QR code generation is entirely missing from this component.** The
    original generates a dynamic link embedding an `action` query
-   parameter (`login`/`authorize`/`event`) plus the relevant ID(s), then
-   renders that link as a QR PNG (`internal/dynamiclinks`) - this `action`
-   parameter is the *only* thing the original mobile app actually reads
-   to decide which approval screen to show (confirmed - there is no
-   separate "get approval details" endpoint that returns a kind field).
-   This port already has an equivalent QR/short-link component built for
-   an unrelated purpose (`internal/components/shortlink`, Phase 13) -
-   the fix is to reuse it, not build QR support twice: on
-   `RequestApproval`, mint a shortlink whose target encodes
-   `action=login|authorize|event` plus the approval ID and service-link
-   ID, and return that shortlink's QR image URL alongside the approval
-   response.
-2. **No callback dispatch.** `ServiceLinkApproval.CallbackURL` is stored
+   parameter (`login`/`authorize`/`event`/`payment`) plus the relevant
+   ID(s), then renders that link as a QR PNG (`internal/dynamiclinks`) -
+   this `action` parameter is the *only* thing the original mobile app
+   actually reads to decide which approval screen to show (confirmed -
+   there is no separate "get approval details" endpoint that returns a
+   kind field). This port already has an equivalent QR/short-link
+   component built for an unrelated purpose
+   (`internal/components/shortlink`, Phase 13) - the fix is to reuse it,
+   not build QR support twice: on `RequestApproval` (and on item 1's new
+   payment-request handler), mint a shortlink whose target encodes
+   `action=login|authorize|event|payment` plus the relevant ID(s), and
+   return that shortlink's QR image URL alongside the response.
+3. **No callback dispatch.** `ServiceLinkApproval.CallbackURL` is stored
    but never read back anywhere in the reviewed code - the original
    fires an async, retried webhook POST to the partner's callback URL
    the moment a user approves (`callBackRetryChan`). Add the same:
    on `Approve`, dispatch the callback asynchronously with retry: this
    is the piece that lets a partner learn "approved" without polling
    `verify` in a loop.
-3. **`AudienceServiceLinkSession` rename** - tracked already in §12.5/
+4. **`AudienceServiceLinkSession` rename** - tracked already in §12.5/
    §12.7 Phase 4, not a new item, just cross-referenced here since it's
    this component's file that changes.
-4. **`EVENT` action on the mobile side is untested territory even in
+5. **`EVENT` action on the mobile side is untested territory even in
    the original** - the original mobile app's own deep-link dispatcher
    (`processDeepLink` in `storage/state.dart`) has no `'event'` case at
    all; only `login`/`payment`/`authorize`/`register`/`tokenizedAsset`
@@ -2052,9 +2125,10 @@ no change needed there.
 
 | Phase | Scope | Depends on |
 |---|---|---|
-| 1 | Wire `RequestApproval` to mint a shortlink + QR via the existing `shortlink` component, embedding `action`+IDs the same way the original's dynamic links do | §12.7 Phase 3 not required, but naturally lands alongside it |
-| 2 | Async, retried callback dispatch on `Approve` | Phase 1 |
-| 3 | `AudienceServiceLinkSession` rename (shared with §12.7 Phase 4) | §12.7 Phase 3 |
-| 4 | Test, document, push | 1-3 |
+| 1 | New payment-request-link route pair (§14.2 item 1) - EVM-equivalent query params, `CanSendPayments` gate, no approval record | — |
+| 2 | Wire `RequestApproval` (and Phase 1's handler) to mint a shortlink + QR via the existing `shortlink` component, embedding `action`+IDs the same way the original's dynamic links do | §12.7 Phase 3 not required, but naturally lands alongside it |
+| 3 | Async, retried callback dispatch on `Approve` | Phase 2 |
+| 4 | `AudienceServiceLinkSession` rename (shared with §12.7 Phase 4) | §12.7 Phase 3 |
+| 5 | Test, document, push | 1-4 |
 
 Implementation does not begin until explicitly authorized.

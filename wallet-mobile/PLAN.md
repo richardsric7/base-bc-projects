@@ -54,7 +54,7 @@ Audited directly (not assumed) from `trovo-wallet-monorepo/mobile`:
   the single switch on a decoded link's `action` query parameter -
   `login`/`payment`/`authorize`/`register`/`tokenizedAsset` are handled;
   there is **no `'event'` case**, despite the backend having a real
-  `EVENT` servicelinks kind (`wallet-backend/PLAN.md` §14.2 point 4) -
+  `EVENT` servicelinks kind (`wallet-backend/PLAN.md` §14.2 item 5) -
   an original-app gap, not something to carry forward.
 
 ## 2. Framework decision
@@ -186,16 +186,37 @@ views read the new curated-asset-filtered summary endpoint
 (`wallet-backend/PLAN.md` §13.8) instead of an unfiltered Horizon balance
 list.
 
-## 8. Servicelinks: QR scanning + the missing `EVENT` case
+## 8. Servicelinks: QR scanning, login/authorize/payment retained, the missing `EVENT` case added
 
 `qr_scanner_view.dart` and `processDeepLink`'s action-dispatch pattern
 port as the right shape - scan a link (now pointing at the reused
-`shortlink` component's QR output, `wallet-backend/PLAN.md` §14.2 point
-1, rather than Firebase Dynamic Links), decode its `action` parameter,
-push the matching approval screen. This port adds the `'event'` case the
-original's own mobile app never wired up (§1, §14.2 point 4), with its
-own approval screen alongside the existing login/authorize ones -
-closing a gap in the *original*, not introducing a Base-specific one.
+`shortlink` component's QR output, `wallet-backend/PLAN.md` §14.2 item
+2, rather than Firebase Dynamic Links), decode its `action` parameter,
+push the matching screen. Every action the original's dispatcher already
+handles carries over:
+
+- **`login`** - pushes the same login-approval screen; verification still
+  yields the partner a session token exactly as today (`wallet-backend/
+  PLAN.md` §12.5/§14's login-verification row - unchanged behavior, just
+  confirmed explicitly here since it's easy to assume "redesign" implies
+  this path changed too).
+- **`authorize`** - the 2FA/generic-approval screen, unchanged shape
+  (no token issued on verify, per the same table).
+- **`payment`** - **not an approval screen at all** (`wallet-backend/
+  PLAN.md` §14.1a) - decodes straight into the ordinary send-payment
+  screen, pre-filled from the link's `to`/`tokenAddress`/`amount`/`memo`
+  query parameters, the same way the original pre-fills its send screen
+  from `paymentDestination`/`assetCode`/`assetIssuer`/`amount`/`memo`.
+  The user reviews and signs it like any other payment - there is no
+  separate "authorize this payment-request" step to build, because the
+  original doesn't have one either (§14.1a).
+- **`event`** (new) - the case the original's own mobile app never wired
+  up despite the backend supporting it (§1, `wallet-backend/PLAN.md`
+  §14.2 item 5); this port adds its own approval screen alongside the
+  others, closing a gap in the *original*, not introducing a
+  Base-specific one.
+- `register`/`tokenizedAsset` carry over as their own existing flows,
+  unaffected by this redesign.
 
 ## 9. Business-logic parity map
 
