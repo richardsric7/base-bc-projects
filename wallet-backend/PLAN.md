@@ -2005,8 +2005,8 @@ directly against the original's actual handlers:
 
 | Capability | Original mechanism | Port status |
 |---|---|---|
-| **Login verification** | `LOGIN`-kind approval; `VerifyApproval` calls the original's `LogUserIn`, issuing a real access/refresh token pair to the redeeming partner | **Already correct** - confirmed in §12.5 above; the port's `VerifyApproval` does exactly this for `LOGIN` today. Only needs the `AudienceServiceLinkSession` rename (§12.5/§12.7 Phase 4), not a behavior change |
-| **Authorize (2FA / generic approval)** | `AUTHORIZE`-kind approval; verify returns `{"message":"success"}`, no token | **Already correct** - confirmed in §12.5; no change needed |
+| **Login request → user login approval → verification** | `LOGIN`-kind approval; `VerifyApproval` calls the original's `LogUserIn`, issuing a real access/refresh token pair to the redeeming partner - see §14.1.1 for the full request→approve→verify lifecycle spelled out route-by-route | **Already correct** - confirmed in §12.5 above; the port's `VerifyApproval` does exactly this for `LOGIN` today. Only needs the `AudienceServiceLinkSession` rename (§12.5/§12.7 Phase 4), not a behavior change |
+| **Authorize (payment authorization, 2FA, or any other partner-described consent)** | `AUTHORIZE`-kind approval; verify returns `{"message":"success"}`, no token - see §14.1.2 for the full request→approve→verify lifecycle, spelled out explicitly since "payment authorization" is a named use of this generic kind, not a separate mechanism | **Already correct** - confirmed in §12.5; no change needed |
 | **Event** | `EVENT`-kind approval; backend supports it, but the original's own mobile app never wired a `'event'` case in its deep-link dispatcher | Backend: already correct. Mobile-side gap in the *original app itself* - `wallet-mobile` closes it (§14.2 item 5) |
 | **Payment-request link** ("service link payment authorization") | **Not an approval at all** - see §14.1a. A stateless, Redis-cached QR/deep-link generator embedding a specific payment's destination/asset/amount/memo, requested by a partner on a named user's behalf. No `ServiceLinkApproval` row, no signature-based approve/verify step - the wallet owner reviews and signs the resulting payment themselves through the ordinary payment flow when they scan it | **Missing entirely from this port** - genuinely new work, §14.1a/§14.2 item 1 |
 
@@ -2024,6 +2024,52 @@ granular `CanLogin`/`CanRequestAuthorization`/`CanRegisterEvents`/...
 capability flags on `ServiceLink` are, if anything, a cleaner design than
 the original's own same-shaped-but-differently-named permission
 booleans - no change needed there.
+
+Spelled out step-by-step, since it's worth being unambiguous that both
+of the following full lifecycles - not just the `VerifyApproval` end of
+them - are already covered, route for route:
+
+**14.1.1 Servicelinks login request → user login approval → partner
+verify (the `LOGIN` lifecycle)**
+
+| Step | Original route | Port's route (generic across all three kinds) |
+|---|---|---|
+| 1. Partner requests a login for a named user | `POST /v1/servicelinks/login/request/:targetUser` (`AuthenticationMiddlewareUsingAPIKey`) - creates a `ServiceLinkLoginSession` row | `POST /v1/partner/approvals` with `kind: "LOGIN"` (`APIKeyAuth`, gated on `CanLogin`) - creates a `ServiceLinkApproval{Kind: LOGIN}` row |
+| 2. User approves in the app | `POST /v1/users/servicelinks/login/approval/:targetUser` (signature-middleware-authed) - sets `Authorized = 1` | `POST /v1/approvals/:id/approve` (moving to §12's stateless signature auth per the note below) - sets `Authorized = true` |
+| 3. Partner redeems the approval | `GET /v1/servicelinks/login/verify/:ownerUsername/:targetUser/:loginID` (`APIKeyAuth`) - calls `LogUserIn`, returns an access/refresh token pair | `GET /v1/partner/approvals/:id/verify` (`APIKeyAuth`) - `VerifyApproval` mints the same kind of token pair for `LOGIN` (§12.5) |
+
+This is the exact "users to authorize login requests... using our mobile
+app to login third-party services" lifecycle from this redesign's
+original brief - request, user approval, partner verification - and all
+three steps already exist in the port today, just collapsed onto one
+generic model/route set instead of the original's three near-identical
+ones (a deliberate, already-made simplification, not a gap).
+
+**14.1.2 Servicelinks payment/2FA authorization request → user approval
+→ partner verify (the `AUTHORIZE` lifecycle - this *is* "servicelinks
+user payment authorization")**
+
+The original's `AUTHORIZE` kind is not 2FA-specific - it's a
+general-purpose "ask the user, via the app, to approve this one
+described thing" mechanism, and a partner requesting payment
+authorization is exactly one of its uses (2FA and other consent prompts
+being the others), not a separate feature:
+
+| Step | Original route | Port's route |
+|---|---|---|
+| 1. Partner requests authorization (e.g. "approve this ₦5,000 payment to Merchant X", carried in `AuthDescription`) | `POST /v1/servicelinks/authorize/request/:targetUser` (`AuthenticationMiddlewareUsingAPIKey`) - creates a `ServiceLinkAuthorization` row | `POST /v1/partner/approvals` with `kind: "AUTHORIZE"` and the payment's description text in `Description` (`APIKeyAuth`, gated on `CanRequestAuthorization`) - creates a `ServiceLinkApproval{Kind: AUTHORIZE}` row |
+| 2. User approves in the app | `POST /v1/users/servicelinks/authorize/approval/:targetUser` (signature-middleware-authed) - sets `Authorized = 1` | `POST /v1/approvals/:id/approve` - sets `Authorized = true` |
+| 3. Partner (or the app itself, via the poll route) confirms | `GET /v1/servicelinks/authorize/verify/:ownerUsername/:targetUser/:authId` (partner, `APIKeyAuth`) / `GET /v1/servicelinks/app/authorize/verify/...` (app poll, signature-authed) - both return `{"message":"success"}`, no token | `GET /v1/partner/approvals/:id/verify` (`APIKeyAuth`) - returns the approval record, no token (§12.5) |
+
+Nothing here moves or debits funds by itself - approving is consent, not
+a transfer. If a partner's flow needs the user's wallet to actually move
+funds after authorization (rather than just confirming intent to the
+partner), that partner makes its own subsequent call against the ordinary
+payment/shared-access endpoints using the now-confirmed consent, the same
+way the original leaves it to the partner's own next call rather than
+having `VerifyApproval` itself trigger a transfer. This `AUTHORIZE`
+lifecycle is distinct from - and should not be confused with - §14.1a's
+payment-*request* links, which involve no approval step at all.
 
 ### 14.1a Payment-request links (audited, not previously covered)
 
