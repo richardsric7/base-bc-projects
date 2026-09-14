@@ -22,10 +22,12 @@
 // are another user's primary wallet, direct EOA signatures for members who
 // are a plain external EOA - see resolveGroupOwnerSigner), and submits it
 // through a pool relayer (internal/relayer), held until the submission
-// confirms on-chain (PLAN.md §13.12). What's still deliberately missing:
-// per-Safe nonce reservation (a proposal's SafeNonce is a naive on-chain
-// read at proposal time, not an atomically reserved one - PLAN.md §13.12
-// risk 1) and the stale-action expiry sweep, both Phase 6's job.
+// confirms on-chain (PLAN.md §13.12). Phase 6 (reserveSafeNonce) makes a
+// proposal's SafeTxHash-fixing nonce read atomic - one Safe may have at
+// most one nonce-consuming action outstanding at a time, enforced under a
+// row lock - and adds ExpireStalePendingActions, the stale-action sweep
+// PLAN.md §13.12 flags as missing relative to the original's own
+// fiat-invoice expiry.
 package services
 
 import (
@@ -37,10 +39,12 @@ import (
 	"log"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"wallet-backend/internal/apperrors"
 	"wallet-backend/internal/components/sharedaccess/models"
@@ -412,22 +416,80 @@ func (s *Service) createPendingAction(ctx context.Context, group *models.ClosedG
 		RequiredApprovals:   group.Threshold,
 		Status:              models.ActionPending,
 	}
-	// Only an action that will actually call the Safe needs a nonce fixed
-	// up front - a pure application-level change (an added/removed
-	// VIEW_ONLY/INITIATOR member, or a group disable) never submits
-	// anything on-chain, so there's no SafeTxHash for it to fix a nonce
-	// for.
-	if p.to != "" {
-		nonce, err := s.Blockchain.SafeNonce(ctx, *group.Address)
-		if err != nil {
-			return nil, apperrors.Internal("failed to read the group wallet's on-chain nonce: " + err.Error())
+	// A pure application-level change (an added/removed VIEW_ONLY/
+	// INITIATOR member, or a group disable) never submits anything
+	// on-chain, so there's no SafeTxHash - and hence no nonce - to
+	// reserve for it at all.
+	if p.to == "" {
+		if err := s.DB.Create(&action).Error; err != nil {
+			return nil, apperrors.Internal("failed to propose action")
+		}
+		return &action, nil
+	}
+
+	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		nonce, rerr := s.reserveSafeNonce(ctx, tx, group)
+		if rerr != nil {
+			return rerr
 		}
 		action.SafeNonce = nonce.String()
-	}
-	if err := s.DB.Create(&action).Error; err != nil {
-		return nil, apperrors.Internal("failed to propose action")
+		if cerr := tx.Create(&action).Error; cerr != nil {
+			return apperrors.Internal("failed to propose action")
+		}
+		return nil
+	})
+	if err != nil {
+		if appErr, ok := err.(*apperrors.AppError); ok {
+			return nil, appErr
+		}
+		return nil, apperrors.Internal("failed to propose action: " + err.Error())
 	}
 	return &action, nil
+}
+
+// reserveSafeNonce fixes the Safe nonce a new nonce-consuming action's
+// SafeTxHash will be computed against (PLAN.md §13.10 Phase 6/§13.12 risk
+// 1), called inside the same DB transaction that then inserts the action.
+//
+// A Safe's own nonce only ever increments on a *successful* on-chain
+// execTransaction call - never on this application's own REJECTED status,
+// which has no on-chain effect at all. That rules out the simpler scheme
+// of "assign onChainNonce + count(non-terminal actions)" verbatim: if an
+// earlier-reserved action is rejected before executing, its nonce slot is
+// never actually consumed on the real Safe, so a later action holding the
+// next nonce up would revert forever once it tried to execute, with no
+// way to recover short of renumbering every other outstanding action
+// (invalidating every signature already collected for them in the
+// process). Rather than build that renumbering machinery, this enforces
+// the simpler, provably-correct invariant a Safe's own nonce sequence
+// already implies: at most one nonce-consuming action may be
+// PENDING/SUBMITTED per group at a time. Locking the ClosedGroup row for
+// the duration of this check-then-insert is what makes two concurrent
+// proposals against the same group race safely instead of both reading
+// "none outstanding" and colliding - the second blocks on the lock until
+// the first commits, then correctly sees the first's action and is
+// rejected.
+func (s *Service) reserveSafeNonce(ctx context.Context, tx *gorm.DB, group *models.ClosedGroup) (*big.Int, error) {
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&models.ClosedGroup{}, group.ID).Error; err != nil {
+		return nil, apperrors.Internal("failed to lock group for nonce reservation: " + err.Error())
+	}
+
+	var outstanding int64
+	err := tx.Model(&models.PendingAction{}).
+		Where(`group_id = ? AND "to" != '' AND status IN ?`, group.ID, []models.ActionStatus{models.ActionPending, models.ActionSubmitted}).
+		Count(&outstanding).Error
+	if err != nil {
+		return nil, apperrors.Internal("failed to check for an outstanding on-chain action")
+	}
+	if outstanding > 0 {
+		return nil, apperrors.Conflict("this wallet already has an on-chain action awaiting approval or execution - resolve it before proposing another")
+	}
+
+	nonce, err := s.Blockchain.SafeNonce(ctx, *group.Address)
+	if err != nil {
+		return nil, apperrors.Internal("failed to read the group wallet's on-chain nonce: " + err.Error())
+	}
+	return nonce, nil
 }
 
 // managementActionKinds are the four group-management kinds Phase 5 adds -
@@ -1143,6 +1205,35 @@ func (s *Service) RejectAction(actionID uint, memberAddress, reason string) (*mo
 		return nil, apperrors.Internal("failed to reject action")
 	}
 	return action, nil
+}
+
+// ExpireStalePendingActions rejects every PENDING action older than ttl -
+// the shared-access equivalent of the original's own
+// ExpireStalePaymentInvoices, closing the gap PLAN.md §13.1's audit
+// flagged: shared-access has always had a threshold but never a timeout,
+// unlike every other pending-approval flow in this codebase. Only
+// PENDING actions are in scope - a SUBMITTED action already has a relayer
+// actively waiting on its confirmation (bounded by that call's own
+// context, and recovered at the next restart by ReconcileRelayers if the
+// process dies mid-wait), so it isn't "stale" in the sense this sweep
+// exists to catch. Rejecting rather than deleting preserves the action's
+// history exactly like any other rejection - and, for a nonce-consuming
+// action, immediately frees its reservation for the next proposal, since
+// reserveSafeNonce's outstanding-action check only ever counts
+// PENDING/SUBMITTED rows. Intended to run on a periodic ticker (main.go),
+// mirroring the original's own 30-minute cadence for invoice expiry.
+func (s *Service) ExpireStalePendingActions(ttl time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-ttl)
+	result := s.DB.Model(&models.PendingAction{}).
+		Where("status = ? AND created_at < ?", models.ActionPending, cutoff).
+		Updates(map[string]interface{}{
+			"status":           models.ActionRejected,
+			"rejection_reason": "expired - no execution within the configured pending window",
+		})
+	if result.Error != nil {
+		return 0, apperrors.Internal("failed to expire stale pending actions: " + result.Error.Error())
+	}
+	return result.RowsAffected, nil
 }
 
 // Balance returns a group wallet's native ETH balance (empty tokenAddress)

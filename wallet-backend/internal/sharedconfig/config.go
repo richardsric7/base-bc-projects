@@ -156,6 +156,16 @@ type GlobalConfig struct {
 	// before it expires unactioned.
 	ServiceLinkApprovalTTL time.Duration
 
+	// PendingActionTTL is how long a shared-access PendingAction may sit
+	// PENDING before services.ExpireStalePendingActions rejects it
+	// (PLAN.md §13.10 Phase 6/§13.12) - the shared-access equivalent of
+	// the original's own fiat-invoice expiry, closing a gap flagged as
+	// missing for this specific flow. Longer than
+	// ServiceLinkApprovalTTL by design: collecting a multi-party
+	// approval threshold across several humans takes longer than a
+	// single partner login round trip.
+	PendingActionTTL time.Duration
+
 	// ShortlinkBaseURL is prefixed to a short code to build the public
 	// short URL a QR code encodes (see internal/components/shortlink,
 	// PLAN.md §4.13) - e.g. "https://trov.to" for "https://trov.to/s/AB12CD34".
@@ -247,6 +257,9 @@ type Env struct {
 	PatronVATPercent    float64
 
 	ServiceLinkApprovalTTLMinutes int
+
+	// PendingActionTTLMinutes - see GlobalConfig.PendingActionTTL's doc.
+	PendingActionTTLMinutes int
 
 	// GeoIPBaseURL points at an ipapi.co-shaped free-text country lookup
 	// (GET {baseURL}/{ip}/country/); empty disables geo-IP lookup entirely
@@ -340,6 +353,8 @@ func LoadEnv() Env {
 		PatronVATPercent:    getEnvFloat64("PATRON_VAT_PERCENT", 0),
 
 		ServiceLinkApprovalTTLMinutes: getEnvInt("SERVICELINK_APPROVAL_TTL_MINUTES", 10),
+
+		PendingActionTTLMinutes: getEnvInt("PENDING_ACTION_TTL_MINUTES", 1440),
 
 		GeoIPBaseURL: getEnv("GEOIP_BASE_URL", ""),
 

@@ -2521,6 +2521,63 @@ database):
   first/middle/last/not-found cases. Full `go build`/`go vet`/
   `go test ./...` pass across the module.
 
+#### Phase 6 implementation notes (done)
+
+- **Per-Safe nonce reservation, but not the literal count-based scheme
+  §13.12 sketched**: that section's own wording - "compute nextNonce =
+  safe.OnChainNonce + count(non-terminal PendingActions)" - turns out not
+  to be correct as written once rejections are considered. A Safe's own
+  nonce only increments on a *successful* `execTransaction` call, never
+  on this application's own `REJECTED` status, which has no on-chain
+  effect at all. So if an earlier-reserved action is rejected before
+  executing, its nonce slot is never actually consumed on the real
+  Safe - and a later action holding the next nonce up would then revert
+  forever once someone tried to execute it, with no recovery short of
+  renumbering every other outstanding action (which would invalidate
+  every signature already collected for them, since a SafeTxHash
+  depends on its nonce). Rather than build that renumbering machinery,
+  `reserveSafeNonce` enforces the simpler, provably-correct invariant a
+  Safe's own nonce sequence already implies on its own: **at most one
+  nonce-consuming action may be PENDING/SUBMITTED per group at a
+  time**. This isn't a real capacity loss - a Safe could never actually
+  execute two pending proposals concurrently anyway, since its nonce is
+  strictly sequential - it just makes that existing constraint explicit
+  and enforced instead of letting the database drift into a state the
+  chain could never honor.
+- **The lock, concretely**: `reserveSafeNonce` runs inside the same DB
+  transaction `createPendingAction` uses to insert the new action -
+  `SELECT ... FOR UPDATE` (via GORM's `clause.Locking`) on the
+  `ClosedGroup` row, then a check for any existing nonce-consuming
+  (`"to" != ''`) `PENDING`/`SUBMITTED` action on that group. A second
+  concurrent proposal against the same group blocks on the row lock
+  until the first transaction commits, then correctly observes the
+  first's now-committed row and is rejected with a 409 - never racing to
+  both read "none outstanding" and insert conflicting nonces. Once an
+  action reaches a terminal state (`EXECUTED` or `REJECTED`), it's
+  automatically excluded from that check by the next proposal - no
+  separate "release" step needed, closing the original's own analogous
+  gap where `RejectTransaction` never released its channel account at
+  all.
+- **`ExpireStalePendingActions`** (new): a straight port of the pattern
+  behind the original's `ExpireStalePaymentInvoices`, applied to the one
+  pending-approval flow that was flagged as missing it entirely
+  (§13.1's audit) - a periodic sweep (`PENDING_ACTION_TTL_MINUTES`,
+  default 24h, checked every 30 minutes from `main.go`, the original's
+  own cadence) rejects any `PENDING` action older than the configured
+  TTL. Only `PENDING` is in scope - a `SUBMITTED` action already has a
+  relayer actively waiting on its confirmation, recovered separately by
+  `ReconcileRelayers` if the process restarts mid-wait, so it isn't
+  "stale" in the sense this sweep exists to catch. Rejecting it (not
+  deleting) frees its nonce reservation immediately for the next
+  proposal, exactly like a human rejection would.
+- **Verification**: new tests cover a second on-chain proposal being
+  blocked while the first is outstanding, a second proposal succeeding
+  once the first is rejected (confirming the nonce-reservation gate
+  actually clears), and `ExpireStalePendingActions` rejecting only a
+  backdated action while leaving a fresh one untouched and re-opening the
+  group for a new proposal. Full `go build`/`go vet`/`go test ./...` pass
+  across the module.
+
 ### 13.11 Activation-order dependencies (user-flagged, audited against §13.1-§13.8's design)
 
 Registration itself never requires on-chain activation - the primary

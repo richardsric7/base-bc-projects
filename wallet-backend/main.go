@@ -244,6 +244,7 @@ func main() {
 		PatronVATPercent:    env.PatronVATPercent,
 
 		ServiceLinkApprovalTTL: durationFromMinutes(env.ServiceLinkApprovalTTLMinutes),
+		PendingActionTTL:       durationFromMinutes(env.PendingActionTTLMinutes),
 	}
 
 	router := gin.Default()
@@ -357,6 +358,20 @@ func main() {
 		for {
 			patronSvc.PromotePendingMemberships()
 			time.Sleep(30 * time.Second)
+		}
+	}()
+
+	// Stale shared-access action expiry - the same 30-minute cadence the
+	// original uses for its own fiat-invoice expiry, applied to a flow
+	// that never had a timeout of its own (PLAN.md §13.10 Phase 6/§13.12).
+	go func() {
+		for {
+			if affected, err := sharedaccessSvc.ExpireStalePendingActions(gc.PendingActionTTL); err != nil {
+				log.Printf("[sharedaccess] failed to expire stale pending actions: %v", err)
+			} else if affected > 0 {
+				log.Printf("[sharedaccess] expired %d stale pending action(s)", affected)
+			}
+			time.Sleep(30 * time.Minute)
 		}
 	}()
 

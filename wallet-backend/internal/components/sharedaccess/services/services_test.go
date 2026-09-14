@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
@@ -848,5 +849,113 @@ func TestRequireNoConflictingManagementAction_BlocksWhileOneIsPending(t *testing
 	appErr, ok := err.(*apperrors.AppError)
 	if !ok || appErr.StatusCode() != 409 {
 		t.Fatalf("expected a 409 AppError, got %#v", err)
+	}
+}
+
+func TestProposePayment_BlocksASecondOutstandingOnChainAction(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xdeployed"))
+	initiator, _ := randomAddress(t)
+	recipient, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "1-of-1", 1, []MemberInput{
+		{Address: initiator, Role: models.RoleInitiatorApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+	if _, err := svc.ProposePayment(context.Background(), initiator, group.ID, "first", recipient, "", "1"); err != nil {
+		t.Fatalf("first ProposePayment returned error: %v", err)
+	}
+
+	_, err = svc.ProposePayment(context.Background(), initiator, group.ID, "second", recipient, "", "1")
+	if err == nil {
+		t.Fatal("expected a second on-chain action to be blocked while the first is still outstanding")
+	}
+	appErr2, ok := err.(*apperrors.AppError)
+	if !ok || appErr2.StatusCode() != 409 {
+		t.Fatalf("expected a 409 AppError, got %#v", err)
+	}
+}
+
+func TestProposePayment_AllowedAgainOnceThePriorActionIsResolved(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xdeployed"))
+	initiator, initiatorKey := randomAddress(t)
+	recipient, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "1-of-1", 1, []MemberInput{
+		{Address: initiator, Role: models.RoleInitiatorApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+
+	first, err := svc.ProposePayment(context.Background(), initiator, group.ID, "first", recipient, "", "1")
+	if err != nil {
+		t.Fatalf("first ProposePayment returned error: %v", err)
+	}
+	if _, err := svc.RejectAction(first.ID, initiator, "changed my mind"); err != nil {
+		t.Fatalf("RejectAction returned error: %v", err)
+	}
+
+	second, err := svc.ProposePayment(context.Background(), initiator, group.ID, "second", recipient, "", "1")
+	if err != nil {
+		t.Fatalf("expected a second proposal to succeed once the first was rejected, got error: %v", err)
+	}
+	digest, err := svc.DigestToSign(second.ID, initiator)
+	if err != nil {
+		t.Fatalf("DigestToSign returned error: %v", err)
+	}
+	executed, err := svc.ApproveAction(context.Background(), second.ID, initiator, signDigest(t, initiatorKey, digest))
+	if err != nil {
+		t.Fatalf("expected the second action to execute cleanly, got error: %v", err)
+	}
+	if executed.Status != models.ActionExecuted {
+		t.Fatalf("expected status EXECUTED, got %s", executed.Status)
+	}
+}
+
+func TestExpireStalePendingActions_RejectsOnlyActionsOlderThanTTL(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xdeployed"))
+	initiator, _ := randomAddress(t)
+	recipient, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "1-of-1", 1, []MemberInput{
+		{Address: initiator, Role: models.RoleInitiatorApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+
+	stale, err := svc.ProposePayment(context.Background(), initiator, group.ID, "stale", recipient, "", "1")
+	if err != nil {
+		t.Fatalf("ProposePayment returned error: %v", err)
+	}
+	if err := svc.DB.Model(&models.PendingAction{}).Where("id = ?", stale.ID).
+		Update("created_at", time.Now().Add(-2*time.Hour)).Error; err != nil {
+		t.Fatalf("failed to backdate the stale action: %v", err)
+	}
+
+	// A second on-chain proposal would normally be blocked while the
+	// first (stale) one is outstanding - reject it first via the sweep,
+	// exactly like a real timeout would, then confirm the group is usable
+	// again.
+	affected, err := svc.ExpireStalePendingActions(time.Hour)
+	if err != nil {
+		t.Fatalf("ExpireStalePendingActions returned error: %v", err)
+	}
+	if affected != 1 {
+		t.Fatalf("expected 1 action expired, got %d", affected)
+	}
+
+	reloaded, err := svc.GetAction(stale.ID)
+	if err != nil {
+		t.Fatalf("GetAction returned error: %v", err)
+	}
+	if reloaded.Status != models.ActionRejected {
+		t.Fatalf("expected the stale action to be REJECTED, got %s", reloaded.Status)
+	}
+
+	if _, err := svc.ProposePayment(context.Background(), initiator, group.ID, "fresh", recipient, "", "1"); err != nil {
+		t.Fatalf("expected a fresh proposal to succeed once the stale one expired, got error: %v", err)
 	}
 }
