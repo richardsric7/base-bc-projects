@@ -51,10 +51,9 @@ func requestPartnerPaymentLink(svc *services.Service) gin.HandlerFunc {
 }
 
 type buildPartnerPaymentRequest struct {
-	To           string  `json:"to" binding:"required"`
-	TokenAddress string  `json:"tokenAddress"`
-	Amount       string  `json:"amount" binding:"required"`
-	Nonce        *uint64 `json:"nonce"`
+	To           string `json:"to" binding:"required"`
+	TokenAddress string `json:"tokenAddress"`
+	Amount       string `json:"amount" binding:"required"`
 }
 
 func buildPartnerPayment(svc *services.Service) gin.HandlerFunc {
@@ -72,18 +71,19 @@ func buildPartnerPayment(svc *services.Service) gin.HandlerFunc {
 			apperrors.Abort(c, apperrors.BadRequest("to and amount are required"))
 			return
 		}
-		tx, err := svc.BuildPartnerPayment(c.Request.Context(), link.ID, userID, req.To, req.TokenAddress, req.Amount, req.Nonce)
+		proposal, err := svc.BuildPartnerPayment(c.Request.Context(), link.ID, userID, req.To, req.TokenAddress, req.Amount)
 		if err != nil {
 			writeError(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, tx)
+		c.JSON(http.StatusOK, proposal)
 	}
 }
 
 type submitPartnerPaymentRequest struct {
 	IdempotencyKey string `json:"idempotencyKey" binding:"required"`
-	SignedTx       string `json:"signedTx" binding:"required"`
+	ActionID       uint   `json:"actionId" binding:"required"`
+	Signature      string `json:"signature" binding:"required"`
 	To             string `json:"to" binding:"required"`
 	TokenAddress   string `json:"tokenAddress"`
 	Amount         string `json:"amount" binding:"required"`
@@ -101,10 +101,10 @@ func submitPartnerPayment(svc *services.Service) gin.HandlerFunc {
 		}
 		var req submitPartnerPaymentRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("idempotencyKey, signedTx, to and amount are required"))
+			apperrors.Abort(c, apperrors.BadRequest("idempotencyKey, actionId, signature, to and amount are required"))
 			return
 		}
-		record, err := svc.SubmitPartnerPayment(c.Request.Context(), link.ID, userID, req.IdempotencyKey, req.SignedTx, req.To, req.TokenAddress, req.Amount)
+		record, err := svc.SubmitPartnerPayment(c.Request.Context(), link.ID, userID, req.IdempotencyKey, req.ActionID, req.Signature, req.To, req.TokenAddress, req.Amount)
 		if err != nil {
 			writeError(c, err)
 			return

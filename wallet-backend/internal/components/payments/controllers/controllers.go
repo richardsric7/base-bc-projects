@@ -13,9 +13,13 @@ import (
 
 // Init registers the payments component's routes on router and returns
 // the underlying Service so main.go can wire it into other components
-// that build/submit payments on a user's behalf (see servicelinks).
+// that build/submit payments on a user's behalf (see servicelinks), and
+// its SharedAccess field once sharedaccess's own Service exists (see
+// PLAN.md §13.9's flagged follow-up, closed here - payments delegates the
+// actual Safe transaction to sharedaccess rather than building one
+// itself).
 func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
-	svc := services.New(gc.DB, gc.Blockchain)
+	svc := services.New(gc.DB)
 
 	authed := router.Group("/v1/payments")
 	authed.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
@@ -27,12 +31,15 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 }
 
 type buildPaymentRequest struct {
-	Destination  string  `json:"destination" binding:"required"`
-	TokenAddress string  `json:"tokenAddress"` // empty = native ETH
-	Amount       string  `json:"amount" binding:"required"`
-	Nonce        *uint64 `json:"nonce"` // optional - see PLAN.md §3 on offline-batched nonces
+	Destination  string `json:"destination" binding:"required"`
+	TokenAddress string `json:"tokenAddress"` // empty = native ETH
+	Amount       string `json:"amount" binding:"required"`
 }
 
+// buildPayment proposes the payment as a real Safe transaction on the
+// caller's wallet (X-Wallet-Address) and returns the digest the caller's
+// own signer key (X-Signer-Address) must personal_sign to approve it -
+// see services.PaymentProposal.
 func buildPayment(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req buildPaymentRequest
@@ -40,19 +47,21 @@ func buildPayment(svc *services.Service) gin.HandlerFunc {
 			apperrors.Abort(c, apperrors.BadRequest("destination and amount are required"))
 			return
 		}
-		source := c.GetString(middleware.CtxSubject)
-		tx, err := svc.BuildPaymentTx(c.Request.Context(), source, req.Destination, req.TokenAddress, req.Amount, req.Nonce)
+		wallet := c.GetString(middleware.CtxSubject)
+		signer := c.GetString(middleware.CtxSigner)
+		proposal, err := svc.BuildPaymentTx(c.Request.Context(), wallet, signer, req.Destination, req.TokenAddress, req.Amount)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, tx)
+		c.JSON(http.StatusOK, proposal)
 	}
 }
 
 type submitPaymentRequest struct {
 	IdempotencyKey string `json:"idempotencyKey" binding:"required"`
-	SignedTx       string `json:"signedTx" binding:"required"`
+	ActionID       uint   `json:"actionId" binding:"required"`
+	Signature      string `json:"signature" binding:"required"`
 	Destination    string `json:"destination" binding:"required"`
 	TokenAddress   string `json:"tokenAddress"`
 	Amount         string `json:"amount" binding:"required"`
@@ -62,11 +71,12 @@ func submitPayment(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req submitPaymentRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("idempotencyKey, signedTx, destination and amount are required"))
+			apperrors.Abort(c, apperrors.BadRequest("idempotencyKey, actionId, signature, destination and amount are required"))
 			return
 		}
-		source := c.GetString(middleware.CtxSubject)
-		record, err := svc.SubmitPayment(c.Request.Context(), req.IdempotencyKey, req.SignedTx, source, req.Destination, req.TokenAddress, req.Amount)
+		wallet := c.GetString(middleware.CtxSubject)
+		signer := c.GetString(middleware.CtxSigner)
+		record, err := svc.SubmitPayment(c.Request.Context(), req.IdempotencyKey, req.ActionID, signer, req.Signature, wallet, req.Destination, req.TokenAddress, req.Amount)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return

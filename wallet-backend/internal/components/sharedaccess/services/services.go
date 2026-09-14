@@ -354,6 +354,24 @@ func (s *Service) GetGroup(groupID uint) (*models.ClosedGroup, error) {
 	return &group, nil
 }
 
+// GetGroupByAddress fetches a group by its on-chain Safe address - the
+// lookup payments/swaps need (PLAN.md §13.9's flagged follow-up) since a
+// SignatureAuth-authenticated request only ever names the wallet address
+// it acts on (X-Wallet-Address), never a groupID. Every wallet with an
+// on-chain Safe - the primary wallet included, since users.DeployPrimaryWallet
+// creates the matching ClosedGroup/GroupMember rows alongside its own Safe
+// deployment - has exactly one row here.
+func (s *Service) GetGroupByAddress(address string) (*models.ClosedGroup, error) {
+	var group models.ClosedGroup
+	if err := s.DB.Where("address = ?", address).First(&group).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperrors.NotFound("no shared-access group found for this wallet address")
+		}
+		return nil, apperrors.Internal("failed to load group")
+	}
+	return &group, nil
+}
+
 // memberRole returns the caller's role on a group, or a 403 if they aren't a member.
 func (s *Service) memberRole(groupID uint, address string) (models.GroupRole, error) {
 	var member models.GroupMember

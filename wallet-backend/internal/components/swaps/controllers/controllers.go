@@ -13,9 +13,10 @@ import (
 
 // Init registers the swaps component's routes on router and returns the
 // underlying Service so main.go can wire in the real alerting.Notifier
-// (see Service.Alerts's doc comment, PLAN.md §4.13).
+// (see Service.Alerts's doc comment, PLAN.md §4.13) and its SharedAccess
+// field (PLAN.md §13.9's flagged follow-up, closed here).
 func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
-	svc := services.New(gc.Blockchain)
+	svc := services.New()
 
 	authed := router.Group("/v1/swaps")
 	authed.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
@@ -31,7 +32,6 @@ type buildSwapRequest struct {
 	Method        string        `json:"method" binding:"required"`
 	Args          []interface{} `json:"args"`
 	ValueWei      string        `json:"valueWei"`
-	Nonce         *uint64       `json:"nonce"`
 }
 
 func buildSwap(svc *services.Service) gin.HandlerFunc {
@@ -41,35 +41,37 @@ func buildSwap(svc *services.Service) gin.HandlerFunc {
 			apperrors.Abort(c, apperrors.BadRequest("routerAddress, routerAbi and method are required"))
 			return
 		}
-		tx, err := svc.BuildSwapTx(c.Request.Context(), services.BuildSwapInput{
-			From:          c.GetString(middleware.CtxSubject),
+		proposal, err := svc.BuildSwapTx(c.Request.Context(), services.BuildSwapInput{
+			WalletAddress: c.GetString(middleware.CtxSubject),
+			SignerAddress: c.GetString(middleware.CtxSigner),
 			RouterAddress: req.RouterAddress,
 			RouterABI:     req.RouterABI,
 			Method:        req.Method,
 			Args:          req.Args,
 			ValueWei:      req.ValueWei,
-			Nonce:         req.Nonce,
 		})
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, tx)
+		c.JSON(http.StatusOK, proposal)
 	}
 }
 
 type submitRequest struct {
-	SignedTx string `json:"signedTx" binding:"required"`
+	ActionID  uint   `json:"actionId" binding:"required"`
+	Signature string `json:"signature" binding:"required"`
 }
 
 func submitSwap(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req submitRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("signedTx is required"))
+			apperrors.Abort(c, apperrors.BadRequest("actionId and signature are required"))
 			return
 		}
-		hash, err := svc.SubmitSwap(c.Request.Context(), req.SignedTx)
+		signer := c.GetString(middleware.CtxSigner)
+		hash, err := svc.SubmitSwap(c.Request.Context(), req.ActionID, signer, req.Signature)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return

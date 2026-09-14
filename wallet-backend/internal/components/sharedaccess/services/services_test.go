@@ -1314,3 +1314,32 @@ func TestProposePayment_ConcurrentProposalsOnlyOneSucceeds(t *testing.T) {
 		t.Fatalf("expected exactly 1 PendingAction row after the race, got %d", count)
 	}
 }
+
+func TestGetGroupByAddress_FindsTheDeployedGroup(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xdeployed"))
+	initiator, _ := randomAddress(t)
+	approver, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "family wallet", 1, []MemberInput{
+		{Address: initiator, Role: models.RoleInitiator},
+		{Address: approver, Role: models.RoleApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+
+	found, err := svc.GetGroupByAddress(*group.Address)
+	if err != nil {
+		t.Fatalf("GetGroupByAddress returned error: %v", err)
+	}
+	if found.ID != group.ID {
+		t.Fatalf("expected group %d, got %d", group.ID, found.ID)
+	}
+}
+
+func TestGetGroupByAddress_NotFound(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain(""))
+	if _, err := svc.GetGroupByAddress("0x0000000000000000000000000000000000000000"); err == nil {
+		t.Fatal("expected a not-found error for an address with no group")
+	}
+}

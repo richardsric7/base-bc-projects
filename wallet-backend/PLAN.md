@@ -3736,3 +3736,118 @@ guidance for each. All delivered:
   per-request personal_sign path through the Worker, and updating every
   page's API calls) out of scope for this documentation-focused pass -
   left as the already-tracked §11 item, not silently patched over.
+
+## 17. Closing §13.9's flagged follow-up: payments/swaps become real Safe transactions
+
+`wallet-web`'s own SIWE-vs-SignatureAuth mismatch (§12, fixed in that
+project's own PLAN.md) prompted an audit for similar gaps elsewhere. That
+audit found a more severe one here: `payments`/`swaps` still built and
+submitted a plain EIP-1559 transaction "from" the caller's wallet address -
+correct when §13's own early phases were built, wrong from the moment
+§13.3 made every wallet a Safe smart-contract account. §13.9 flagged this
+explicitly at the time ("a real, non-trivial follow-up... out of scope for
+this section to fully redesign") rather than leaving it undiscovered - this
+closes it.
+
+**Why it was actually broken, not just stale:** a Safe has no private key.
+`BuildNativeTransferTx(ctx, from, ...)`'s `from` was only ever used for gas
+estimation - an Ethereum transaction has no "from" field on the wire, the
+network derives the sender by ECDSA-recovering whatever key actually signed
+it. So `SubmitPayment`'s `SubmitSignedTransaction` would broadcast
+successfully, but the funds would move from whatever address the client's
+"signing" key actually was - never from the Safe wallet-backend's own
+database calls "the wallet" - a silent, wrong-account failure mode, not a
+loud one. On the primary wallet specifically, this was compounded by a
+second gap: `PLAN.md` had always said "every wallet, the primary included,
+is a `ClosedGroup` row" (§13.4's own words), but `Register`/
+`DeployPrimaryWallet` never actually created one - only this component's
+own `UserWallet` index row. So even setting the transaction-building bug
+aside, the primary wallet's real, correctly-configured on-chain Safe
+(owners `[SignerAddress]`, threshold 1) had no corresponding row in
+`sharedaccess`'s tables for its own already-built, already-tested
+propose/approve/execute pipeline to reference at all - a genuine Safe,
+deployed correctly, completely orphaned from this application's execution
+path.
+
+**The fix reuses `sharedaccess` rather than duplicating it** - it already
+has the real, tested machinery (real `SafeTxHash` computation, `personal_sign`-based
+approval per `sharedaccess.DigestToSign`'s own doc comment - not full
+EIP-712 typed-data signing, despite earlier planning docs in this and the
+sibling projects assuming that would be needed; the pragmatic choice made
+when §13 was actually built needs no new `wallet-core` signing primitive at
+all, just signing a hash string), signature packing, and relayer-submitted
+`execTransaction`, all exercised by §13's own extensive test suite:
+
+- **`users.DeployPrimaryWallet` now also creates the missing
+  `ClosedGroup`/`GroupMember` row** (`ensurePrimaryWalletGroup`), idempotently -
+  called both right after a fresh deployment and on the already-deployed
+  short-circuit path, so a wallet deployed before this fix backfills its
+  group the next time `DeployPrimaryWallet` is called (which happens
+  routinely - it's the idempotent activation-precondition check other
+  flows already call). `GroupMember.MemberAddress` is the signer EOA
+  directly, not `User.Address` - the primary wallet is the base case of
+  the nested-EIP-1271 chain, not itself nested.
+- **`sharedaccess.GetGroupByAddress`** (new): the lookup `payments`/`swaps`
+  need, since a SignatureAuth request only ever names a wallet address
+  (`X-Wallet-Address`), never a `groupID`.
+- **`payments` and `swaps` rewritten to delegate**, via a new narrow
+  `GroupWalletExecutor` interface (`GetGroupByAddress`/`ProposePayment`
+  or `ProposeContractCall`/`DigestToSign`/`ApproveAction`) wired
+  post-construction in `main.go` exactly like `paymentsSvc.Alerts`/
+  `usersSvc.GeoIP` - `payments`/`swaps` never import `sharedaccess/services`
+  as a concrete dependency, only this interface, so tests supply a fake
+  instead of a real one:
+  - `POST /v1/{payments,swaps}/build` now proposes the action and returns
+    `{actionId, digestToSign}` instead of a raw `network.UnsignedTx` - the
+    caller's **signer** key (never the wallet address, which has no key)
+    must `personal_sign` that digest.
+  - `POST /v1/{payments,swaps}/submit` now takes `{actionId, signature,
+    ...}` instead of `{signedTx}` and calls `sharedaccess.ApproveAction`,
+    which executes immediately once the threshold is met - always true
+    for an ordinary primary-wallet payment (threshold 1, sole owner).
+    Dropped the unused `nonce` field from both `build` requests - a
+    client-supplied EOA nonce doesn't apply to a Safe's own
+    server-reserved nonce (§13.10 Phase 6).
+  - `payments.SubmitPayment` keeps its existing idempotency-by-key
+    short-circuit (returns the original `PaymentHistory` row without
+    re-approving) and now creates that row directly from the executed
+    `PendingAction`'s real `TxHash`, only once `ApproveAction` actually
+    reports `EXECUTED` - never a "submitted, still pending" state, so a
+    caller can't record a payment history entry for a transfer that
+    didn't happen yet. `swaps` has no history table (matching its
+    pre-existing behavior) and just returns the real `TxHash`.
+- **`servicelinks`' partner payment routes updated to match** -
+  `BuildPartnerPayment`/`SubmitPartnerPayment` and their controller
+  request/response shapes carry the same `actionId`/`digestToSign`/
+  `signature` fields, proposing with the owned user's `SignerAddress` (a
+  partner's own embedded-wallet infrastructure holds that key, per this
+  file's pre-existing non-custodial design - never held here).
+- **Tests**: new `payments/services_test.go` and `swaps/services_test.go`
+  (neither component had any before) covering validation, group-lookup
+  and approval-error propagation, the not-yet-executed rejection, and
+  payments' idempotent-retry-without-reapproving behavior, all against a
+  scripted fake `GroupWalletExecutor`; new
+  `TestDeployPrimaryWallet_CreatesSharedAccessGroup` and
+  `_BackfillsGroupForAlreadyDeployedWallet` in `users/services`; new
+  `TestGetGroupByAddress_*` in `sharedaccess/services`. Full
+  `go build ./...`, `go vet ./...`, and `go test ./... -race` all pass; a
+  real boot-smoke-test against SQLite confirmed every route still
+  registers and the `sharedaccess` tables auto-migrate correctly. As with
+  every other phase's own honest caveat in this document: a live
+  Base-Sepolia round trip (an actual proposed payment reaching
+  `EXECUTED` via a real relayer) was **not** performed - this sandbox's
+  egress policy blocks outbound RPC to `sepolia.base.org` - so this
+  relies on `sharedaccess`'s own already-extensive live-adjacent test
+  coverage of the execution path itself, which this change reuses
+  unmodified rather than re-implementing.
+- **Not done, and deliberately out of scope here**: `wallet-web`'s
+  client-side counterpart (`Send.tsx`/`Swap.tsx`/`paymentsApi.ts`/
+  `swapsApi.ts`, currently calling `signTransaction('primary', ...)`
+  against the now-removed raw-tx response shape) and its onboarding
+  flow's fictitious "primary wallet has its own local key" model (it
+  never did, once the primary wallet became a Safe - `wallet.primary.address`
+  in Redux was never actually set to the real backend-computed Safe
+  address at all, only to whatever a locally re-entered/imported mnemonic
+  happened to derive). Both are real, necessary follow-ups tracked
+  separately in `wallet-web/PLAN.md`, not silently left broken without a
+  paper trail.

@@ -284,6 +284,11 @@ func main() {
 	// post-construction, the same cross-component wiring pattern as
 	// paymentsSvc.Alerts/usersSvc.GeoIP above.
 	sharedaccessSvc.Assets = assetsSvc
+	// PLAN.md §13.9's flagged follow-up, closed: payments/swaps delegate
+	// the actual Safe transaction to sharedaccess rather than building an
+	// unsignable raw EIP-1559 transaction "from" a Safe address.
+	paymentsSvc.SharedAccess = sharedaccessSvc
+	swapsSvc.SharedAccess = sharedaccessSvc
 	// Must run before the router starts serving traffic - see
 	// relayer.Pool.ReserveAtStartup's own doc comment on why it isn't
 	// safe to call once the pool is already handling concurrent Claims.

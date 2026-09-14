@@ -16,6 +16,7 @@ import (
 
 	"wallet-backend/internal/apperrors"
 	referenceModels "wallet-backend/internal/components/reference/models"
+	sharedaccessModels "wallet-backend/internal/components/sharedaccess/models"
 	"wallet-backend/internal/components/users/models"
 	"wallet-backend/internal/cryptoutil"
 	"wallet-backend/internal/geoip"
@@ -252,6 +253,9 @@ func (s *Service) DeployPrimaryWallet(ctx context.Context, callerSignerAddress s
 		return nil, apperrors.Internal("failed to load user")
 	}
 	if user.PrimaryWalletDeployed {
+		if err := s.ensurePrimaryWalletGroup(&user); err != nil {
+			return nil, err
+		}
 		return &user, nil
 	}
 
@@ -276,7 +280,59 @@ func (s *Service) DeployPrimaryWallet(ctx context.Context, callerSignerAddress s
 		return nil, apperrors.Internal("failed to record primary wallet deployment")
 	}
 	user.PrimaryWalletDeployed = true
+
+	if err := s.ensurePrimaryWalletGroup(&user); err != nil {
+		return nil, err
+	}
 	return &user, nil
+}
+
+// ensurePrimaryWalletGroup idempotently creates the sharedaccess
+// ClosedGroup/GroupMember rows the primary wallet's own on-chain Safe
+// needs to actually be usable: PLAN.md §13's own design says "every
+// wallet, the primary included, is a ClosedGroup row" (owners:
+// [User.SignerAddress], threshold: 1), but Register/DeployPrimaryWallet
+// never actually wrote one - only internal/components/users' own
+// UserWallet index row. Without it, payments/swaps (PLAN.md §13.9's
+// flagged follow-up) have no group to propose against, and a primary
+// wallet can never actually execute a real Safe transaction - it's a
+// genuine Safe deployed on-chain (owners/threshold correctly set at
+// deployment) but orphaned from this application's own execution
+// pipeline. GroupMember.MemberAddress is the signer EOA directly (not
+// User.Address) since the primary wallet is the base case of the
+// nested-EIP-1271 chain, not itself nested - see
+// sharedaccess.resolveGroupOwnerSigner.
+func (s *Service) ensurePrimaryWalletGroup(user *models.User) error {
+	var existing sharedaccessModels.ClosedGroup
+	err := s.DB.Where("address = ?", user.Address).First(&existing).Error
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return apperrors.Internal("failed to check for an existing primary wallet group")
+	}
+
+	addressHex := user.Address
+	group := sharedaccessModels.ClosedGroup{
+		Name:      "Primary wallet",
+		Purpose:   sharedaccessModels.PurposeWalletAccess,
+		Address:   &addressHex,
+		Threshold: 1,
+	}
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&group).Error; err != nil {
+			return apperrors.Internal("failed to record primary wallet group: " + err.Error())
+		}
+		member := sharedaccessModels.GroupMember{
+			GroupID:       group.ID,
+			MemberAddress: user.SignerAddress,
+			Role:          sharedaccessModels.RoleInitiatorApprover,
+		}
+		if err := tx.Create(&member).Error; err != nil {
+			return apperrors.Internal("failed to record primary wallet group membership: " + err.Error())
+		}
+		return nil
+	})
 }
 
 // applyRegistrationRiskFields resolves registrationIP to a country code

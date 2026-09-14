@@ -14,6 +14,7 @@ import (
 	"gorm.io/gorm"
 
 	"wallet-backend/internal/apperrors"
+	sharedaccessModels "wallet-backend/internal/components/sharedaccess/models"
 	"wallet-backend/internal/components/users/models"
 	"wallet-backend/internal/network"
 	"wallet-backend/internal/notify"
@@ -27,6 +28,13 @@ func newTestDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(models.Models...); err != nil {
 		t.Fatalf("migrate: %v", err)
+	}
+	// ensurePrimaryWalletGroup (DeployPrimaryWallet) writes sharedaccess's
+	// ClosedGroup/GroupMember rows directly (the same established pattern
+	// recovery.go already uses to delete them on signer rotation) -
+	// needed here too so those tests don't fail on a missing table.
+	if err := db.AutoMigrate(sharedaccessModels.Models...); err != nil {
+		t.Fatalf("migrate sharedaccess models: %v", err)
 	}
 	return db
 }

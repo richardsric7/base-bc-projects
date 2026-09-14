@@ -73,7 +73,7 @@ func newTestService(t *testing.T) (*Service, *gorm.DB) {
 	t.Helper()
 	db := newTestDB(t)
 	usersSvc := usersServices.New(db, notify.NewConsoleMailer(), "test-recovery-salt", time.Hour, nil, "test-deployer-salt")
-	paymentsSvc := paymentsServices.New(db, (*network.Client)(nil))
+	paymentsSvc := paymentsServices.New(db)
 	assetsSvc := assetsServices.New(db, (*network.Client)(nil))
 	tokenizationSvc := tokenizationServices.New(db, fakeTokenizationBlockchain{}, nil, "issuer-salt", "distribution-salt", decimal.Zero)
 	blob, err := storage.NewLocalDiskBlob(t.TempDir(), "/files")
