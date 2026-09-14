@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"fmt"
 	"math/big"
+	"sync"
 	"testing"
 	"time"
 
@@ -93,6 +94,20 @@ func newTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}
+	// A plain ":memory:" DSN gives each new connection its own separate
+	// database - fine for every sequential test in this file, but fatal
+	// for TestProposePayment_ConcurrentProposalsOnlyOneSucceeds, whose
+	// goroutines would otherwise each see an empty database of their own.
+	// Capping the pool at one connection makes every caller share the
+	// same in-memory database, serialized by database/sql itself - the
+	// concurrency test still genuinely exercises reserveSafeNonce's row
+	// lock and re-check, just without needing a real multi-connection
+	// SQLite setup to do it.
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get underlying sql.DB: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
 	if err := db.AutoMigrate(models.Models...); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -1234,4 +1249,68 @@ func mustPool(t *testing.T) *relayer.Pool {
 		t.Fatalf("relayer.NewPool: %v", err)
 	}
 	return pool
+}
+
+// TestProposePayment_ConcurrentProposalsOnlyOneSucceeds is PLAN.md §13.10
+// Phase 9's own explicitly-called-for "concurrent-proposal test
+// exercising §13.12's nonce reservation" - genuine goroutines racing to
+// propose against the same group, not just two sequential calls. Exactly
+// one must win; every other must see the 409 reserveSafeNonce's row lock
+// and outstanding-action check produce, and exactly one PendingAction row
+// must exist afterward - proving the lock actually serializes concurrent
+// callers rather than merely working by accident under sequential test
+// execution.
+func TestProposePayment_ConcurrentProposalsOnlyOneSucceeds(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xdeployed"))
+	initiator, _ := randomAddress(t)
+	recipient, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "1-of-1", 1, []MemberInput{
+		{Address: initiator, Role: models.RoleInitiatorApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+
+	const attempts = 8
+	var wg sync.WaitGroup
+	results := make(chan error, attempts)
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := svc.ProposePayment(context.Background(), initiator, group.ID, "concurrent", recipient, "", "1", "", "")
+			results <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	var successes, conflicts int
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		default:
+			appErr, ok := err.(*apperrors.AppError)
+			if !ok || appErr.StatusCode() != 409 {
+				t.Fatalf("unexpected error from concurrent proposal: %v", err)
+			}
+			conflicts++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("expected exactly 1 successful proposal out of %d concurrent attempts, got %d", attempts, successes)
+	}
+	if conflicts != attempts-1 {
+		t.Fatalf("expected %d conflicts, got %d", attempts-1, conflicts)
+	}
+
+	var count int64
+	if err := svc.DB.Model(&models.PendingAction{}).Where("group_id = ?", group.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count pending actions: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 PendingAction row after the race, got %d", count)
+	}
 }

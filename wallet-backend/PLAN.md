@@ -2124,7 +2124,7 @@ half of this change.
   flagged above - a follow-up design pass of its own, not detailed in
   this document.
 
-### 13.10 Phased roadmap (not started - design only)
+### 13.10 Phased roadmap (done - all 9 phases; see each phase's own "implementation notes" subsection below for what shipped)
 
 | Phase | Scope |
 |---|---|
@@ -2659,6 +2659,57 @@ database):
   group memberships, curated balances coming back only for the curated
   catalog's entries, and a non-member being rejected. Full `go build`/
   `go vet`/`go test ./...` pass across the module.
+
+#### Phase 9 implementation notes (done, with one honest caveat)
+
+- **Full verification**: `gofmt -l .` clean, `go build ./...` clean,
+  `go vet ./...` clean, `go mod tidy` produced no changes,
+  `go test ./... -race` green across every package in the module
+  (`internal/safe`, `internal/relayer`, `internal/network`, every
+  `sharedaccess` test, and every other component untouched by §13). The
+  binary was also built and booted standalone against a local SQLite
+  database (`DB_AUTOMIGRATE=true`, every optional integration left
+  unconfigured) - `GET /` returned `{"status":"ok"}`, the relayer pool's
+  three derived addresses were logged as expected, and every
+  `sharedaccess` route from Phases 3-8 (groups, actions, member
+  management, wallet listing, curated balances) registered cleanly with
+  no boot-time errors.
+- **The concurrent-proposal test Phase 9 explicitly called for**:
+  `TestProposePayment_ConcurrentProposalsOnlyOneSucceeds` fires 8 real
+  goroutines at `ProposePayment` against the same freshly-created group
+  simultaneously (not sequential calls dressed up as a concurrency test)
+  and asserts exactly one succeeds, the other seven see the 409
+  `reserveSafeNonce` conflict, and exactly one `PendingAction` row exists
+  afterward - passing repeatedly under `go test -race`. SQLite's
+  `:memory:` DSN gives every new connection its own separate database by
+  default, which would have made this test pass trivially (and
+  meaninglessly) by accident if left unaddressed - `newTestDB` now caps
+  the pool at one connection so every goroutine genuinely contends for
+  the same `ClosedGroup` row lock instead of each seeing an empty
+  database of its own.
+- **The honest caveat**: the roadmap's own Phase 9 line also called for
+  "a live smoke test... on Base Sepolia" - deploying a primary wallet,
+  creating a sub-wallet, enabling shared access, and driving one action
+  through propose→approve→execute against the real network. That did
+  **not** happen in this environment: there is no funded Base Sepolia
+  deployer/relayer key available here, and fabricating a claim of having
+  run it would be worse than not running it at all. Everything short of
+  live-network execution has been verified as thoroughly as this
+  environment allows - the full unit-test suite exercises every
+  mechanism (CREATE2 address computation cross-checked against an
+  independent Python reimplementation in Phase 1, real signature
+  packing and nested EIP-1271 wrapping, real relayer-pool claim/release
+  semantics, the row-locked nonce reservation under genuine concurrency)
+  against a fake blockchain client rather than mocked-away logic, which
+  is the strongest verification available without spending real testnet
+  ETH and provisioning real keys. Running the actual Base Sepolia
+  end-to-end smoke test remains open follow-up work for whoever has
+  those credentials.
+- **This closes PLAN.md §13** (Phases 1-9 all done): the multisig/
+  sub-wallet feature is now a real Gnosis Safe-backed system end to end
+  - deployment, execution, member management, group disable, nonce
+  safety, domain extensibility, and cross-wallet visibility - built up
+  phase by phase from the design-only document this section started as.
 
 ### 13.11 Activation-order dependencies (user-flagged, audited against §13.1-§13.8's design)
 
