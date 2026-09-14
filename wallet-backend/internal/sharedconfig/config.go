@@ -63,25 +63,23 @@ type GlobalConfig struct {
 	// nonce state to invalidate instead.
 	SignatureAuthToleranceSeconds int
 
-	// GroupKeySalt seeds shared-access group key derivation (see
-	// internal/components/sharedaccess) - change this and every existing
-	// group's controlling address changes with it, so treat it like a
-	// secret and never rotate it casually once groups exist in production.
-	GroupKeySalt string
-
 	// RecoveryAuthoritySalt seeds the account-recovery attestation key (see
-	// internal/components/users/services/recovery.go) - same rotation
-	// caution as GroupKeySalt.
+	// internal/components/users/services/recovery.go) - treat it like a
+	// secret and never rotate it casually: every recovery attestation
+	// already issued was signed by the key this currently derives to.
 	RecoveryAuthoritySalt string
 	RecoveryOTPTTL        time.Duration
 
-	// PrimaryWalletDeployerKeySalt seeds the key that pays gas to deploy
-	// users' primary-wallet Safes on-chain (see
-	// internal/components/users/services.DeployPrimaryWallet, PLAN.md
-	// §13.10 Phase 2). Unlike GroupKeySalt/RecoveryAuthoritySalt, rotating
-	// this is harmless: the deployer has no ongoing authority over any
-	// wallet, it only ever pays for a permissionless factory call.
-	PrimaryWalletDeployerKeySalt string
+	// SafeDeployerKeySalt seeds the single key that pays gas to deploy
+	// every Safe smart-contract wallet this codebase creates - primary
+	// wallets (internal/components/users/services.DeployPrimaryWallet,
+	// PLAN.md §13.10 Phase 2) and sub-wallets/shared-access groups
+	// (internal/components/sharedaccess/services.CreateGroup, Phase 3)
+	// alike, since deploying a Safe via its factory is a permissionless
+	// call needing no authority over the resulting wallet either way.
+	// Unlike RecoveryAuthoritySalt or MarketEscrowKeySalt below, rotating
+	// this is harmless: fund one address, once, for the whole platform.
+	SafeDeployerKeySalt string
 
 	// Sumsub/Doja credentials for internal/components/kyc. The upstream
 	// project stored these in a database KYCConfig table; this port keeps
@@ -94,7 +92,8 @@ type GlobalConfig struct {
 	DojaSecretKey   string
 
 	// FaucetKeySalt seeds the activation-faucet key derivation (see
-	// internal/components/fiat) - same rotation caution as GroupKeySalt.
+	// internal/components/fiat) - treat it like a secret and never rotate
+	// it once activation has been enabled in production.
 	// ActivationRewardTokenSymbol is the CuratedToken symbol activation
 	// dispenses alongside starter gas; empty disables the reward-token half
 	// (only gas is sent).
@@ -122,10 +121,9 @@ type GlobalConfig struct {
 	CryptoWithdrawalServiceFeePercent float64
 
 	// MarketEscrowKeySalt seeds the market-making escrow key derivation
-	// (see internal/components/market) - same rotation caution as
-	// GroupKeySalt: a maker's approve() targets the address this
-	// currently derives to, so rotating it orphans any standing
-	// approvals.
+	// (see internal/components/market) - treat it like a secret: a
+	// maker's approve() targets the address this currently derives to,
+	// so rotating it orphans any standing approvals.
 	MarketEscrowKeySalt string
 
 	// TokenizationIssuerKeySalt/TokenizationDistributionKeySalt seed the
@@ -198,12 +196,10 @@ type Env struct {
 	// SignatureAuthToleranceSeconds - see GlobalConfig's field doc.
 	SignatureAuthToleranceSeconds int
 
-	GroupKeySalt string
-
 	RecoveryAuthoritySalt string
 	RecoveryOTPTTLMinutes int
 
-	PrimaryWalletDeployerKeySalt string
+	SafeDeployerKeySalt string
 
 	SumsubBaseURL   string
 	SumsubToken     string
@@ -290,12 +286,10 @@ func LoadEnv() Env {
 
 		SignatureAuthToleranceSeconds: getEnvInt("SIGNATURE_AUTH_TOLERANCE_SECONDS", 300),
 
-		GroupKeySalt: getEnv("GROUP_KEY_SALT", "dev-only-change-me"),
-
 		RecoveryAuthoritySalt: getEnv("RECOVERY_AUTHORITY_SALT", "dev-only-change-me"),
 		RecoveryOTPTTLMinutes: getEnvInt("RECOVERY_OTP_TTL_MINUTES", 15),
 
-		PrimaryWalletDeployerKeySalt: getEnv("PRIMARY_WALLET_DEPLOYER_KEY_SALT", "dev-only-change-me"),
+		SafeDeployerKeySalt: getEnv("SAFE_DEPLOYER_KEY_SALT", "dev-only-change-me"),
 
 		SumsubBaseURL:   getEnv("SUMSUB_BASE_URL", "https://api.sumsub.com"),
 		SumsubToken:     getEnv("SUMSUB_TOKEN", ""),

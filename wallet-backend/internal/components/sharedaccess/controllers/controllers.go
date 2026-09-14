@@ -20,7 +20,7 @@ import (
 
 // Init registers the sharedaccess component's routes on router.
 func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) {
-	svc := services.New(gc.DB, gc.Blockchain, gc.GroupKeySalt)
+	svc := services.New(gc.DB, gc.Blockchain, gc.SafeDeployerKeySalt)
 
 	group := router.Group("/v1/shared-access")
 	group.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
@@ -58,7 +58,7 @@ func createGroup(svc *services.Service) gin.HandlerFunc {
 		for i, m := range req.Members {
 			members[i] = services.MemberInput{Address: m.Address, Role: models.GroupRole(m.Role)}
 		}
-		group, err := svc.CreateGroup(req.Name, req.Threshold, members)
+		group, err := svc.CreateGroup(c.Request.Context(), req.Name, req.Threshold, members)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return

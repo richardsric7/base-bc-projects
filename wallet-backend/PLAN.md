@@ -2294,6 +2294,84 @@ database):
   self-signing and shared-access-standing cases. Full `go build`/`go
   vet`/`go test ./...` pass across the module.
 
+#### Phase 3 implementation notes (done)
+
+- **`models.RoleInitiatorApprover`** (new `GroupRole` value) plus exported
+  `CanInitiate(role)`/`CanApprove(role)` predicates replace direct
+  `role != models.RoleInitiator`/`RoleApprover` comparisons throughout
+  `sharedaccess.Service`. Needed because `GroupMember` allows only one row
+  per `(group, address)` pair, yet a sub-wallet's sole owner (§13.4: "a
+  sub-wallet is simply the single-member case") must be able to both
+  propose and approve in that one row - a combined role was the only way
+  to unify sub-wallets and multi-member shared-access groups onto the
+  same schema and the same `CreateGroup` without a separate code path for
+  the single-owner case.
+- **`CreateGroup` now deploys a real Safe**, closing half of §13.5's
+  flagged gap. It takes a `ctx` (new first parameter), builds the
+  `owners` list from every member with `CanApprove(role)`, validates each
+  candidate address via the new `validateSafeOwnerCandidate`, computes
+  the group's counterfactual address the same way §13.3/Phase 1 compute a
+  primary wallet's (`safe.EncodeSetupCalldata` + `safe.
+  ComputeProxyAddress`), then actually submits `createProxyWithNonce`
+  through the shared deployer key and only persists the `ClosedGroup`/
+  `GroupMember` rows once that submission succeeds. Unlike a primary
+  wallet, the salt nonce can't be a fixed `0`: two different groups can
+  trivially share an identical owner set and threshold (e.g. one user
+  creating two single-owner sub-wallets back to back), which would
+  collide on the same CREATE2 address - so `groupSafeSaltNonce` draws a
+  random 256-bit value via `crypto/rand` per group instead.
+- **`validateSafeOwnerCandidate`** rejects two ways a caller could name an
+  owner that would leave the group permanently or confusingly broken: (a)
+  a registered user's raw `SignerAddress` given as the owner (must be
+  their primary wallet's `Address` instead - naming the EOA directly
+  would make EIP-1271 resolution look at the wrong contract), and (b) a
+  registered user's primary wallet named as owner while
+  `PrimaryWalletDeployed` is still false (per §13.11, `isValidSignature`
+  has no code to call on an undeployed Safe - the group would be
+  unusable via that owner until they separately deploy it). Any other
+  address - an external EOA, an address with no matching `users` row, or
+  an already-deployed primary wallet - is accepted as-is.
+- **`GroupKeySalt` retired, folded into `SafeDeployerKeySalt`**: deploying
+  a Safe via its factory grants the deployer no ongoing authority over
+  the resulting wallet, so the same platform key Phase 2 introduced for
+  primary-wallet deployment now also pays for group deployment
+  (`deriveSafeDeployerKey`, `salt + "|safe-deployer"` - a different
+  derivation string than users' `|primary-wallet-deployer"`, same salt
+  value, same funded address in practice). `GroupKeySalt`/
+  `GROUP_KEY_SALT` removed entirely from `sharedconfig`, `main.go`,
+  `.env.example`, and `DEPLOYMENT.md`.
+- **`executeAction` deliberately fails loudly instead of executing**: the
+  old body derived a custodial `groupKey` from `GroupKeySalt` and
+  submitted the pending action's raw calldata directly - a mechanism with
+  no relationship at all to the Safe this phase now actually deploys, and
+  the other half of §13.5's flagged gap (the backend, not the chain,
+  enforced the threshold). Rather than either leave that stale path
+  running against an address it doesn't control, or build out real
+  `execTransaction` submission with collected `SafeTxHash` signatures
+  before the relayer/nonce-reservation machinery those steps depend on
+  exists, `executeAction` now unconditionally returns
+  `apperrors.Internal("... on-chain execution via a real Safe transaction
+  is not implemented yet - see PLAN.md §13.10 Phases 4 and 6")` once a
+  proposal's threshold is met. `ApproveAction`'s off-chain signature
+  verification still checks a signature over the existing descriptive
+  `canonicalActionMessage` string rather than a real `SafeTxHash` -
+  switching that to the actual Safe transaction hash is Phase 4's job,
+  once there's a real `execTransaction` call for that hash to describe.
+- **Verification**: `sharedaccess/services` tests rewritten around a
+  `fakeBlockchain` that records submitted `(to, data)` pairs instead of
+  just returning a canned hash - `TestCreateGroup_DeploysARealSafe`
+  asserts the submission target is `safe.ProxyFactoryAddress` and that
+  two groups with identical members/threshold still get different
+  addresses (the random salt nonce). New tests cover the combined
+  `RoleInitiatorApprover` role, both `validateSafeOwnerCandidate`
+  rejection cases, and accepting an already-deployed primary wallet as a
+  member. The propose/approve/execute tests were renamed and rewritten to
+  assert the new, honest outcome - tallying and off-chain signature
+  verification still work, but reaching threshold now surfaces the
+  not-implemented error instead of a fake success, including on a retried
+  approval (no second signature required, same error both times). Full
+  `go build`/`go vet`/`go test ./...` pass across the module.
+
 ### 13.11 Activation-order dependencies (user-flagged, audited against §13.1-§13.8's design)
 
 Registration itself never requires on-chain activation - the primary

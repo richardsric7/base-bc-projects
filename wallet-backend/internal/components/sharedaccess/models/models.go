@@ -17,7 +17,29 @@ const (
 	RoleInitiator GroupRole = "INITIATOR" // may propose actions
 	RoleApprover  GroupRole = "APPROVER"  // may approve/reject proposed actions
 	RoleViewOnly  GroupRole = "VIEW_ONLY" // may view balances/history only
+	// RoleInitiatorApprover combines both capabilities in a single
+	// GroupMember row - needed because GroupMember allows only one row
+	// per (group, address) pair, yet a sub-wallet's sole owner (PLAN.md
+	// §13.4: "every wallet, the primary included, is a ClosedGroup row
+	// from the moment it's created") needs both: they must be able to
+	// propose their own actions (INITIATOR) and their own approval must
+	// count toward the group's Safe-enforced threshold (APPROVER).
+	RoleInitiatorApprover GroupRole = "INITIATOR_APPROVER"
 )
+
+// CanInitiate reports whether role may propose an action on a group.
+func CanInitiate(role GroupRole) bool {
+	return role == RoleInitiator || role == RoleInitiatorApprover
+}
+
+// CanApprove reports whether role may approve/reject a proposed action -
+// and, equivalently, whether a member holding it becomes one of the
+// underlying Safe's on-chain owners (PLAN.md §13.4/§13.6): only a member
+// whose signature can actually satisfy the group's threshold needs to be
+// named as a Safe owner at all.
+func CanApprove(role GroupRole) bool {
+	return role == RoleApprover || role == RoleInitiatorApprover
+}
 
 // ClosedGroupPurpose distinguishes what a ClosedGroup row is for. Both
 // purposes share one table (and one ClosedGroup/GroupMember schema) rather

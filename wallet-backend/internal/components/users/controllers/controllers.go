@@ -22,7 +22,7 @@ import (
 // underlying Service so main.go can wire it into other components that
 // need to look up or register users (see servicelinks).
 func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
-	svc := services.New(gc.DB, gc.Mailer, gc.RecoveryAuthoritySalt, gc.RecoveryOTPTTL, gc.Blockchain, gc.PrimaryWalletDeployerKeySalt)
+	svc := services.New(gc.DB, gc.Mailer, gc.RecoveryAuthoritySalt, gc.RecoveryOTPTTL, gc.Blockchain, gc.SafeDeployerKeySalt)
 
 	public := router.Group("/v1/users")
 	public.GET("/:username", getUser(svc, gc.Cache, gc.AddressWatcher))

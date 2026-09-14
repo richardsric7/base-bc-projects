@@ -1,36 +1,47 @@
 // Package services implements shared/multi-party wallet access: a group of
-// members controls one Base address via a threshold of off-chain
-// approvals rather than any single private key. See PLAN.md §2 (the
-// "native multi-signature" row) for why this design was chosen over a
-// smart-contract wallet, and §4.2 for the full route/model mapping.
+// members controls one Base address via a threshold of enforced
+// approvals. See PLAN.md §2 for the feature's original design and §13.3-
+// §13.6 for why and how it was migrated onto a real Gnosis Safe
+// smart-contract account rather than a server-derived custodial key.
 //
-// The group's Base address is controlled by a key derived from its ID via
-// cryptoutil.DeriveKey - it never exists as a value any member (or this
-// server's operator) can casually access, only as a deterministic function
-// this process can recompute. Members prove authorization to move that
-// wallet by each signing a description of the exact proposed action with
-// their own wallet key; once enough distinct members have signed, the
-// server derives the group key, builds the real transaction, signs it, and
-// submits it.
+// A group's address is a genuine Safe, deployed on creation
+// (safe.ComputeProxyAddress/EncodeCreateProxyWithNonceCalldata) with an
+// owner set drawn from members holding APPROVER or INITIATOR_APPROVER
+// (models.CanApprove) - the members whose signatures the Safe contract
+// itself, not this server, will require to reach the group's threshold.
+// Every member address naming another platform user must be that user's
+// primary wallet Safe address, never their raw signer EOA
+// (validateSafeOwnerCandidate) - PLAN.md §13.4's nested-EIP-1271 design
+// depends on this so a member's own future key rotation never requires
+// touching a wallet they merely participate in.
+//
+// PLAN.md §13.10 Phase 3 stops at creation: CreateGroup deploys a real
+// Safe, but ApproveAction's off-chain approval-recording and
+// executeAction's actual on-chain submission are not yet rewired to
+// match (see executeAction's own doc comment) - that lands in Phase 4
+// (the relayer submission path) and Phase 6 (per-Safe nonce reservation),
+// which is also where members' approvals start signing the real
+// safe.SafeTxHash instead of today's off-chain-only descriptive message.
 package services
 
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"math/big"
-	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"gorm.io/gorm"
 
 	"wallet-backend/internal/apperrors"
 	"wallet-backend/internal/components/sharedaccess/models"
+	usersModels "wallet-backend/internal/components/users/models"
 	"wallet-backend/internal/cryptoutil"
 	"wallet-backend/internal/network"
+	"wallet-backend/internal/safe"
 	"wallet-backend/internal/validators"
 )
 
@@ -44,24 +55,77 @@ type BlockchainClient interface {
 }
 
 type Service struct {
-	DB           *gorm.DB
-	Blockchain   BlockchainClient
-	GroupKeySalt string
+	DB         *gorm.DB
+	Blockchain BlockchainClient
+	// DeployerKeySalt seeds the single platform key that pays gas to
+	// deploy every group's Safe - the same permissionless-factory-call
+	// role as users.Service's own deployer key (sharedconfig.
+	// SafeDeployerKeySalt is passed to both), reused rather than
+	// duplicated since deploying a Safe never requires any authority
+	// over the wallet it deploys.
+	DeployerKeySalt string
 }
 
-func New(db *gorm.DB, blockchain BlockchainClient, groupKeySalt string) *Service {
-	return &Service{DB: db, Blockchain: blockchain, GroupKeySalt: groupKeySalt}
+func New(db *gorm.DB, blockchain BlockchainClient, deployerKeySalt string) *Service {
+	return &Service{DB: db, Blockchain: blockchain, DeployerKeySalt: deployerKeySalt}
 }
 
-// deriveGroupKey recomputes the group's controlling key. Deterministic in
-// the group's ID, so the key never needs to be stored - only ever
-// recomputed at the moment it's needed to sign.
-func (s *Service) deriveGroupKey(groupID uint) (*ecdsa.PrivateKey, error) {
-	key, err := cryptoutil.DeriveKey(s.GroupKeySalt + "|shared-access-group|" + strconv.FormatUint(uint64(groupID), 10))
+// deriveSafeDeployerKey derives the key that pays gas to deploy a group's
+// Safe - see the Service.DeployerKeySalt field doc.
+func (s *Service) deriveSafeDeployerKey() (*ecdsa.PrivateKey, error) {
+	key, err := cryptoutil.DeriveKey(s.DeployerKeySalt + "|safe-deployer")
 	if err != nil {
-		return nil, apperrors.Internal("failed to derive group signing key")
+		return nil, apperrors.Internal("failed to derive the Safe deployer key")
 	}
 	return key, nil
+}
+
+// groupSafeSaltNonce returns a fresh random CREATE2 saltNonce for a new
+// group's Safe. Unlike a primary wallet (PLAN.md §13.10 Phase 2, saltNonce
+// always 0 - safe because each user's initializer already differs by
+// naming a different sole owner), two different groups can easily share
+// an identical owner set and threshold (e.g. the same user creating two
+// single-owner sub-wallets back to back), which would produce the exact
+// same initializer and, without a varying salt, the exact same address -
+// so this must be unpredictable per group, not fixed.
+func groupSafeSaltNonce() (*big.Int, error) {
+	nonce, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 256))
+	if err != nil {
+		return nil, apperrors.Internal("failed to generate a Safe salt nonce")
+	}
+	return nonce, nil
+}
+
+// validateSafeOwnerCandidate enforces PLAN.md §13.4's naming rule for any
+// member address that will become a Safe owner (CanApprove(role)):
+// rejecting a registered user's raw signer EOA outright (they must be
+// named by their primary wallet Safe address instead, so their own future
+// recovery-driven key rotation never requires touching this group), and
+// rejecting a registered user's primary wallet that exists but hasn't
+// been deployed on-chain yet (PLAN.md §13.11 - EIP-1271 resolution needs
+// code at that address, so a not-yet-deployed owner would make the whole
+// group permanently unusable until they separately deploy). An address
+// matching neither case - an external EOA, a not-yet-registered address,
+// or an already-deployed primary wallet - is accepted as-is.
+func (s *Service) validateSafeOwnerCandidate(address string) error {
+	var bySigner usersModels.User
+	err := s.DB.Where("LOWER(signer_address) = LOWER(?)", address).First(&bySigner).Error
+	if err == nil {
+		return apperrors.BadRequest("member " + address + " is a registered user's signer key, not their primary wallet address (" + bySigner.Address + ") - name the primary wallet instead")
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return apperrors.Internal("failed to validate member address")
+	}
+
+	var byAddress usersModels.User
+	err = s.DB.Where("LOWER(address) = LOWER(?)", address).First(&byAddress).Error
+	if err == nil && !byAddress.PrimaryWalletDeployed {
+		return apperrors.Conflict("member " + address + " is a registered user's primary wallet, but it has not been deployed on-chain yet")
+	}
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return apperrors.Internal("failed to validate member address")
+	}
+	return nil
 }
 
 // MemberInput is one member to add when creating a group.
@@ -70,46 +134,70 @@ type MemberInput struct {
 	Role    models.GroupRole
 }
 
-// CreateGroup creates a new shared-access wallet: a group row (whose
-// address is derived from its own ID once it exists), plus its initial
-// membership list.
-func (s *Service) CreateGroup(name string, threshold int, members []MemberInput) (*models.ClosedGroup, error) {
+// CreateGroup creates a new Base wallet controlled by members: a real Safe
+// (owners = every member holding APPROVER or INITIATOR_APPROVER,
+// threshold = threshold), deployed on-chain immediately so the wallet is
+// usable right away, plus a ClosedGroup/GroupMember row recording every
+// member regardless of role (VIEW_ONLY and plain INITIATOR members are
+// recorded for this application's own authorization checks even though
+// they hold no on-chain signing power). A sub-wallet (PLAN.md §13.6) is
+// simply the single-member case: one member, role INITIATOR_APPROVER,
+// threshold 1, address the caller's own primary wallet.
+func (s *Service) CreateGroup(ctx context.Context, name string, threshold int, members []MemberInput) (*models.ClosedGroup, error) {
 	if name == "" {
 		return nil, apperrors.BadRequest("name is required")
 	}
 	if threshold < 1 {
 		return nil, apperrors.BadRequest("threshold must be at least 1")
 	}
-	approverCount := 0
+	var owners []common.Address
 	for _, m := range members {
 		if !validators.IsValidAddress(m.Address) {
 			return nil, apperrors.BadRequest("invalid member address: " + m.Address)
 		}
 		switch m.Role {
-		case models.RoleInitiator, models.RoleApprover, models.RoleViewOnly:
+		case models.RoleInitiator, models.RoleApprover, models.RoleViewOnly, models.RoleInitiatorApprover:
 		default:
 			return nil, apperrors.BadRequest("invalid role for " + m.Address)
 		}
-		if m.Role == models.RoleApprover {
-			approverCount++
+		if models.CanApprove(m.Role) {
+			if err := s.validateSafeOwnerCandidate(m.Address); err != nil {
+				return nil, err
+			}
+			owners = append(owners, common.HexToAddress(m.Address))
 		}
 	}
-	if threshold > approverCount {
-		return nil, apperrors.BadRequest(fmt.Sprintf("threshold (%d) exceeds the number of approvers (%d)", threshold, approverCount))
+	if threshold > len(owners) {
+		return nil, apperrors.BadRequest(fmt.Sprintf("threshold (%d) exceeds the number of approvers (%d)", threshold, len(owners)))
 	}
 
-	group := models.ClosedGroup{Name: name, Purpose: models.PurposeWalletAccess, Threshold: threshold}
+	initializer, err := safe.EncodeSetupCalldata(owners, big.NewInt(int64(threshold)))
+	if err != nil {
+		return nil, apperrors.Internal("failed to encode group wallet setup calldata")
+	}
+	saltNonce, err := groupSafeSaltNonce()
+	if err != nil {
+		return nil, err
+	}
+	groupAddress := safe.ComputeProxyAddress(safe.SingletonAddress, initializer, saltNonce)
+
+	deployerKey, err := s.deriveSafeDeployerKey()
+	if err != nil {
+		return nil, err
+	}
+	deployCalldata, err := safe.EncodeCreateProxyWithNonceCalldata(safe.SingletonAddress, initializer, saltNonce)
+	if err != nil {
+		return nil, apperrors.Internal("failed to encode group wallet deployment calldata")
+	}
+	factoryAddr := safe.ProxyFactoryAddress
+	if _, err := s.Blockchain.SignAndSubmitTx(ctx, deployerKey, &factoryAddr, big.NewInt(0), deployCalldata, nil); err != nil {
+		return nil, apperrors.Internal("failed to deploy group wallet: " + err.Error())
+	}
+
+	addressHex := groupAddress.Hex()
+	group := models.ClosedGroup{Name: name, Purpose: models.PurposeWalletAccess, Threshold: threshold, Address: &addressHex}
 	txErr := s.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&group).Error; err != nil {
-			return err
-		}
-		key, err := s.deriveGroupKey(group.ID)
-		if err != nil {
-			return err
-		}
-		address := crypto.PubkeyToAddress(key.PublicKey).Hex()
-		group.Address = &address
-		if err := tx.Model(&group).Update("address", group.Address).Error; err != nil {
 			return err
 		}
 		for _, m := range members {
@@ -121,7 +209,7 @@ func (s *Service) CreateGroup(name string, threshold int, members []MemberInput)
 		return nil
 	})
 	if txErr != nil {
-		return nil, apperrors.Internal("failed to create group")
+		return nil, apperrors.Internal("failed to record deployed group wallet")
 	}
 	return &group, nil
 }
@@ -219,7 +307,7 @@ func (s *Service) requireInitiator(groupID uint, address string) (*models.Closed
 	if err != nil {
 		return nil, err
 	}
-	if role != models.RoleInitiator {
+	if !models.CanInitiate(role) {
 		return nil, apperrors.Forbidden("only an INITIATOR may propose an action")
 	}
 	return group, nil
@@ -314,7 +402,7 @@ func (s *Service) ApproveAction(ctx context.Context, actionID uint, memberAddres
 	if err != nil {
 		return nil, err
 	}
-	if role != models.RoleApprover {
+	if !models.CanApprove(role) {
 		return nil, apperrors.Forbidden("only an APPROVER may approve an action")
 	}
 
@@ -368,32 +456,25 @@ func (s *Service) tallyAndMaybeExecute(ctx context.Context, action *models.Pendi
 }
 
 // executeAction is called once an action has reached its approval
-// threshold: it derives the group's key and performs the real,
-// server-signed transaction.
-func (s *Service) executeAction(ctx context.Context, action *models.PendingAction) (*models.PendingAction, error) {
-	groupKey, err := s.deriveGroupKey(action.GroupID)
-	if err != nil {
-		return nil, err
-	}
-
-	value, ok := new(big.Int).SetString(action.Value, 10)
-	if !ok {
-		return nil, apperrors.Internal("stored action has an invalid value")
-	}
-	data := common.FromHex(action.Data)
-	toAddr := common.HexToAddress(action.To)
-
-	hash, err := s.Blockchain.SignAndSubmitTx(ctx, groupKey, &toAddr, value, data, nil)
-	if err != nil {
-		return nil, apperrors.Internal("action approved but execution failed: " + err.Error())
-	}
-
-	action.Status = models.ActionExecuted
-	action.TxHash = hash
-	if err := s.DB.Save(action).Error; err != nil {
-		return nil, apperrors.Internal("action executed (tx " + hash + ") but failed to record the result")
-	}
-	return action, nil
+// threshold. Before PLAN.md §13's Safe migration this derived the
+// group's custodial key and sent the transaction directly from it; since
+// Phase 3 made a group's Address a real Safe, that key has no
+// relationship to the group's actual funds or on-chain authority at all
+// (it isn't a Safe owner, and even if it somehow held ETH, spending from
+// it would never move the Safe's own balance). Rather than let that
+// silently attempt - and confusingly fail deep inside an RPC call, or
+// worse, appear to "succeed" against the wrong account - this fails
+// immediately and explicitly: real submission (building the Safe
+// execTransaction call, packing members' real safe.SafeTxHash signatures
+// via safe.PackSignatures, and relaying it through a funded key) is
+// PLAN.md §13.10 Phase 4's job, built on Phase 6's per-Safe nonce
+// reservation so concurrent proposals against the same Safe can't race.
+// Until then, approvals still record correctly (ApproveAction's
+// signature check is an off-chain gate, unrelated to Safe mechanics) and
+// tallyAndMaybeExecute still recognizes when a threshold is reached - only
+// this last step, actually moving funds, is not yet available.
+func (s *Service) executeAction(_ context.Context, action *models.PendingAction) (*models.PendingAction, error) {
+	return nil, apperrors.Internal("this wallet's threshold has been met, but on-chain execution via a real Safe transaction is not implemented yet - see PLAN.md §13.10 Phases 4 and 6")
 }
 
 // RejectAction marks a pending action rejected. Only an APPROVER may reject,
@@ -413,7 +494,7 @@ func (s *Service) RejectAction(actionID uint, memberAddress, reason string) (*mo
 	if err != nil {
 		return nil, err
 	}
-	if role != models.RoleApprover {
+	if !models.CanApprove(role) {
 		return nil, apperrors.Forbidden("only an APPROVER may reject an action")
 	}
 

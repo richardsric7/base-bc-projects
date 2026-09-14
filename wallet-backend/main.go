@@ -200,13 +200,12 @@ func main() {
 		JWTExpiry: durationFromMinutes(env.JWTExpiryMinutes),
 
 		SignatureAuthToleranceSeconds: env.SignatureAuthToleranceSeconds,
-		GroupKeySalt:                  env.GroupKeySalt,
 		Organisation:                  env.Organisation,
 
 		RecoveryAuthoritySalt: env.RecoveryAuthoritySalt,
 		RecoveryOTPTTL:        durationFromMinutes(env.RecoveryOTPTTLMinutes),
 
-		PrimaryWalletDeployerKeySalt: env.PrimaryWalletDeployerKeySalt,
+		SafeDeployerKeySalt: env.SafeDeployerKeySalt,
 
 		SumsubBaseURL:   env.SumsubBaseURL,
 		SumsubToken:     env.SumsubToken,
