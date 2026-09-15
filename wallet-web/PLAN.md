@@ -1134,3 +1134,101 @@ port was faithful:
   `package.json`/`package-lock.json` are unchanged) to screenshot the
   onboarding screen at both desktop (1280x800, illustration visible) and
   mobile (390x844, panel correctly hidden) viewports.
+
+## 19. Closing the real feature gaps against the original app: tokenization, fiat/crypto funding, receipts
+
+§17's audit only ever compared `wallet-web` against its own roadmap
+(§9); it never diffed page-for-page against the real original app's own
+router (`trovo-wallet-monorepo/web/src/routingSetup/appRouter.tsx`,
+read-only, never modified). Doing that properly surfaced real gaps
+beyond §8's three deliberate v1 exclusions (shared-access UI, hardware
+wallets, BIP-39 passphrase):
+
+- **Asset tokenization** - the entire `tokenize/apply` issuer flow and
+  the investor `tokenizedAssets`/subscribe/early-exit flow - had zero
+  `wallet-web` client despite `wallet-backend`'s tokenization component
+  being fully built (§9 in that repo's own PLAN.md).
+- **Fiat/crypto/Naira funding** - the original's Deposit/Withdraw modal
+  in `components/walletOperations.tsx` - likewise had zero client
+  despite `wallet-backend`'s fiat/stablerail/crypto components existing.
+- **`pdfPages/sendAssetReceipt.tsx`** - a printable payment receipt -
+  had no equivalent at all.
+- **`add-remove-assets`** (Stellar trustline management) - investigated
+  and found **not applicable on Base/EVM**: `assets.CuratedToken`'s own
+  doc comment already states there is no EVM equivalent of a Stellar
+  trustline gating which assets an address may hold (anyone can hold any
+  ERC-20 balance with no opt-in step) - this is a real design difference
+  between the chains, not a missed port, so no client was built for it.
+- **`restore-inactive-account`** - a third account-recovery path -
+  remains unbuilt on **both** sides: `wallet-backend` PLAN.md §15.9
+  itself marks this phase "optional... worth confirming it isn't already
+  redundant with Branch A before building a third mechanism" and never
+  built it, so there is no endpoint for `wallet-web` to call yet. Left
+  as a documented gap pending that backend decision, not silently
+  dropped.
+
+### 19.1 A real bug found while building this: tokenization/crypto's Safe-signing gap
+
+Building the tokenization/funding UI against the real backend endpoints
+surfaced that `tokenization.ConfirmApplication`/`BuildCryptoPurchase`/
+`BuildEarlyExit` and `crypto.RequestWithdrawal` still had the exact bug
+`wallet-backend` PLAN.md §17 already found and fixed in payments/swaps/
+assets: building a plain unsigned transaction "from" the primary
+wallet's Safe address and trusting a client-submitted signed transaction
+as if a Safe could ever produce one. Fixed backend-side (delegating to
+`sharedaccess`, same as payments/swaps) - see `wallet-backend/PLAN.md`
+§18 for the full account. This app's new API clients were written
+against the corrected propose/personal_sign-digest/confirm shape from
+the start, not the broken one.
+
+### 19.2 What was built
+
+- **`api/tokenizationApi.ts`/`fiatApi.ts`/`stablerailApi.ts`/`cryptoApi.ts`**
+  (new) - full clients for every endpoint these components expose.
+  `tokenizationApi.ts`'s `TokenizedAsset` interface deliberately types
+  only the fields this app's UI reads/writes, not the real row's
+  hundreds of asset-class-specific columns (bond/fund/commodity/etc. -
+  see `wallet-backend`'s `asset_class_fields.go`) - building a
+  field-for-field replica of that form is a distinct, much larger
+  follow-up, not attempted here; core deal-terms fields (name, code,
+  description, sector/type, country, quote currency, quantities/price)
+  are fully wired.
+- **`pages/tokenize/TokenizeHome.tsx`** (new) - three tabs: my
+  applications (list + delete a draft + link to detail), a new-
+  application form (the core fields above), and my investments
+  (purchases/expressions of interest/early exits, read-only lists).
+- **`pages/tokenize/AssetDetail.tsx`** (new) - one asset by
+  `:assetId`: issuer-side actions (confirm the application, sign+pay
+  the application fee if one is owed, confirm fee payment once vetted)
+  and investor-side actions (subscribe with crypto, express interest,
+  early exit) gated on the asset's current status, all shown on the
+  same page since ownership is enforced server-side either way. Every
+  on-chain action (fee payment, purchase, early exit) follows Send.tsx's
+  own build → `signHexDigest` → confirm pattern.
+- **`pages/fund/FundWallet.tsx`** (new) - three tabs: Flutterwave fiat
+  top-up (create an invoice, complete payment via the emailed link),
+  Stablerail Naira (BVN onboarding + onramp, listing supported banks),
+  and crypto (show a deposit address/history, and a real signed
+  withdrawal debit via the same build/sign/confirm pattern).
+- **`pages/receipt/Receipt.tsx`** (new) - shows a completed payment's
+  from/to/amount/tx-hash-with-explorer-link/date, reached via router
+  state from `Send.tsx`'s success screen or a `Dashboard.tsx` history
+  row (not a URL param the way the original's `?q=<base64>` worked,
+  since the record already lives in this app's own state at both call
+  sites). Uses the browser's own print-to-PDF instead of adding
+  `@react-pdf/renderer` as a dependency for one static document - a
+  deliberate simplification (same end result, a PDF file, without a new
+  dependency for a single page), not a missing feature.
+- Wired into `App.tsx`'s router and `AppLayout.tsx`'s nav (`/fund`,
+  `/tokenize`, `/tokenize/:assetId`, `/receipt`).
+
+### 19.3 Verified
+
+`npm run build` (wasm + tsc + vite) clean throughout every change above,
+including after the backend rework. Live end-to-end: booted a real
+`wallet-backend` (SQLite) locally, drove the actual UI with Playwright
+through onboarding (create wallet → password → register) to a live
+dashboard, then navigated to `/fund` and `/tokenize` and opened the new-
+application form, screenshotting each to confirm real rendering (not
+just a clean build) against the live backend - the same verification
+discipline as §16's live recovery-flow check.

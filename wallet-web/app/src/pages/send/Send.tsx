@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import Button from '../../components/Button';
 import TextInput from '../../components/TextInput';
 import { useAppSelector } from '../../store/hooks';
 import { useIsOnline } from '../../connectivity/useIsOnline';
 import { listCuratedTokens, type CuratedToken } from '../../api/assetsApi';
-import { buildPayment, submitPayment } from '../../api/paymentsApi';
+import { buildPayment, submitPayment, type PaymentHistoryRecord } from '../../api/paymentsApi';
 import { withWalletDeployRetry } from '../../api/usersApi';
 import { signHexDigest } from '../../core/walletCoreClient';
 
@@ -24,6 +25,7 @@ export default function Send() {
   const [status, setStatus] = useState<'idle' | 'building' | 'signing' | 'submitting' | 'done'>('idle');
   const [error, setError] = useState('');
   const [txHash, setTxHash] = useState('');
+  const [record, setRecord] = useState<PaymentHistoryRecord | null>(null);
 
   useEffect(() => {
     listCuratedTokens()
@@ -59,7 +61,7 @@ export default function Send() {
 
       setStatus('submitting');
       const idempotencyKey = crypto.randomUUID();
-      const record = await submitPayment(
+      const submitted = await submitPayment(
         primaryAddress,
         idempotencyKey,
         proposal.actionId,
@@ -69,7 +71,8 @@ export default function Send() {
         tokenAddress || undefined,
       );
 
-      setTxHash(record.txHash);
+      setTxHash(submitted.txHash);
+      setRecord(submitted);
       setStatus('done');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -107,7 +110,14 @@ export default function Send() {
         </div>
         {error && <p className="text-red-500 text-sm">{error}</p>}
         {status === 'done' && (
-          <p className="text-positive-primary text-sm">Payment submitted. Tx hash: {txHash}</p>
+          <p className="text-positive-primary text-sm">
+            Payment submitted. Tx hash: {txHash}{' '}
+            {record && (
+              <Link to="/receipt" state={record} className="underline">
+                View receipt
+              </Link>
+            )}
+          </p>
         )}
         <Button
           type="submit"

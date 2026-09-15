@@ -34,6 +34,12 @@ export default function AppLayout() {
           <NavLink to="/swap" className={navLinkClasses}>
             Swap
           </NavLink>
+          <NavLink to="/fund" className={navLinkClasses}>
+            Fund
+          </NavLink>
+          <NavLink to="/tokenize" className={navLinkClasses}>
+            Tokenize
+          </NavLink>
           <NavLink to="/settings" className={navLinkClasses}>
             Settings
           </NavLink>

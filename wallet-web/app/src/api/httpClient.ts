@@ -27,7 +27,7 @@ export function getBaseUrl(): string {
 }
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
   body?: unknown;
   /**
    * The wallet address this request acts on (wallet-backend's

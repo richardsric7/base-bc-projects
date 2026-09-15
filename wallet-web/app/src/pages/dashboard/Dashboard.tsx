@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useAppSelector } from '../../store/hooks';
 import { useIsOnline } from '../../connectivity/useIsOnline';
 import { listCuratedTokens, getBalance, type CuratedToken } from '../../api/assetsApi';
@@ -133,7 +134,12 @@ export default function Dashboard() {
                 <span className="text-gray-700">{h.toAddress}</span>
                 <span className="text-primary-800 font-mono">{h.amount}</span>
               </div>
-              <span className="text-gray-400 text-xs">{new Date(h.createdAt).toLocaleString()}</span>
+              <div className="flex justify-between items-center">
+                <span className="text-gray-400 text-xs">{new Date(h.createdAt).toLocaleString()}</span>
+                <Link to="/receipt" state={h} className="text-primary-700 text-xs underline">
+                  Receipt
+                </Link>
+              </div>
             </div>
           ))}
           {history.length === 0 && <p className="px-4 py-3 text-gray-500 text-sm">No payments yet.</p>}

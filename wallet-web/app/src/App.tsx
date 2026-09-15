@@ -13,6 +13,10 @@ import Dashboard from './pages/dashboard/Dashboard';
 import Send from './pages/send/Send';
 import Swap from './pages/swap/Swap';
 import Settings from './pages/settings/Settings';
+import FundWallet from './pages/fund/FundWallet';
+import TokenizeHome from './pages/tokenize/TokenizeHome';
+import AssetDetail from './pages/tokenize/AssetDetail';
+import Receipt from './pages/receipt/Receipt';
 import AppLayout from './layout/AppLayout';
 
 // The primary wallet is a Safe with no private key of its own (PLAN.md
@@ -108,6 +112,10 @@ export default function App() {
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/send" element={<Send />} />
         <Route path="/swap" element={<Swap />} />
+        <Route path="/fund" element={<FundWallet />} />
+        <Route path="/tokenize" element={<TokenizeHome />} />
+        <Route path="/tokenize/:assetId" element={<AssetDetail />} />
+        <Route path="/receipt" element={<Receipt />} />
         <Route path="/settings" element={<Settings />} />
       </Route>
       <Route
