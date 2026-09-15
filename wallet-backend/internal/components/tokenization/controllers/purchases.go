@@ -8,6 +8,7 @@ import (
 
 	"wallet-backend/internal/apperrors"
 	"wallet-backend/internal/components/tokenization/services"
+	"wallet-backend/internal/middleware"
 )
 
 func registerPurchaseRoutes(authed *gin.RouterGroup, svc *services.Service) {
@@ -50,18 +51,20 @@ func buildCryptoPurchase(svc *services.Service) gin.HandlerFunc {
 			apperrors.Abort(c, apperrors.BadRequest("quantity must be a valid number"))
 			return
 		}
-		tx, paymentAmount, err := svc.BuildCryptoPurchase(c.Request.Context(), userID, assetID, quantity)
+		signer := c.GetString(middleware.CtxSigner)
+		proposal, err := svc.BuildCryptoPurchase(c.Request.Context(), userID, assetID, quantity, signer)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"transaction": tx, "paymentAmount": paymentAmount.String()})
+		c.JSON(http.StatusOK, proposal)
 	}
 }
 
 type confirmCryptoPurchaseRequest struct {
-	Quantity string `json:"quantity" binding:"required"`
-	TxHash   string `json:"txHash" binding:"required"`
+	Quantity  string `json:"quantity" binding:"required"`
+	ActionID  uint   `json:"actionId" binding:"required"`
+	Signature string `json:"signature" binding:"required"`
 }
 
 func confirmCryptoPurchase(svc *services.Service) gin.HandlerFunc {
@@ -76,7 +79,7 @@ func confirmCryptoPurchase(svc *services.Service) gin.HandlerFunc {
 		}
 		var req confirmCryptoPurchaseRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("quantity and txHash are required"))
+			apperrors.Abort(c, apperrors.BadRequest("quantity, actionId and signature are required"))
 			return
 		}
 		quantity, err := decimal.NewFromString(req.Quantity)
@@ -84,7 +87,8 @@ func confirmCryptoPurchase(svc *services.Service) gin.HandlerFunc {
 			apperrors.Abort(c, apperrors.BadRequest("quantity must be a valid number"))
 			return
 		}
-		sub, err := svc.RecordCryptoPurchase(userID, assetID, quantity, req.TxHash)
+		signer := c.GetString(middleware.CtxSigner)
+		sub, err := svc.ConfirmCryptoPurchase(c.Request.Context(), userID, assetID, quantity, req.ActionID, signer, req.Signature)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
@@ -233,12 +237,13 @@ func buildEarlyExit(svc *services.Service) gin.HandlerFunc {
 			apperrors.Abort(c, apperrors.BadRequest("quantity must be a valid number"))
 			return
 		}
-		tx, err := svc.BuildEarlyExit(c.Request.Context(), userID, assetID, quantity)
+		signer := c.GetString(middleware.CtxSigner)
+		proposal, err := svc.BuildEarlyExit(c.Request.Context(), userID, assetID, quantity, signer)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, tx)
+		c.JSON(http.StatusOK, proposal)
 	}
 }
 
@@ -247,7 +252,8 @@ type confirmEarlyExitRequest struct {
 	BankID        uint   `json:"bankId" binding:"required"`
 	AccountNumber string `json:"accountNumber" binding:"required"`
 	AccountName   string `json:"accountName" binding:"required"`
-	BurnTxHash    string `json:"burnTxHash" binding:"required"`
+	ActionID      uint   `json:"actionId" binding:"required"`
+	Signature     string `json:"signature" binding:"required"`
 }
 
 func confirmEarlyExit(svc *services.Service) gin.HandlerFunc {
@@ -262,7 +268,7 @@ func confirmEarlyExit(svc *services.Service) gin.HandlerFunc {
 		}
 		var req confirmEarlyExitRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("quantity, bankId, accountNumber, accountName and burnTxHash are required"))
+			apperrors.Abort(c, apperrors.BadRequest("quantity, bankId, accountNumber, accountName, actionId and signature are required"))
 			return
 		}
 		quantity, err := decimal.NewFromString(req.Quantity)
@@ -270,7 +276,8 @@ func confirmEarlyExit(svc *services.Service) gin.HandlerFunc {
 			apperrors.Abort(c, apperrors.BadRequest("quantity must be a valid number"))
 			return
 		}
-		exit, err := svc.RecordEarlyExit(userID, assetID, quantity, req.BankID, req.AccountNumber, req.AccountName, req.BurnTxHash)
+		signer := c.GetString(middleware.CtxSigner)
+		exit, err := svc.ConfirmEarlyExit(c.Request.Context(), userID, assetID, quantity, req.BankID, req.AccountNumber, req.AccountName, req.ActionID, signer, req.Signature)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return

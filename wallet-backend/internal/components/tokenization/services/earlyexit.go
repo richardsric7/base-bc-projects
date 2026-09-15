@@ -2,17 +2,17 @@ package services
 
 import (
 	"context"
-	"math/big"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/shopspring/decimal"
 
 	"wallet-backend/internal/apperrors"
+	sharedaccessModels "wallet-backend/internal/components/sharedaccess/models"
 	"wallet-backend/internal/components/tokenization/models"
 	"wallet-backend/internal/contracts"
-	"wallet-backend/internal/network"
 )
 
 // parseExitPercentage parses a free-text percentage field (e.g. "5%" or
@@ -27,13 +27,20 @@ func parseExitPercentage(value string) decimal.Decimal {
 	return decimal.NewFromFloat(parsed)
 }
 
-// BuildEarlyExit builds the unsigned burn(quantity) call for the holder to
-// sign themselves - TokenizedAsset.sol is ERC20Burnable, so no
-// server-signed "payment back to the distribution wallet" transaction is
-// needed at all, unlike upstream (a simplification, not a feature gap -
-// see PLAN.md §4.9). Ported gates: the asset must be open for trading, and
-// its maturity date (if any) must not have already passed.
-func (s *Service) BuildEarlyExit(ctx context.Context, holderUserID, assetID uint, quantity decimal.Decimal) (*network.UnsignedTx, error) {
+// BuildEarlyExit proposes the burn(quantity) call as a real Safe
+// transaction against the holder's own primary wallet and returns the
+// digest signerAddress must personal_sign to approve it - TokenizedAsset.sol
+// is ERC20Burnable, so no server-signed "payment back to the distribution
+// wallet" transaction is needed at all, unlike upstream (a simplification,
+// not a feature gap - see PLAN.md §4.9). This can no longer build a plain
+// unsigned transaction the way it originally did - see
+// GroupWalletExecutor's doc comment. Ported gates: the asset must be open
+// for trading, and its maturity date (if any) must not have already
+// passed.
+func (s *Service) BuildEarlyExit(ctx context.Context, holderUserID, assetID uint, quantity decimal.Decimal, signerAddress string) (*PurchaseProposal, error) {
+	if s.SharedAccess == nil {
+		return nil, apperrors.Internal("early exit is not available: shared-access wiring is missing")
+	}
 	asset, err := s.getAsset(assetID)
 	if err != nil {
 		return nil, err
@@ -60,16 +67,44 @@ func (s *Service) BuildEarlyExit(ctx context.Context, holderUserID, assetID uint
 	if err != nil {
 		return nil, apperrors.Internal("failed to encode burn")
 	}
-	return s.Blockchain.BuildContractCallTx(ctx, holder.Address, *asset.IssuerContractAddress, big.NewInt(0), data, nil)
+	group, err := s.SharedAccess.GetGroupByAddress(holder.Address)
+	if err != nil {
+		return nil, err
+	}
+	dataHex := "0x" + common.Bytes2Hex(data)
+	action, err := s.SharedAccess.ProposeContractCall(ctx, signerAddress, group.ID, sharedaccessModels.ActionContractCall, "tokenization early exit", *asset.IssuerContractAddress, "0", dataHex, "tokenization-early-exit", uintToString(assetID))
+	if err != nil {
+		return nil, err
+	}
+	digest, err := s.SharedAccess.DigestToSign(action.ID, signerAddress)
+	if err != nil {
+		return nil, err
+	}
+	return &PurchaseProposal{ActionID: action.ID, DigestToSign: digest}, nil
 }
 
-// RecordEarlyExit records a self-submitted burn as an early exit,
-// computing the same NAV-based penalty payout formula upstream used:
-// payoutPricePerToken = (CurrentNAVPerToken or PricePerToken) * (1 -
-// (EarlyExitPenaltyPercent + EarlyExitFeePercent)/100). The payout itself
-// is settled off-chain/manually against the given bank details, exactly
-// as upstream never automated it on-chain either.
-func (s *Service) RecordEarlyExit(holderUserID, assetID uint, quantity decimal.Decimal, bankID uint, accountNumber, accountName, burnTxHash string) (*models.TokenizedAssetEarlyExit, error) {
+// ConfirmEarlyExit approves actionID (proposed via BuildEarlyExit) with
+// signerAddress's personal_sign signature over its digest, executing the
+// burn immediately once the group's approval threshold is met, then
+// records the early exit using the real on-chain transaction hash from
+// the executed action - computing the same NAV-based penalty payout
+// formula upstream used: payoutPricePerToken = (CurrentNAVPerToken or
+// PricePerToken) * (1 - (EarlyExitPenaltyPercent +
+// EarlyExitFeePercent)/100). The payout itself is settled off-chain/
+// manually against the given bank details, exactly as upstream never
+// automated it on-chain either.
+func (s *Service) ConfirmEarlyExit(ctx context.Context, holderUserID, assetID uint, quantity decimal.Decimal, bankID uint, accountNumber, accountName string, actionID uint, signerAddress, signature string) (*models.TokenizedAssetEarlyExit, error) {
+	if s.SharedAccess == nil {
+		return nil, apperrors.Internal("early exit is not available: shared-access wiring is missing")
+	}
+	action, err := s.SharedAccess.ApproveAction(ctx, actionID, signerAddress, signature)
+	if err != nil {
+		return nil, err
+	}
+	if action.Status != sharedaccessModels.ActionExecuted {
+		return nil, apperrors.BadRequest("early exit is not yet executed (status: " + string(action.Status) + ") - approve again once outstanding approvals are collected")
+	}
+
 	asset, err := s.getAsset(assetID)
 	if err != nil {
 		return nil, err
@@ -98,7 +133,7 @@ func (s *Service) RecordEarlyExit(holderUserID, assetID uint, quantity decimal.D
 		AccountNumber:         accountNumber,
 		AccountName:           accountName,
 		PayoutCurrency:        asset.AssetQuoteCurrency,
-		BurnTxHash:            burnTxHash,
+		BurnTxHash:            action.TxHash,
 		TokenQuantityExited:   quantity.String(),
 		NAVPerTokenAtExit:     navPerToken.String(),
 		PenaltyPercentApplied: penaltyPercent.String(),

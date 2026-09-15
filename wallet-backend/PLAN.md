@@ -3889,3 +3889,87 @@ own verification code, not by inspection.)
     real `POST /v1/users/wallet/deploy` round trip, correctly failing
     with wallet-backend's own honest error since this sandbox's egress
     policy blocks `sepolia.base.org`, not a code bug).
+
+## 18. MAJOR FIND: tokenization/crypto had the same raw-Safe-transaction bug §17 fixed for payments/swaps
+
+While auditing `wallet-web` for pages/features that had never been
+ported from the original app (asset tokenization, fiat/crypto funding),
+it became clear the tokenization and crypto components' own
+transaction-signing paths still had the identical bug §17 already found
+and fixed in payments/swaps/assets: they built a plain EIP-1559
+transaction "from" `user.Address` (the primary wallet, a Safe
+smart-contract account with no private key of its own since §13) via
+`Blockchain.BuildContractCallTx`, and separately trusted a client-
+submitted `signedTransaction`/`signedTreasuryTransferTx` as if that
+address could ever validly produce one. It never could - so before this
+fix, none of the following actually worked for any real wallet, no
+matter what a client sent:
+
+- **`tokenization.ConfirmApplication`** - the application-fee ERC-20
+  transfer.
+- **`tokenization.BuildCryptoPurchase`/`RecordCryptoPurchase`** - buying
+  into a primary/secondary sale.
+- **`tokenization.BuildEarlyExit`/`RecordEarlyExit`** - the burn()
+  redemption call.
+- **`crypto.RequestWithdrawal`** - the treasury debit transfer a
+  crypto withdrawal is gated on.
+- **`servicelinks`'s partner passthrough** onto the first two of these
+  (`BuildPartnerTokenPurchase`/`RecordPartnerTokenPurchase`) inherited
+  the same bug transitively.
+
+None of this was caught by existing tests because they exercised the
+build step in isolation against a fake `BlockchainClient` that happily
+returns a well-formed `UnsignedTx` regardless of whose address it names -
+the bug is only real against an actual Safe, exactly the same blind spot
+§17 describes for payments/swaps before that fix.
+
+**Fixed the same way §17 fixed payments/swaps**: both components now
+take a `SharedAccess GroupWalletExecutor` (the same four-method
+interface - `GetGroupByAddress`/`ProposeContractCall`/`DigestToSign`/
+`ApproveAction` - wired post-construction in `main.go`, exactly like
+`paymentsSvc.SharedAccess`/`swapsSvc.SharedAccess`/`assetsSvc.SharedAccess`)
+and every one of the five call sites above is now a real propose (returns
+`{actionId, digestToSign}` for the caller's signer key to `personal_sign`)
+followed by a real confirm (`ApproveAction`, which executes once the
+group's approval threshold is met and returns the actual on-chain
+`TxHash` - never a client-reported one):
+
+- `ConfirmApplication` now returns `(*asset, *PurchaseProposal, error)`
+  instead of `(*asset, *network.UnsignedTx, error)`; a new
+  `SubmitApplicationFee(ctx, actionID, signerAddress, signature)`
+  approves it. New route: `POST /:assetId/confirm/pay-fee`.
+- `BuildCryptoPurchase` now takes a `signerAddress` and returns
+  `*PurchaseProposal` (still carrying `PaymentAmount`) instead of
+  `(*network.UnsignedTx, decimal.Decimal, error)`. The old
+  `RecordCryptoPurchase(quantity, txHash)` - which trusted a client-
+  reported hash - is now `ConfirmCryptoPurchase(ctx, ..., actionID,
+  signerAddress, signature)`, which gets the hash from the executed
+  action itself.
+- `BuildEarlyExit`/the old `RecordEarlyExit(..., burnTxHash)` follow the
+  identical shape, renamed `ConfirmEarlyExit(ctx, ..., actionID,
+  signerAddress, signature)`.
+- `crypto.RequestWithdrawal` is now `BuildWithdrawal(ctx, address,
+  currency, network, amount, signerAddress) (*WithdrawalProposal, error)`
+  plus `ConfirmWithdrawal(ctx, ..., actionID, signerAddress, signature)`.
+  Routes: `POST /v1/crypto/withdrawals/build` and `.../withdrawals/confirm`
+  (replacing the single `POST /v1/crypto/withdrawals`). A currency with no
+  curated ERC-20 (`findCuratedToken` returns nil) is proposed as a native
+  value transfer to the treasury address instead of an ERC-20 `transfer`
+  call - the same branch `assets`/`payments` already have for native ETH.
+- `servicelinks.BuildPartnerTokenPurchase`/`RecordPartnerTokenPurchase`
+  take the same `signerAddress`/`actionID`/`signature` shape - a partner
+  service link grants itself no signing authority; the owned user's own
+  signer key still has to approve, so the partner's request body now
+  carries `signerAddress` explicitly (there is no per-request signer
+  context on the API-key-authed partner routes the way `CtxSigner` gives
+  the signature-authed user routes).
+
+**Verified**: `go build`/`vet`/`test ./...` all clean. New fakes
+(`fakeGroupWalletExecutor` in both `tokenization` and `crypto`'s
+`services_test.go`, mirroring payments/swaps' own from §17's fix) let
+`TestBuildCryptoPurchase_EnforcesPrivateOfferingMembership`,
+`TestRecordEarlyExit_ComputesPenaltyAdjustedPayout` (now
+`TestConfirmEarlyExit...`), and `TestRequestWithdrawal_Success` (now
+`TestBuildWithdrawal_Success`) exercise the full propose → approve →
+executed-txHash path instead of a bare build call, the same upgrade §17
+made to the payments/swaps test suite.

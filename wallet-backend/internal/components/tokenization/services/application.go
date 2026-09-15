@@ -3,14 +3,15 @@ package services
 import (
 	"context"
 	"errors"
-	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 
 	"wallet-backend/internal/apperrors"
+	sharedaccessModels "wallet-backend/internal/components/sharedaccess/models"
 	"wallet-backend/internal/components/tokenization/models"
 	"wallet-backend/internal/cryptoutil"
 	"wallet-backend/internal/network"
@@ -148,15 +149,17 @@ func (s *Service) ListByInitiator(userID uint) ([]models.TokenizedAsset, error) 
 	return assets, nil
 }
 
-// ConfirmApplication moves Draft → ApplicationConfirmed and charges the
-// application fee: a plain ERC-20/native transfer from the applicant's own
-// address to the derived fee-collection address, replacing upstream's
-// single Payment operation. Requires a TokenizationFeeID (upstream's own
-// gate). Returns the unsigned transaction for the applicant to sign - if
-// signedTransaction is already provided, it's submitted immediately in the
-// same call (mirroring upstream's "confirm and submit in one request"
-// behavior when a signature is already in hand).
-func (s *Service) ConfirmApplication(ctx context.Context, userID, assetID uint, signedTransaction *string) (*models.TokenizedAsset, *network.UnsignedTx, error) {
+// ConfirmApplication moves Draft → ApplicationConfirmed and, if a fee is
+// owed, proposes it as a real Safe transaction against the applicant's
+// own primary wallet (a plain ERC-20/native transfer to the derived
+// fee-collection address, replacing upstream's single Payment operation) -
+// returning the digest signerAddress must personal_sign to approve it.
+// Requires a TokenizationFeeID (upstream's own gate). This can no longer
+// build a plain unsigned transaction the way it originally did, nor trust
+// a client-submitted signed transaction directly - see
+// GroupWalletExecutor's doc comment; use SubmitApplicationFee to actually
+// approve and execute the proposal this returns.
+func (s *Service) ConfirmApplication(ctx context.Context, userID, assetID uint, signerAddress string) (*models.TokenizedAsset, *PurchaseProposal, error) {
 	asset, err := s.getAsset(assetID)
 	if err != nil {
 		return nil, nil, err
@@ -189,8 +192,11 @@ func (s *Service) ConfirmApplication(ctx context.Context, userID, assetID uint, 
 		feeAmount = decimal.Zero
 	}
 
-	var unsignedTx *network.UnsignedTx
+	var proposal *PurchaseProposal
 	if feeAmount.GreaterThan(decimal.Zero) {
+		if s.SharedAccess == nil {
+			return nil, nil, apperrors.Internal("application fee payment is not available: shared-access wiring is missing")
+		}
 		token, err := s.curatedToken(feeAsset)
 		if err != nil {
 			return nil, nil, err
@@ -200,10 +206,20 @@ func (s *Service) ConfirmApplication(ctx context.Context, userID, assetID uint, 
 		if err != nil {
 			return nil, nil, apperrors.Internal("failed to encode fee transfer")
 		}
-		unsignedTx, err = s.Blockchain.BuildContractCallTx(ctx, user.Address, token.ContractAddress, big.NewInt(0), data, nil)
+		group, err := s.SharedAccess.GetGroupByAddress(user.Address)
 		if err != nil {
-			return nil, nil, apperrors.Internal("failed to build fee payment transaction: " + err.Error())
+			return nil, nil, err
 		}
+		dataHex := "0x" + common.Bytes2Hex(data)
+		action, err := s.SharedAccess.ProposeContractCall(ctx, signerAddress, group.ID, sharedaccessModels.ActionContractCall, "tokenization application fee", token.ContractAddress, "0", dataHex, "tokenization-fee", uintToString(assetID))
+		if err != nil {
+			return nil, nil, err
+		}
+		digest, err := s.SharedAccess.DigestToSign(action.ID, signerAddress)
+		if err != nil {
+			return nil, nil, err
+		}
+		proposal = &PurchaseProposal{ActionID: action.ID, DigestToSign: digest}
 	}
 
 	now := time.Now()
@@ -213,13 +229,24 @@ func (s *Service) ConfirmApplication(ctx context.Context, userID, assetID uint, 
 		return nil, nil, apperrors.Internal("failed to confirm application")
 	}
 
-	if signedTransaction != nil && *signedTransaction != "" {
-		if _, err := s.Blockchain.SubmitSignedTransaction(ctx, *signedTransaction); err != nil {
-			return nil, nil, apperrors.Internal("failed to submit fee payment: " + err.Error())
-		}
-	}
+	return asset, proposal, nil
+}
 
-	return asset, unsignedTx, nil
+// SubmitApplicationFee approves actionID (proposed via ConfirmApplication)
+// with signerAddress's personal_sign signature over its digest, executing
+// the fee transfer immediately once the group's approval threshold is met.
+func (s *Service) SubmitApplicationFee(ctx context.Context, actionID uint, signerAddress, signature string) error {
+	if s.SharedAccess == nil {
+		return apperrors.Internal("application fee payment is not available: shared-access wiring is missing")
+	}
+	action, err := s.SharedAccess.ApproveAction(ctx, actionID, signerAddress, signature)
+	if err != nil {
+		return err
+	}
+	if action.Status != sharedaccessModels.ActionExecuted {
+		return apperrors.BadRequest("fee payment is not yet executed (status: " + string(action.Status) + ") - approve again once outstanding approvals are collected")
+	}
+	return nil
 }
 
 // ConfirmFeePayment moves ApplicationConfirmed → FeeConfirmed. Requires

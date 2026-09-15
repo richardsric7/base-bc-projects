@@ -28,7 +28,8 @@ func TestBuildCryptoPurchase_RejectsWhenNotOnSale(t *testing.T) {
 		t.Fatalf("seed asset: %v", err)
 	}
 
-	_, _, err := svc.BuildCryptoPurchase(context.Background(), buyer.ID, asset.ID, decimal.NewFromInt(10))
+	svc.SharedAccess = readyGroupWalletExecutor("0xtxhash")
+	_, err := svc.BuildCryptoPurchase(context.Background(), buyer.ID, asset.ID, decimal.NewFromInt(10), testSigner)
 	if err == nil {
 		t.Fatal("expected an error purchasing an asset not open for sale")
 	}
@@ -62,7 +63,8 @@ func TestBuildCryptoPurchase_EnforcesPrivateOfferingMembership(t *testing.T) {
 		t.Fatalf("seed asset: %v", err)
 	}
 
-	_, _, err := svc.BuildCryptoPurchase(context.Background(), buyer.ID, asset.ID, decimal.NewFromInt(10))
+	svc.SharedAccess = readyGroupWalletExecutor("0xtxhash")
+	_, err := svc.BuildCryptoPurchase(context.Background(), buyer.ID, asset.ID, decimal.NewFromInt(10), testSigner)
 	if err == nil {
 		t.Fatal("expected an error for a non-member buying into a private offering")
 	}
@@ -73,15 +75,15 @@ func TestBuildCryptoPurchase_EnforcesPrivateOfferingMembership(t *testing.T) {
 	if err := db.Create(&sharedaccessModels.GroupMember{GroupID: group.ID, MemberAddress: buyer.Address, Role: sharedaccessModels.RoleViewOnly}).Error; err != nil {
 		t.Fatalf("add buyer to group: %v", err)
 	}
-	tx, paymentAmount, err := svc.BuildCryptoPurchase(context.Background(), buyer.ID, asset.ID, decimal.NewFromInt(10))
+	proposal, err := svc.BuildCryptoPurchase(context.Background(), buyer.ID, asset.ID, decimal.NewFromInt(10), testSigner)
 	if err != nil {
 		t.Fatalf("expected purchase to succeed once buyer is a group member, got: %v", err)
 	}
-	if tx == nil {
-		t.Fatal("expected an unsigned transaction")
+	if proposal.DigestToSign == "" {
+		t.Fatal("expected a digest to sign")
 	}
-	if !paymentAmount.Equal(decimal.NewFromInt(20)) {
-		t.Fatalf("expected payment amount 10*2=20, got %s", paymentAmount.String())
+	if !proposal.PaymentAmount.Equal(decimal.NewFromInt(20)) {
+		t.Fatalf("expected payment amount 10*2=20, got %s", proposal.PaymentAmount.String())
 	}
 }
 

@@ -42,9 +42,10 @@ func TestRecordEarlyExit_ComputesPenaltyAdjustedPayout(t *testing.T) {
 		t.Fatalf("seed asset: %v", err)
 	}
 
-	exit, err := svc.RecordEarlyExit(holder.ID, asset.ID, decimal.NewFromInt(100), 1, "0001", "Holder Name", "0xburntx")
+	svc.SharedAccess = readyGroupWalletExecutor("0xburntx")
+	exit, err := svc.ConfirmEarlyExit(context.Background(), holder.ID, asset.ID, decimal.NewFromInt(100), 1, "0001", "Holder Name", 1, testSigner, "0xsig")
 	if err != nil {
-		t.Fatalf("RecordEarlyExit returned error: %v", err)
+		t.Fatalf("ConfirmEarlyExit returned error: %v", err)
 	}
 	// payoutPricePerToken = 10 * (1 - 0.07) = 9.3; estimatedPayout = 9.3*100 = 930
 	if exit.PayoutPricePerToken != "9.3" {
@@ -71,7 +72,8 @@ func TestBuildEarlyExit_RejectsAfterMaturity(t *testing.T) {
 		t.Fatalf("seed asset: %v", err)
 	}
 
-	_, err := svc.BuildEarlyExit(context.Background(), holder.ID, asset.ID, decimal.NewFromInt(10))
+	svc.SharedAccess = readyGroupWalletExecutor("0xtxhash")
+	_, err := svc.BuildEarlyExit(context.Background(), holder.ID, asset.ID, decimal.NewFromInt(10), testSigner)
 	if err == nil {
 		t.Fatal("expected an error for early exit after maturity")
 	}

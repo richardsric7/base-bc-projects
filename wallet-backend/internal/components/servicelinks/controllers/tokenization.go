@@ -40,7 +40,8 @@ func getAssetInfo(svc *services.Service) gin.HandlerFunc {
 }
 
 type partnerTokenPurchaseRequest struct {
-	Quantity string `json:"quantity" binding:"required"`
+	Quantity      string `json:"quantity" binding:"required"`
+	SignerAddress string `json:"signerAddress" binding:"required"`
 }
 
 func buildPartnerTokenPurchase(svc *services.Service) gin.HandlerFunc {
@@ -59,7 +60,7 @@ func buildPartnerTokenPurchase(svc *services.Service) gin.HandlerFunc {
 		}
 		var req partnerTokenPurchaseRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("quantity is required"))
+			apperrors.Abort(c, apperrors.BadRequest("quantity and signerAddress are required"))
 			return
 		}
 		quantity, err := decimal.NewFromString(req.Quantity)
@@ -67,18 +68,20 @@ func buildPartnerTokenPurchase(svc *services.Service) gin.HandlerFunc {
 			apperrors.Abort(c, apperrors.BadRequest("quantity must be a decimal number"))
 			return
 		}
-		tx, cost, err := svc.BuildPartnerTokenPurchase(c.Request.Context(), link.ID, userID, assetID, quantity)
+		proposal, err := svc.BuildPartnerTokenPurchase(c.Request.Context(), link.ID, userID, assetID, quantity, req.SignerAddress)
 		if err != nil {
 			writeError(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"transaction": tx, "cost": cost.String()})
+		c.JSON(http.StatusOK, proposal)
 	}
 }
 
 type recordPartnerTokenPurchaseRequest struct {
-	Quantity string `json:"quantity" binding:"required"`
-	TxHash   string `json:"txHash" binding:"required"`
+	Quantity      string `json:"quantity" binding:"required"`
+	ActionID      uint   `json:"actionId" binding:"required"`
+	SignerAddress string `json:"signerAddress" binding:"required"`
+	Signature     string `json:"signature" binding:"required"`
 }
 
 func recordPartnerTokenPurchase(svc *services.Service) gin.HandlerFunc {
@@ -97,7 +100,7 @@ func recordPartnerTokenPurchase(svc *services.Service) gin.HandlerFunc {
 		}
 		var req recordPartnerTokenPurchaseRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("quantity and txHash are required"))
+			apperrors.Abort(c, apperrors.BadRequest("quantity, actionId, signerAddress and signature are required"))
 			return
 		}
 		quantity, err := decimal.NewFromString(req.Quantity)
@@ -105,7 +108,7 @@ func recordPartnerTokenPurchase(svc *services.Service) gin.HandlerFunc {
 			apperrors.Abort(c, apperrors.BadRequest("quantity must be a decimal number"))
 			return
 		}
-		subscription, err := svc.RecordPartnerTokenPurchase(link.ID, userID, assetID, quantity, req.TxHash)
+		subscription, err := svc.RecordPartnerTokenPurchase(c.Request.Context(), link.ID, userID, assetID, quantity, req.ActionID, req.SignerAddress, req.Signature)
 		if err != nil {
 			writeError(c, err)
 			return

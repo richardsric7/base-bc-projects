@@ -16,8 +16,62 @@ import (
 	"wallet-backend/internal/apperrors"
 	assetsModels "wallet-backend/internal/components/assets/models"
 	"wallet-backend/internal/components/crypto/models"
+	sharedaccessModels "wallet-backend/internal/components/sharedaccess/models"
 	usersModels "wallet-backend/internal/components/users/models"
 )
+
+const testSigner = "0x9999999999999999999999999999999999999999"
+
+// fakeGroupWalletExecutor is a scriptable GroupWalletExecutor - see
+// tokenization/payments/swaps services_test.go's identical fake for the
+// pattern this mirrors.
+type fakeGroupWalletExecutor struct {
+	group          *sharedaccessModels.ClosedGroup
+	groupErr       error
+	proposedAction *sharedaccessModels.PendingAction
+	proposeErr     error
+	digest         string
+	digestErr      error
+	approvedAction *sharedaccessModels.PendingAction
+	approveErr     error
+}
+
+func (f *fakeGroupWalletExecutor) GetGroupByAddress(address string) (*sharedaccessModels.ClosedGroup, error) {
+	if f.groupErr != nil {
+		return nil, f.groupErr
+	}
+	return f.group, nil
+}
+
+func (f *fakeGroupWalletExecutor) ProposeContractCall(ctx context.Context, proposerAddress string, groupID uint, kind sharedaccessModels.ActionKind, description, contractAddress, valueWei, dataHex, domain, relatedRecordID string) (*sharedaccessModels.PendingAction, error) {
+	if f.proposeErr != nil {
+		return nil, f.proposeErr
+	}
+	return f.proposedAction, nil
+}
+
+func (f *fakeGroupWalletExecutor) DigestToSign(actionID uint, memberAddress string) (string, error) {
+	if f.digestErr != nil {
+		return "", f.digestErr
+	}
+	return f.digest, nil
+}
+
+func (f *fakeGroupWalletExecutor) ApproveAction(ctx context.Context, actionID uint, memberAddress, signatureHex string) (*sharedaccessModels.PendingAction, error) {
+	if f.approveErr != nil {
+		return nil, f.approveErr
+	}
+	return f.approvedAction, nil
+}
+
+func readyGroupWalletExecutor(txHash string) *fakeGroupWalletExecutor {
+	return &fakeGroupWalletExecutor{
+		group:          &sharedaccessModels.ClosedGroup{ID: 1},
+		proposedAction: &sharedaccessModels.PendingAction{ID: 1, Status: sharedaccessModels.ActionPending},
+		digest:         "0xdigest",
+		approvedAction: &sharedaccessModels.PendingAction{ID: 1, Status: sharedaccessModels.ActionExecuted, TxHash: txHash},
+	}
+}
 
 // fakeBlockchain is a BlockchainClient that never touches the network,
 // recording every call - same pattern used by sharedaccess/fiat's tests.
@@ -274,12 +328,21 @@ func TestRequestWithdrawal_Success(t *testing.T) {
 	defer server.Close()
 	blockchain := &fakeBlockchain{}
 	svc, db := newTestService(t, blockchain, server.URL)
+	svc.SharedAccess = readyGroupWalletExecutor("0xtreasurytx")
 	user := createTestUser(t, db, "erin")
 	seedWithdrawalNetwork(t, db)
 
-	result, err := svc.RequestWithdrawal(user.Address, "USDC", "base", "0xexternal", 100, "0xsignedtx")
+	proposal, err := svc.BuildWithdrawal(context.Background(), user.Address, "USDC", "base", 100, testSigner)
 	if err != nil {
-		t.Fatalf("RequestWithdrawal returned error: %v", err)
+		t.Fatalf("BuildWithdrawal returned error: %v", err)
+	}
+	if proposal.DigestToSign == "" {
+		t.Fatal("expected a digest to sign")
+	}
+
+	result, err := svc.ConfirmWithdrawal(context.Background(), user.Address, "USDC", "base", "0xexternal", 100, proposal.ActionID, testSigner, "0xsig")
+	if err != nil {
+		t.Fatalf("ConfirmWithdrawal returned error: %v", err)
 	}
 	if result.Status != "processing" || result.OneLiquidityWithdrawalID != "wdl-1" {
 		t.Fatalf("unexpected result: %+v", result)
@@ -288,17 +351,18 @@ func TestRequestWithdrawal_Success(t *testing.T) {
 	if result.AmountToWithdraw != 98.5 {
 		t.Fatalf("expected amountToWithdraw 98.5, got %v", result.AmountToWithdraw)
 	}
-	if len(blockchain.submitted) != 1 || blockchain.submitted[0] != "0xsignedtx" {
-		t.Fatalf("expected the signed treasury transfer to be submitted, got %+v", blockchain.submitted)
+	if result.TreasuryTxHash != "0xtreasurytx" {
+		t.Fatalf("expected the executed action's tx hash to be recorded, got %q", result.TreasuryTxHash)
 	}
 }
 
-func TestRequestWithdrawal_RejectsBelowMinimum(t *testing.T) {
+func TestBuildWithdrawal_RejectsBelowMinimum(t *testing.T) {
 	svc, db := newTestService(t, &fakeBlockchain{}, "")
+	svc.SharedAccess = readyGroupWalletExecutor("0xtreasurytx")
 	user := createTestUser(t, db, "frank")
 	seedWithdrawalNetwork(t, db)
 
-	_, err := svc.RequestWithdrawal(user.Address, "USDC", "base", "0xexternal", 0.5, "0xsignedtx")
+	_, err := svc.BuildWithdrawal(context.Background(), user.Address, "USDC", "base", 0.5, testSigner)
 	if err == nil {
 		t.Fatal("expected an error for an amount below the minimum")
 	}
@@ -307,12 +371,13 @@ func TestRequestWithdrawal_RejectsBelowMinimum(t *testing.T) {
 	}
 }
 
-func TestRequestWithdrawal_RejectsAboveMaximum(t *testing.T) {
+func TestBuildWithdrawal_RejectsAboveMaximum(t *testing.T) {
 	svc, db := newTestService(t, &fakeBlockchain{}, "")
+	svc.SharedAccess = readyGroupWalletExecutor("0xtreasurytx")
 	user := createTestUser(t, db, "grace")
 	seedWithdrawalNetwork(t, db)
 
-	_, err := svc.RequestWithdrawal(user.Address, "USDC", "base", "0xexternal", 5000, "0xsignedtx")
+	_, err := svc.BuildWithdrawal(context.Background(), user.Address, "USDC", "base", 5000, testSigner)
 	if err == nil {
 		t.Fatal("expected an error for an amount above the maximum")
 	}
@@ -321,12 +386,13 @@ func TestRequestWithdrawal_RejectsAboveMaximum(t *testing.T) {
 	}
 }
 
-func TestRequestWithdrawal_RejectsUnsupportedNetwork(t *testing.T) {
+func TestBuildWithdrawal_RejectsUnsupportedNetwork(t *testing.T) {
 	svc, db := newTestService(t, &fakeBlockchain{}, "")
+	svc.SharedAccess = readyGroupWalletExecutor("0xtreasurytx")
 	user := createTestUser(t, db, "heidi")
 	seedWithdrawalNetwork(t, db)
 
-	_, err := svc.RequestWithdrawal(user.Address, "USDC", "unsupported-network", "0xexternal", 100, "0xsignedtx")
+	_, err := svc.BuildWithdrawal(context.Background(), user.Address, "USDC", "unsupported-network", 100, testSigner)
 	if err == nil {
 		t.Fatal("expected an error for an unsupported network")
 	}

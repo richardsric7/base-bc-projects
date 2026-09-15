@@ -6,7 +6,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	tokenizationModels "wallet-backend/internal/components/tokenization/models"
-	"wallet-backend/internal/network"
+	tokenizationServices "wallet-backend/internal/components/tokenization/services"
 )
 
 // This file is a thin CanManageTokenization-gated passthrough onto the
@@ -23,22 +23,29 @@ func (s *Service) AssetInfo(assetID uint) (*tokenizationModels.TokenizedAsset, e
 	return s.Tokenization.GetByID(assetID)
 }
 
-// BuildPartnerTokenPurchase builds an unsigned on-chain purchase for an
-// owned user buying into an active primary or secondary sale.
-func (s *Service) BuildPartnerTokenPurchase(ctx context.Context, serviceLinkID, userID, assetID uint, quantity decimal.Decimal) (*network.UnsignedTx, decimal.Decimal, error) {
-	if _, err := s.requireOwnedUser(serviceLinkID, userID); err != nil {
-		return nil, decimal.Zero, err
-	}
-	return s.Tokenization.BuildCryptoPurchase(ctx, userID, assetID, quantity)
-}
-
-// RecordPartnerTokenPurchase records a purchase the partner already had
-// signed and submitted on the owned user's behalf.
-func (s *Service) RecordPartnerTokenPurchase(serviceLinkID, userID, assetID uint, quantity decimal.Decimal, txHash string) (*tokenizationModels.TokenizedAssetSubscription, error) {
+// BuildPartnerTokenPurchase proposes the on-chain purchase, as a real Safe
+// transaction against the owned user's own primary wallet, for an owned
+// user buying into an active primary or secondary sale - signerAddress is
+// still the owned user's own signer key (this servicelinks passthrough
+// grants a partner no signing authority of its own; see
+// tokenization.GroupWalletExecutor's doc comment for why a raw unsigned
+// transaction can no longer be built here at all).
+func (s *Service) BuildPartnerTokenPurchase(ctx context.Context, serviceLinkID, userID, assetID uint, quantity decimal.Decimal, signerAddress string) (*tokenizationServices.PurchaseProposal, error) {
 	if _, err := s.requireOwnedUser(serviceLinkID, userID); err != nil {
 		return nil, err
 	}
-	return s.Tokenization.RecordCryptoPurchase(userID, assetID, quantity, txHash)
+	return s.Tokenization.BuildCryptoPurchase(ctx, userID, assetID, quantity, signerAddress)
+}
+
+// RecordPartnerTokenPurchase approves and executes a purchase proposed via
+// BuildPartnerTokenPurchase, recording it once the on-chain transfer
+// actually completes - see tokenization.ConfirmCryptoPurchase's doc
+// comment.
+func (s *Service) RecordPartnerTokenPurchase(ctx context.Context, serviceLinkID, userID, assetID uint, quantity decimal.Decimal, actionID uint, signerAddress, signature string) (*tokenizationModels.TokenizedAssetSubscription, error) {
+	if _, err := s.requireOwnedUser(serviceLinkID, userID); err != nil {
+		return nil, err
+	}
+	return s.Tokenization.ConfirmCryptoPurchase(ctx, userID, assetID, quantity, actionID, signerAddress, signature)
 }
 
 // PartnerTokenSubscriptions lists an owned user's tokenization

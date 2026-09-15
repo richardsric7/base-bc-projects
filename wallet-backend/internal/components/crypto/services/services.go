@@ -20,17 +20,30 @@ import (
 
 	"wallet-backend/internal/apperrors"
 	assetsModels "wallet-backend/internal/components/assets/models"
+	sharedaccessModels "wallet-backend/internal/components/sharedaccess/models"
 	usersModels "wallet-backend/internal/components/users/models"
 	"wallet-backend/internal/cryptoutil"
 )
 
 // BlockchainClient is the narrow slice of *network.Client this component
 // needs - same narrowing pattern as sharedaccess/kyc/fiat's dependents, so
-// deposit crediting and withdrawal-debit submission are unit-testable
-// without a live Base RPC.
+// deposit crediting is unit-testable without a live Base RPC.
 type BlockchainClient interface {
 	SignAndSubmitTx(ctx context.Context, signer *ecdsa.PrivateKey, to *common.Address, value *big.Int, data []byte, explicitNonce *uint64) (string, error)
-	SubmitSignedTransaction(ctx context.Context, rawTxHex string) (string, error)
+}
+
+// GroupWalletExecutor is the slice of sharedaccess.Service this component
+// needs to actually debit a caller's own wallet before asking OneLiquidity
+// to pay out externally - see tokenization.GroupWalletExecutor's doc
+// comment for why this exists: this package had the identical bug,
+// trusting a client-submitted "signedTreasuryTransferTx" as if the
+// caller's wallet were a bare EOA it could sign a raw transaction from,
+// which a Safe smart-contract account never can.
+type GroupWalletExecutor interface {
+	GetGroupByAddress(address string) (*sharedaccessModels.ClosedGroup, error)
+	ProposeContractCall(ctx context.Context, proposerAddress string, groupID uint, kind sharedaccessModels.ActionKind, description, contractAddress, valueWei, dataHex, domain, relatedRecordID string) (*sharedaccessModels.PendingAction, error)
+	DigestToSign(actionID uint, memberAddress string) (string, error)
+	ApproveAction(ctx context.Context, actionID uint, memberAddress, signatureHex string) (*sharedaccessModels.PendingAction, error)
 }
 
 type Service struct {
@@ -42,6 +55,12 @@ type Service struct {
 	WalletDomain      string // suffix for the "uid" OneLiquidity subwallets are keyed by: username@WalletDomain
 	TreasuryKeySalt   string
 	ServiceFeePercent float64
+	// SharedAccess resolves a caller's wallet address to its group and
+	// actually executes a withdrawal debit once approved - nil until
+	// main.go wires it post-construction, in which case BuildWithdrawal/
+	// ConfirmWithdrawal fail closed with a clear error rather than a
+	// nil-pointer panic.
+	SharedAccess GroupWalletExecutor
 }
 
 func New(db *gorm.DB, blockchain BlockchainClient, baseURL, token, walletDomain, treasuryKeySalt string, serviceFeePercent float64) *Service {

@@ -36,6 +36,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	authed.GET("/applications", listMyApplications(svc))
 	authed.GET("/:assetId", getApplication(svc))
 	authed.PUT("/:assetId/confirm", confirmApplication(svc))
+	authed.POST("/:assetId/confirm/pay-fee", submitApplicationFee(svc))
 	authed.POST("/:assetId/fee/confirm", confirmFeePayment(svc))
 	authed.DELETE("/:assetId", deleteApplication(svc))
 
@@ -161,10 +162,6 @@ func getApplication(svc *services.Service) gin.HandlerFunc {
 	}
 }
 
-type confirmApplicationRequest struct {
-	SignedTransaction *string `json:"signedTransaction"`
-}
-
 func confirmApplication(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID, ok := resolveUserID(c, svc)
@@ -175,14 +172,37 @@ func confirmApplication(svc *services.Service) gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		var req confirmApplicationRequest
-		_ = c.ShouldBindJSON(&req)
-		asset, unsignedTx, err := svc.ConfirmApplication(c.Request.Context(), userID, assetID, req.SignedTransaction)
+		signer := c.GetString(middleware.CtxSigner)
+		asset, proposal, err := svc.ConfirmApplication(c.Request.Context(), userID, assetID, signer)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"asset": asset, "feePaymentTransaction": unsignedTx})
+		c.JSON(http.StatusOK, gin.H{"asset": asset, "feePayment": proposal})
+	}
+}
+
+type submitApplicationFeeRequest struct {
+	ActionID  uint   `json:"actionId" binding:"required"`
+	Signature string `json:"signature" binding:"required"`
+}
+
+func submitApplicationFee(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if _, ok := resolveUserID(c, svc); !ok {
+			return
+		}
+		var req submitApplicationFeeRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			apperrors.Abort(c, apperrors.BadRequest("actionId and signature are required"))
+			return
+		}
+		signer := c.GetString(middleware.CtxSigner)
+		if err := svc.SubmitApplicationFee(c.Request.Context(), req.ActionID, signer, req.Signature); err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}
 }
 

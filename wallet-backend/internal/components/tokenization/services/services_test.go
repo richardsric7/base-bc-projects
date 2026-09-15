@@ -68,6 +68,8 @@ func (f *fakeBlockchain) ERC20BalanceOf(_ context.Context, tokenAddress, owner s
 	return big.NewInt(0), nil
 }
 
+const testSigner = "0x9999999999999999999999999999999999999999"
+
 func newTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -87,6 +89,71 @@ func newTestService(t *testing.T, blockchain *fakeBlockchain) (*Service, *gorm.D
 	db := newTestDB(t)
 	svc := New(db, blockchain, nil, "test-issuer-salt", "test-distribution-salt", decimal.Zero)
 	return svc, db
+}
+
+// fakeGroupWalletExecutor is a scriptable GroupWalletExecutor - see
+// payments/swaps services_test.go's identical fake for the pattern this
+// mirrors. executedTxHash is what ApproveAction's returned action reports
+// once "executed", so a test can assert it flowed through into a
+// subscription/early-exit/withdrawal record.
+type fakeGroupWalletExecutor struct {
+	group    *sharedaccessModels.ClosedGroup
+	groupErr error
+
+	proposedAction *sharedaccessModels.PendingAction
+	proposeErr     error
+	lastContract   string
+	lastValueWei   string
+	lastDataHex    string
+
+	digest    string
+	digestErr error
+
+	approvedAction *sharedaccessModels.PendingAction
+	approveErr     error
+}
+
+func (f *fakeGroupWalletExecutor) GetGroupByAddress(address string) (*sharedaccessModels.ClosedGroup, error) {
+	if f.groupErr != nil {
+		return nil, f.groupErr
+	}
+	return f.group, nil
+}
+
+func (f *fakeGroupWalletExecutor) ProposeContractCall(ctx context.Context, proposerAddress string, groupID uint, kind sharedaccessModels.ActionKind, description, contractAddress, valueWei, dataHex, domain, relatedRecordID string) (*sharedaccessModels.PendingAction, error) {
+	f.lastContract = contractAddress
+	f.lastValueWei = valueWei
+	f.lastDataHex = dataHex
+	if f.proposeErr != nil {
+		return nil, f.proposeErr
+	}
+	return f.proposedAction, nil
+}
+
+func (f *fakeGroupWalletExecutor) DigestToSign(actionID uint, memberAddress string) (string, error) {
+	if f.digestErr != nil {
+		return "", f.digestErr
+	}
+	return f.digest, nil
+}
+
+func (f *fakeGroupWalletExecutor) ApproveAction(ctx context.Context, actionID uint, memberAddress, signatureHex string) (*sharedaccessModels.PendingAction, error) {
+	if f.approveErr != nil {
+		return nil, f.approveErr
+	}
+	return f.approvedAction, nil
+}
+
+// readyGroupWalletExecutor returns a fake wired to succeed end-to-end: a
+// group exists, proposing returns a pending action, and approving it
+// reports execution with txHash.
+func readyGroupWalletExecutor(txHash string) *fakeGroupWalletExecutor {
+	return &fakeGroupWalletExecutor{
+		group:          &sharedaccessModels.ClosedGroup{ID: 1},
+		proposedAction: &sharedaccessModels.PendingAction{ID: 1, Status: sharedaccessModels.ActionPending},
+		digest:         "0xdigest",
+		approvedAction: &sharedaccessModels.PendingAction{ID: 1, Status: sharedaccessModels.ActionExecuted, TxHash: txHash},
+	}
 }
 
 func createTestUser(t *testing.T, db *gorm.DB, username string, kycVerified bool) usersModels.User {

@@ -21,12 +21,34 @@ import (
 
 	"wallet-backend/internal/apperrors"
 	assetsModels "wallet-backend/internal/components/assets/models"
+	sharedaccessModels "wallet-backend/internal/components/sharedaccess/models"
 	"wallet-backend/internal/components/tokenization/models"
 	usersModels "wallet-backend/internal/components/users/models"
 	"wallet-backend/internal/cryptoutil"
 	"wallet-backend/internal/network"
 	"wallet-backend/internal/storage"
 )
+
+// GroupWalletExecutor is the slice of sharedaccess.Service this component
+// needs to actually move funds out of a buyer/applicant's own wallet -
+// see payments.GroupWalletExecutor's doc comment for why this exists.
+// This package had the identical bug: application-fee payment
+// (ConfirmApplication), crypto purchase (BuildCryptoPurchase), and
+// early-exit (BuildEarlyExit) all built and relied on the caller
+// self-submitting a plain EIP-1559 transaction "from" their own wallet
+// address - which worked only while every wallet was a bare EOA. Since
+// §13 made the primary wallet a Safe smart-contract account with no
+// private key of its own, none of those three paths could ever be validly
+// signed by anyone (PLAN.md §17, wallet-web/PLAN.md's own account of the
+// same bug class in payments/swaps). Reworked here to delegate to
+// sharedaccess's real propose -> personal_sign digest -> execute pipeline
+// instead, exactly like payments/swaps/assets already do.
+type GroupWalletExecutor interface {
+	GetGroupByAddress(address string) (*sharedaccessModels.ClosedGroup, error)
+	ProposeContractCall(ctx context.Context, proposerAddress string, groupID uint, kind sharedaccessModels.ActionKind, description, contractAddress, valueWei, dataHex, domain, relatedRecordID string) (*sharedaccessModels.PendingAction, error)
+	DigestToSign(actionID uint, memberAddress string) (string, error)
+	ApproveAction(ctx context.Context, actionID uint, memberAddress, signatureHex string) (*sharedaccessModels.PendingAction, error)
+}
 
 // CreateFiatInvoiceFunc mirrors fiat/services.Service.CreateInvoice's
 // signature, minus the returned invoice (tokenization only needs to know
@@ -65,6 +87,12 @@ type Service struct {
 	IssuerKeySalt       string // seed for cryptoutil.DeriveKey(salt+"|tokenization-issuer|"+assetID)
 	DistributionKeySalt string // seed for cryptoutil.DeriveKey(salt+"|tokenization-distribution|"+assetID)
 	TokenLimit          decimal.Decimal
+	// SharedAccess resolves a buyer/applicant's wallet address to its
+	// group and actually executes an application-fee payment, crypto
+	// purchase, or early-exit burn once approved - nil until main.go
+	// wires it post-construction, in which case those three paths fail
+	// closed with a clear error rather than a nil-pointer panic.
+	SharedAccess GroupWalletExecutor
 }
 
 func New(db *gorm.DB, blockchain BlockchainClient, blob storage.Blob, issuerKeySalt, distributionKeySalt string, tokenLimit decimal.Decimal) *Service {

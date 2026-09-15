@@ -26,7 +26,8 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	authed.GET("/deposit-address/:currency", getDepositAddresses(svc))
 	authed.GET("/deposit-history", getDepositHistory(svc))
 	authed.GET("/withdrawal-networks/:currency", getWithdrawalNetworks(svc))
-	authed.POST("/withdrawals", postWithdrawal(svc))
+	authed.POST("/withdrawals/build", buildWithdrawal(svc))
+	authed.POST("/withdrawals/confirm", confirmWithdrawal(svc))
 	authed.GET("/withdrawal-history", getWithdrawalHistory(svc))
 
 	return svc
@@ -65,22 +66,49 @@ func getWithdrawalNetworks(svc *services.Service) gin.HandlerFunc {
 	}
 }
 
-type withdrawalRequest struct {
-	Currency                 string  `json:"currency" binding:"required"`
-	Network                  string  `json:"network" binding:"required"`
-	ToAddress                string  `json:"toAddress" binding:"required"`
-	Amount                   float64 `json:"amount" binding:"required"`
-	SignedTreasuryTransferTx string  `json:"signedTreasuryTransferTx" binding:"required"`
+type buildWithdrawalRequest struct {
+	Currency string  `json:"currency" binding:"required"`
+	Network  string  `json:"network" binding:"required"`
+	Amount   float64 `json:"amount" binding:"required"`
 }
 
-func postWithdrawal(svc *services.Service) gin.HandlerFunc {
+func buildWithdrawal(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var req withdrawalRequest
+		var req buildWithdrawalRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("currency, network, toAddress, amount and signedTreasuryTransferTx are required"))
+			apperrors.Abort(c, apperrors.BadRequest("currency, network and amount are required"))
 			return
 		}
-		result, err := svc.RequestWithdrawal(c.GetString(middleware.CtxSubject), req.Currency, req.Network, req.ToAddress, req.Amount, req.SignedTreasuryTransferTx)
+		wallet := c.GetString(middleware.CtxSubject)
+		signer := c.GetString(middleware.CtxSigner)
+		proposal, err := svc.BuildWithdrawal(c.Request.Context(), wallet, req.Currency, req.Network, req.Amount, signer)
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, proposal)
+	}
+}
+
+type confirmWithdrawalRequest struct {
+	Currency  string  `json:"currency" binding:"required"`
+	Network   string  `json:"network" binding:"required"`
+	ToAddress string  `json:"toAddress" binding:"required"`
+	Amount    float64 `json:"amount" binding:"required"`
+	ActionID  uint    `json:"actionId" binding:"required"`
+	Signature string  `json:"signature" binding:"required"`
+}
+
+func confirmWithdrawal(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req confirmWithdrawalRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			apperrors.Abort(c, apperrors.BadRequest("currency, network, toAddress, amount, actionId and signature are required"))
+			return
+		}
+		wallet := c.GetString(middleware.CtxSubject)
+		signer := c.GetString(middleware.CtxSigner)
+		result, err := svc.ConfirmWithdrawal(c.Request.Context(), wallet, req.Currency, req.Network, req.ToAddress, req.Amount, req.ActionID, signer, req.Signature)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return

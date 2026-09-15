@@ -4,16 +4,29 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/shopspring/decimal"
 
 	"wallet-backend/internal/apperrors"
+	sharedaccessModels "wallet-backend/internal/components/sharedaccess/models"
 	"wallet-backend/internal/components/tokenization/models"
 	"wallet-backend/internal/contracts"
-	"wallet-backend/internal/network"
 )
+
+// PurchaseProposal is what BuildCryptoPurchase returns: the real on-chain
+// SafeTxHash digest (see sharedaccess.DigestToSign) the buyer's signer key
+// must personal_sign to approve the purchase, the PendingAction id that
+// signature approves, and the fiat-equivalent payment amount this
+// purchase will cost (informational, unchanged from before this
+// component was reworked to delegate to sharedaccess - see
+// GroupWalletExecutor's doc comment).
+type PurchaseProposal struct {
+	ActionID      uint            `json:"actionId"`
+	DigestToSign  string          `json:"digestToSign"`
+	PaymentAmount decimal.Decimal `json:"paymentAmount"`
+}
 
 // enforceCapAndStatus applies the two checks every purchase path (crypto
 // and fiat) shares: the asset must be in a sale-open status, and - if a
@@ -49,62 +62,92 @@ func (s *Service) enforceCapAndStatus(asset *models.TokenizedAsset, buyerUserID 
 	return nil
 }
 
-// BuildCryptoPurchase builds the unsigned Sale.buy(assetAmount) call for
-// the buyer to sign. Sale.sol (Phase 8) is the atomic one-transaction
-// purchase upstream achieved via a PathPaymentStrictSend against its own
-// standing DEX offer - the buyer must have already approve()'d the sale
-// contract for the payment amount (built via the assets component's
-// existing generic approve endpoint; this component builds only the buy()
-// call itself, matching Phase 7 market's precedent of never pre-checking
-// allowance server-side - an under-approved buy() simply reverts on-chain,
-// which is the buyer's own problem to fix and retry).
-func (s *Service) BuildCryptoPurchase(ctx context.Context, buyerUserID uint, assetID uint, quantity decimal.Decimal) (*network.UnsignedTx, decimal.Decimal, error) {
+// BuildCryptoPurchase proposes the Sale.buy(assetAmount) call as a real
+// Safe transaction against the buyer's own primary wallet and returns the
+// digest signerAddress must personal_sign to approve it (see
+// GroupWalletExecutor's doc comment on why this can no longer build a
+// plain unsigned transaction the way it originally did). Sale.sol
+// (Phase 8) is the atomic one-transaction purchase upstream achieved via
+// a PathPaymentStrictSend against its own standing DEX offer - the buyer
+// must have already approve()'d the sale contract for the payment amount
+// (built via the assets component's existing generic approve endpoint;
+// this component proposes only the buy() call itself, matching Phase 7
+// market's precedent of never pre-checking allowance server-side - an
+// under-approved buy() simply reverts on-chain, which is the buyer's own
+// problem to fix and retry).
+func (s *Service) BuildCryptoPurchase(ctx context.Context, buyerUserID uint, assetID uint, quantity decimal.Decimal, signerAddress string) (*PurchaseProposal, error) {
+	if s.SharedAccess == nil {
+		return nil, apperrors.Internal("crypto purchases are not available: shared-access wiring is missing")
+	}
 	asset, err := s.getAsset(assetID)
 	if err != nil {
-		return nil, decimal.Zero, err
+		return nil, err
 	}
 	if asset.SaleContractAddress == nil {
-		return nil, decimal.Zero, apperrors.Conflict("this asset has no active sale contract")
+		return nil, apperrors.Conflict("this asset has no active sale contract")
 	}
 	if quantity.LessThanOrEqual(decimal.Zero) {
-		return nil, decimal.Zero, apperrors.BadRequest("quantity must be positive")
+		return nil, apperrors.BadRequest("quantity must be positive")
 	}
 
 	pricePerToken, err := decimal.NewFromString(asset.PricePerToken)
 	if err != nil {
-		return nil, decimal.Zero, apperrors.Internal("invalid pricePerToken on this asset")
+		return nil, apperrors.Internal("invalid pricePerToken on this asset")
 	}
 	paymentAmount := quantity.Mul(pricePerToken)
 
 	if err := s.enforceCapAndStatus(asset, buyerUserID, quantity, paymentAmount); err != nil {
-		return nil, decimal.Zero, err
+		return nil, err
 	}
 
 	buyer, err := s.getUserByID(buyerUserID)
 	if err != nil {
-		return nil, decimal.Zero, err
+		return nil, err
 	}
 	if err := s.enforceOfferingAccess(asset, buyer.Address); err != nil {
-		return nil, decimal.Zero, err
+		return nil, err
 	}
 
 	data, err := contracts.EncodeBuy(toBaseUnits(quantity, asset.AssetDecimals))
 	if err != nil {
-		return nil, decimal.Zero, apperrors.Internal("failed to encode purchase")
+		return nil, apperrors.Internal("failed to encode purchase")
 	}
-	tx, err := s.Blockchain.BuildContractCallTx(ctx, buyer.Address, *asset.SaleContractAddress, big.NewInt(0), data, nil)
+	group, err := s.SharedAccess.GetGroupByAddress(buyer.Address)
 	if err != nil {
-		return nil, decimal.Zero, apperrors.Internal("failed to build purchase transaction: " + err.Error())
+		return nil, err
 	}
-	return tx, paymentAmount, nil
+	dataHex := "0x" + common.Bytes2Hex(data)
+	action, err := s.SharedAccess.ProposeContractCall(ctx, signerAddress, group.ID, sharedaccessModels.ActionContractCall, "tokenization purchase", *asset.SaleContractAddress, "0", dataHex, "tokenization", uintToString(assetID))
+	if err != nil {
+		return nil, err
+	}
+	digest, err := s.SharedAccess.DigestToSign(action.ID, signerAddress)
+	if err != nil {
+		return nil, err
+	}
+	return &PurchaseProposal{ActionID: action.ID, DigestToSign: digest, PaymentAmount: paymentAmount}, nil
 }
 
-// RecordCryptoPurchase records a self-submitted Sale.buy() as a completed
-// subscription once the buyer reports its transaction hash. Trusting a
-// client-submitted hash after building the exact calldata server-side is
-// the same posture this codebase already takes for every other
-// self-signed on-chain action (see market/crypto components).
-func (s *Service) RecordCryptoPurchase(buyerUserID, assetID uint, quantity decimal.Decimal, txHash string) (*models.TokenizedAssetSubscription, error) {
+// ConfirmCryptoPurchase approves actionID (proposed via BuildCryptoPurchase)
+// with signerAddress's personal_sign signature over its digest, executing
+// the purchase immediately once the group's approval threshold is met -
+// always true for an ordinary primary-wallet purchase (threshold 1, sole
+// owner) - and records the resulting subscription using the real
+// on-chain transaction hash from the executed action, rather than
+// trusting a client-reported hash the way this component originally did
+// (see GroupWalletExecutor's doc comment).
+func (s *Service) ConfirmCryptoPurchase(ctx context.Context, buyerUserID, assetID uint, quantity decimal.Decimal, actionID uint, signerAddress, signature string) (*models.TokenizedAssetSubscription, error) {
+	if s.SharedAccess == nil {
+		return nil, apperrors.Internal("crypto purchases are not available: shared-access wiring is missing")
+	}
+	action, err := s.SharedAccess.ApproveAction(ctx, actionID, signerAddress, signature)
+	if err != nil {
+		return nil, err
+	}
+	if action.Status != sharedaccessModels.ActionExecuted {
+		return nil, apperrors.BadRequest("purchase is not yet executed (status: " + string(action.Status) + ") - approve again once outstanding approvals are collected")
+	}
+
 	asset, err := s.getAsset(assetID)
 	if err != nil {
 		return nil, err
@@ -125,7 +168,7 @@ func (s *Service) RecordCryptoPurchase(buyerUserID, assetID uint, quantity decim
 		Quantity:           quantity.String(),
 		PaymentAmount:      quantity.Mul(pricePerToken).String(),
 		PaymentAssetSymbol: asset.AssetQuoteCurrency,
-		TxHash:             txHash,
+		TxHash:             action.TxHash,
 		Channel:            "CRYPTO",
 	}
 	if err := s.DB.Create(&sub).Error; err != nil {

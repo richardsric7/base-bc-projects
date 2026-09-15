@@ -306,8 +306,13 @@ func main() {
 	}
 	stablerailSvc := stablerailControllers.Init(router, gc)
 	cryptoSvc := cryptoControllers.Init(router, gc)
+	// This component had the identical raw-Safe-transaction bug payments/
+	// swaps/assets did (see tokenization.GroupWalletExecutor's doc
+	// comment) - closed the same way, by delegating to sharedaccess.
+	cryptoSvc.SharedAccess = sharedaccessSvc
 	marketControllers.Init(router, gc)
 	tokenizationSvc := tokenizationControllers.Init(router, gc)
+	tokenizationSvc.SharedAccess = sharedaccessSvc
 	patronSvc := patronControllers.Init(router, gc)
 	servicelinksSvc := servicelinksControllers.Init(router, gc, usersSvc, paymentsSvc, assetsSvc, tokenizationSvc)
 	referenceControllers.Init(router, gc)
