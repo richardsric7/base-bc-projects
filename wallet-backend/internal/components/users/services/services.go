@@ -380,6 +380,28 @@ func (s *Service) GetByAddress(address string) (*models.User, error) {
 	return &user, nil
 }
 
+// GetBySignerAddress fetches a user profile by the EOA currently
+// authorized to operate their primary wallet - used by GET /v1/users/me,
+// which a client calls from its own signer key before it necessarily
+// knows its primary wallet's Safe address (right after creating/
+// importing a signer vault, or re-resolving a cleared local cache). Note
+// this is deliberately keyed on SignerAddress, not Address: a self-signed
+// SignatureAuth request (X-Wallet-Address == X-Signer-Address, the only
+// way to call this endpoint before the wallet address is known) resolves
+// CtxSubject to that same signer value, which would never match Address
+// (a distinct Safe address) - GetByAddress(CtxSubject) looked correct but
+// silently 404'd for exactly this endpoint's own primary use case.
+func (s *Service) GetBySignerAddress(signerAddress string) (*models.User, error) {
+	var user models.User
+	if err := s.DB.Where("signer_address = ?", signerAddress).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperrors.NotFound("user not found")
+		}
+		return nil, apperrors.Internal("failed to load user")
+	}
+	return &user, nil
+}
+
 // GetByID fetches a user profile by primary key.
 func (s *Service) GetByID(userID uint) (*models.User, error) {
 	var user models.User

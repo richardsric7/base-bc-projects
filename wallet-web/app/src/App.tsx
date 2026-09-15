@@ -8,6 +8,7 @@ import { getMyUser } from './api/usersApi';
 import { startConnectivityMonitor } from './connectivity/connectivityMonitor';
 import OnboardingWizard from './pages/onboarding/OnboardingWizard';
 import Unlock from './pages/unlock/Unlock';
+import RecoveryWizard from './pages/recovery/RecoveryWizard';
 import Dashboard from './pages/dashboard/Dashboard';
 import Send from './pages/send/Send';
 import Swap from './pages/swap/Swap';
@@ -89,6 +90,10 @@ export default function App() {
     <Routes>
       <Route path="/onboarding" element={onboardingComplete ? <Navigate to="/" replace /> : <OnboardingWizard />} />
       <Route path="/unlock" element={isFullyUnlocked ? <Navigate to="/dashboard" replace /> : <Unlock />} />
+      {/* Reachable regardless of onboarding/unlock state - by definition, a
+          user reaching for this has no working signer key to satisfy either
+          of those checks (wallet-backend PLAN.md §15). */}
+      <Route path="/recovery" element={<RecoveryWizard />} />
       <Route
         element={
           !onboardingComplete ? (

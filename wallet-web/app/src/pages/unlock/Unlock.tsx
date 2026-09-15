@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import AuthLayout from '../../components/AuthLayout';
 import Button from '../../components/Button';
 import TextInput from '../../components/TextInput';
@@ -55,6 +55,11 @@ export default function Unlock() {
         {error && <p className="text-red-500 text-sm">{error}</p>}
         <Button type="submit" label="Unlock" disabled={busy || rolesToUnlock.length === 0} />
       </form>
+      <p className="text-center text-sm">
+        <Link to="/recovery" className="text-primary-700 font-montserratMedium">
+          Lost your password or recovery phrase?
+        </Link>
+      </p>
     </AuthLayout>
   );
 }

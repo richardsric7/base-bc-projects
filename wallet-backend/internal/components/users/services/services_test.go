@@ -228,6 +228,37 @@ func TestGetByAddress(t *testing.T) {
 	}
 }
 
+// Regression test for a real bug: GetByAddress(CtxSubject) looked correct
+// for GET /v1/users/me but silently 404'd on its own primary use case - a
+// self-signed SignatureAuth request (the only way to call it before the
+// wallet's Safe address is known at all) resolves CtxSubject to the
+// signer's own address, never to User.Address (a distinct Safe address
+// once a profile exists). GetBySignerAddress is what getMe actually calls
+// now (keyed on CtxSigner instead).
+func TestGetBySignerAddress(t *testing.T) {
+	svc := newTestService(t)
+	signerAddress := randomAddress(t)
+	registered, err := svc.Register(RegisterInput{Username: "dave", Email: "dave@example.com", SignerAddress: signerAddress})
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if registered.Address == signerAddress {
+		t.Fatal("test setup invalid: the Safe address must differ from the signer address")
+	}
+
+	user, err := svc.GetBySignerAddress(signerAddress)
+	if err != nil {
+		t.Fatalf("GetBySignerAddress returned error: %v", err)
+	}
+	if user.Username != "dave" {
+		t.Fatalf("unexpected user: %+v", user)
+	}
+
+	if _, err := svc.GetBySignerAddress(randomAddress(t)); err == nil {
+		t.Fatal("expected a not-found error for an unregistered signer address")
+	}
+}
+
 func TestSecurityAnswer_SetAndVerify(t *testing.T) {
 	svc := newTestService(t)
 	user, err := svc.Register(RegisterInput{Username: "bob", Email: "bob@example.com", SignerAddress: randomAddress(t)})

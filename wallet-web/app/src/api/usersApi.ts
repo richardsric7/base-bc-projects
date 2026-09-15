@@ -9,7 +9,15 @@ export interface User {
   // separately-imported mnemonic's own address (PLAN.md §3, corrected -
   // a Safe has no private key of its own).
   address: string;
+  signerAddress: string;
+  primaryWalletDeployed: boolean;
   kycStatus: string;
+  // See PLAN.md §13's own recovery UI section: Branch A (free, DB-only
+  // address swap) and Branch B (paid, true wallet-signer recovery via a
+  // Safe owner swap) are independent toggles - a user may have neither,
+  // either, or both enabled at once.
+  accountRecoveryEnabled: boolean;
+  walletRecoveryEnabled: boolean;
 }
 
 // POST /v1/users (SignatureAuth) - the registered address comes from the
@@ -28,6 +36,14 @@ export function registerUser(signerAddress: string, username: string, email: str
 // offline cache was cleared).
 export function getMyUser(signerAddress: string): Promise<User> {
   return apiRequest<User>('/v1/users/me', { walletAddress: signerAddress });
+}
+
+// GET /v1/users/:username (public) - used by the recovery flow (no
+// signer key survives to authenticate with at that point) to check which
+// recovery branch(es) a username has enabled before asking for the
+// matching factors. Also usable generally as a public username lookup.
+export function getUserByUsername(username: string): Promise<User> {
+  return apiRequest<User>(`/v1/users/${encodeURIComponent(username)}`);
 }
 
 // POST /v1/users/wallet/deploy (SignatureAuth, self-signed) - submits the

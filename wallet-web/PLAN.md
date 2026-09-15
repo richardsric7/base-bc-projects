@@ -809,7 +809,7 @@ implementation work itself isn't planned twice in two different
 consumers' documents once `wallet-backend`'s Safe-based redesign (§13
 there) actually starts.
 
-## 13. Wallet recovery UI (tracked, not yet implemented here)
+## 13. Wallet recovery UI (design - implemented in §16)
 
 `wallet-backend/PLAN.md` §15 documents **two coexisting recovery
 branches**, not one - both worth UI here, presented as genuinely
@@ -1022,3 +1022,76 @@ been corrected there to point back to this section. Full
 `cargo test` (wallet-core, 22/22), `go build`/`go vet`/`go test ./...`
 (wallet-backend), and `npx tsc -b`/`npm run build:app-only` (this app)
 all pass after the fix.
+
+## 16. Wallet recovery UI - implemented
+
+§13's design is now built:
+
+- **`api/recoveryApi.ts`** (new): the full client surface for both
+  branches - `listSecurityQuestions`/`setSecurityAnswer`/
+  `verifySecurityAnswer`, Branch A's `enableAccountRecovery`/
+  `disableAccountRecovery`/`requestAccountRecoveryOTP`/`recoverAccount`,
+  and Branch B's `buildEnableWalletRecovery`/`confirmEnableWalletRecovery`/
+  `buildDisableWalletRecovery`/`confirmDisableWalletRecovery`/
+  `recoverWallet`. `usersApi.ts`'s `User` interface grew the
+  `accountRecoveryEnabled`/`walletRecoveryEnabled`/`signerAddress`/
+  `primaryWalletDeployed` fields wallet-backend already returned but this
+  app never read; added `getUserByUsername` (the public
+  `GET /v1/users/:username` lookup) for the recovery flow's own
+  branch-availability check before it has any authenticated key to ask
+  with.
+- **`pages/settings/RecoverySettings.tsx`** (new, embedded in
+  `Settings.tsx`): lets the signed-in owner answer security questions and
+  toggle each branch. Branch B's enable/disable both `signHexDigest` the
+  two `SafeTxHash` values a challenge returns - **not**
+  `signRequestMessage`, the distinction §15 exists to enforce. A
+  configured enrollment fee (`feeTx` present in the challenge) is
+  detected and surfaced as an explicit, honest error rather than silently
+  failing or half-implementing raw-transaction broadcasting - this app
+  has no direct RPC client of its own (every other on-chain interaction
+  goes through wallet-backend's relayer/deployer keys), and building one
+  just for this one, likely-zero-configured-by-default case was judged
+  out of scope here; tracked as a known gap, not silently dropped.
+- **`pages/recovery/RecoveryWizard.tsx`** (new) + a `/recovery` route in
+  `App.tsx` reachable regardless of onboarding/unlock state, linked from
+  `Unlock.tsx`'s new "Lost your password or recovery phrase?" - by
+  definition a user reaching for this has no working signer key to
+  satisfy either of those gates. Flow: username → (if both branches are
+  enabled) choose one → generate and confirm a **new** signer mnemonic
+  (reusing `MnemonicReveal` as-is) → set its password → request an email
+  OTP and answer security questions → submit. The new address's proof-of-
+  ownership signature (`RecoveryMessage`) is `signRequestMessage`, a
+  genuine human-composed string - unrelated to §15's digest-signing fix,
+  confirmed by tracing `verifyNewAddressOwnership` server-side. On
+  success, dispatches `vaultCreated` for both roles directly (no reload
+  needed) and writes the offline cache entry `OnboardingWizard.tsx` also
+  writes, so a subsequent reload resolves correctly through `App.tsx`'s
+  existing hydration path.
+- **A second real bug found live, not by inspection**: `GET /v1/users/me`
+  (added in §14) looked correct but 404'd on its own primary use case.
+  `getMe` read `GetByAddress(CtxSubject)`; for the only way to call this
+  endpoint before a wallet address is known (a self-signed request,
+  `X-Wallet-Address == X-Signer-Address`), `CtxSubject` resolves to that
+  same signer value - which never matches `User.Address` (a distinct Safe
+  address) once a profile actually exists. Every already-registered
+  caller of `GET /v1/users/me` - `RecoverySettings.tsx`'s own refresh
+  call included - got a false 404. Fixed server-side: added
+  `GetBySignerAddress` and changed `getMe` to read `CtxSigner` (the
+  actual verified EOA) instead of `CtxSubject`. New
+  `TestGetBySignerAddress` regression test in `wallet-backend`.
+- **Verified live end-to-end**, not just build/typecheck: booted a real
+  `wallet-backend` (SQLite), drove the actual UI with Playwright through
+  registration → Settings (save a security answer, enable Branch A,
+  confirmed the fixed `GetBySignerAddress` correctly reflects "enabled"
+  back in the UI) → `/recovery` (username → generate/confirm a new
+  mnemonic → set its password → request a real OTP, read the actual code
+  out of `wallet-backend`'s console-mailer log, answer the saved security
+  question → submit) → **"Recovery complete"** with a real new wallet
+  address, a full genuine round trip through `recoverAccount`'s three-
+  factor verification. Branch B's enable/disable couldn't be driven this
+  far live in this sandbox - both `buildEnableWalletRecovery` and
+  `confirmEnableWalletRecovery` call `Blockchain.SafeNonce` before ever
+  reaching signature verification, and that RPC call is blocked here -
+  but the digest-signing convention it depends on was already proven
+  correct independently in §15. `go build`/`vet`/`test ./...` and
+  `npx tsc -b`/`npm run build:app-only` all clean throughout.

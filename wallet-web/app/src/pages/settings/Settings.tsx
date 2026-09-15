@@ -13,6 +13,7 @@ import {
   switchActiveNetwork,
   type NetworkEnv,
 } from '../../config/network';
+import RecoverySettings from './RecoverySettings';
 
 export default function Settings() {
   const dispatch = useAppDispatch();
@@ -82,6 +83,8 @@ export default function Settings() {
           </div>
         )}
       </section>
+
+      <RecoverySettings />
 
       <section className="space-y-3">
         <h2 className="text-trovored-primary font-montserratSemiBold text-lg">Danger zone</h2>

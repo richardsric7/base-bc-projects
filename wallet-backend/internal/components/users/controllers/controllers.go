@@ -133,15 +133,21 @@ func getUser(svc *services.Service, respCache cache.Cache, watcher *network.Addr
 	}
 }
 
-// getMe looks a profile up by the verified signer's own address rather
-// than a username - onboarding needs this to tell "this signer already
-// has a registered profile" from "this is a brand-new signer" without
-// knowing a username to ask for by name (GET /v1/users/:username can't
-// help there: the client only ever knows the signer's address at this
-// point, never their username).
+// getMe looks a profile up by the verified signer's own key rather than a
+// username or wallet address - onboarding needs this to tell "this
+// signer already has a registered profile" from "this is a brand-new
+// signer" without knowing a username to ask for by name (GET
+// /v1/users/:username can't help there), and a client re-resolving its
+// primary wallet address after a cleared cache needs it too, in both
+// cases before the wallet's own Safe address is known at all. Reads
+// CtxSigner (the actual verified EOA), not CtxSubject: a self-signed
+// SignatureAuth request - the only way to call this endpoint before the
+// wallet address is known - has CtxSubject equal to that same signer
+// value, which never matches User.Address (a distinct Safe address, see
+// GetBySignerAddress's doc comment) once a profile exists.
 func getMe(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		user, err := svc.GetByAddress(c.GetString(middleware.CtxSubject))
+		user, err := svc.GetBySignerAddress(c.GetString(middleware.CtxSigner))
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
