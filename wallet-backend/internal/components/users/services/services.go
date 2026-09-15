@@ -215,7 +215,8 @@ func (s *Service) Register(input RegisterInput) (*models.User, error) {
 		wallet := models.UserWallet{
 			UserID:    user.ID,
 			Address:   walletAddressHex,
-			Label:     "primary",
+			Tag:       "primary",
+			Alias:     strings.ToLower(user.Username),
 			IsPrimary: true,
 		}
 		return tx.Create(&wallet).Error
@@ -327,7 +328,7 @@ func (s *Service) ensurePrimaryWalletGroup(user *models.User) error {
 		member := sharedaccessModels.GroupMember{
 			GroupID:       group.ID,
 			MemberAddress: user.SignerAddress,
-			Role:          sharedaccessModels.RoleInitiatorApprover,
+			Role:          sharedaccessModels.RoleApprover,
 		}
 		if err := tx.Create(&member).Error; err != nil {
 			return apperrors.Internal("failed to record primary wallet group membership: " + err.Error())
@@ -365,6 +366,19 @@ func (s *Service) GetByUsername(username string) (*models.User, error) {
 		return nil, apperrors.Internal("failed to load user")
 	}
 	return &user, nil
+}
+
+// ResolveUsernameToPrimaryWalletAddress implements
+// sharedaccess.UsernameResolver: it's how that package's member-add/
+// remove flow satisfies the original's own "add a member by username
+// only" convention while still operating internally on the primary-
+// wallet address that's the actual Safe-owner/GroupMember identity.
+func (s *Service) ResolveUsernameToPrimaryWalletAddress(username string) (string, error) {
+	user, err := s.GetByUsername(username)
+	if err != nil {
+		return "", err
+	}
+	return user.Address, nil
 }
 
 // GetByAddress fetches a user profile by their EVM address, used to check
@@ -415,18 +429,169 @@ func (s *Service) GetByID(userID uint) (*models.User, error) {
 	return &user, nil
 }
 
-// RegisterWallet adds an additional EVM address a user controls (e.g. a
-// hardware-wallet address, or a sub-wallet a servicelinks partner has the
-// user provision) alongside their primary wallet.
-func (s *Service) RegisterWallet(userID uint, address, label string) (*models.UserWallet, error) {
-	if !validators.IsValidAddress(address) {
+// RegisterWalletForAddress records a new entry in ownerAddress's own
+// wallet directory - called by sharedaccess.CreateGroup once a new group
+// Safe deploys (via the WalletDirectory interface, wired post-
+// construction in main.go), and equally usable for registering any other
+// additional EVM address (e.g. a hardware-wallet address) a user
+// controls alongside their primary wallet. alias defaults to
+// "<ownerUsername>_<tag>" when tag is given, or to the address itself
+// otherwise - the original's own "primaryUsername_tag for sub wallets"
+// convention (UserWallet's own doc comment), just derived automatically
+// rather than left for the caller to get right.
+func (s *Service) RegisterWalletForAddress(ownerAddress, walletAddress, tag, description string, walletType models.WalletType) (*models.UserWallet, error) {
+	if !validators.IsValidAddress(walletAddress) {
 		return nil, apperrors.BadRequest("invalid EVM address")
 	}
-	wallet := models.UserWallet{UserID: userID, Address: address, Label: label}
+	var owner models.User
+	if err := s.DB.Where("LOWER(address) = LOWER(?)", ownerAddress).First(&owner).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperrors.NotFound("owner not found")
+		}
+		return nil, apperrors.Internal("failed to load owner")
+	}
+
+	alias := strings.ToLower(walletAddress)
+	if tag != "" {
+		alias = strings.ToLower(owner.Username + "_" + tag)
+	}
+	wallet := models.UserWallet{
+		UserID:      owner.ID,
+		Address:     walletAddress,
+		Tag:         tag,
+		Description: description,
+		WalletType:  walletType,
+		Alias:       alias,
+	}
 	if err := s.DB.Create(&wallet).Error; err != nil {
-		return nil, apperrors.Conflict("this address is already registered")
+		return nil, apperrors.Conflict("this address or alias is already registered")
 	}
 	return &wallet, nil
+}
+
+// UpdateWalletMetadata lets a wallet's owner - whoever's directory it's
+// in, per RegisterWalletForAddress/Register - change how it's displayed
+// and referenced. Only nil fields are left unchanged.
+func (s *Service) UpdateWalletMetadata(callerAddress, walletAddress string, tag, description, alias *string) (*models.UserWallet, error) {
+	var caller models.User
+	if err := s.DB.Where("LOWER(address) = LOWER(?)", callerAddress).First(&caller).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperrors.NotFound("caller not found")
+		}
+		return nil, apperrors.Internal("failed to load caller")
+	}
+	var wallet models.UserWallet
+	if err := s.DB.Where("LOWER(address) = LOWER(?)", walletAddress).First(&wallet).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperrors.NotFound("wallet not found")
+		}
+		return nil, apperrors.Internal("failed to load wallet")
+	}
+	if wallet.UserID != caller.ID {
+		return nil, apperrors.Forbidden("only this wallet's owner may edit it")
+	}
+	if tag != nil {
+		wallet.Tag = *tag
+	}
+	if description != nil {
+		wallet.Description = *description
+	}
+	if alias != nil {
+		if *alias == "" {
+			return nil, apperrors.BadRequest("alias cannot be empty")
+		}
+		wallet.Alias = strings.ToLower(*alias)
+	}
+	if err := s.DB.Save(&wallet).Error; err != nil {
+		return nil, apperrors.Conflict("this alias is already taken")
+	}
+	return &wallet, nil
+}
+
+// ListWalletsForUser returns callerAddress's own wallet directory -
+// their primary wallet and every additional wallet they've registered
+// or created, primary first.
+func (s *Service) ListWalletsForUser(callerAddress string) ([]models.UserWallet, error) {
+	var caller models.User
+	if err := s.DB.Where("LOWER(address) = LOWER(?)", callerAddress).First(&caller).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperrors.NotFound("caller not found")
+		}
+		return nil, apperrors.Internal("failed to load caller")
+	}
+	var wallets []models.UserWallet
+	if err := s.DB.Where("user_id = ?", caller.ID).Order("is_primary DESC, created_at").Find(&wallets).Error; err != nil {
+		return nil, apperrors.Internal("failed to load wallets")
+	}
+	return wallets, nil
+}
+
+// ResolveRecipient turns a payment recipient identifier - an address,
+// username, email, or wallet alias - into the address to actually pay,
+// matching the original's own GetUser/GetWallet resolution
+// (trovo-wallet-monorepo/backend's
+// internal/components/users/db/user_go.go): an address is used
+// directly; otherwise the identifier is tried as a wallet alias first,
+// then as a username or email naming a user, in which case their own
+// primary wallet receives the payment - exactly as in the original, a
+// username/email payment can't target one of the recipient's
+// non-primary wallets, only their own alias can.
+func (s *Service) ResolveRecipient(identifier string) (string, error) {
+	if validators.IsValidAddress(identifier) {
+		return identifier, nil
+	}
+	id := strings.ToLower(strings.TrimSpace(identifier))
+	if id == "" {
+		return "", apperrors.BadRequest("recipient is required")
+	}
+
+	var wallet models.UserWallet
+	if err := s.DB.Where("alias = ?", id).First(&wallet).Error; err == nil {
+		return wallet.Address, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", apperrors.Internal("failed to resolve recipient")
+	}
+
+	var user models.User
+	if err := s.DB.Where("LOWER(username) = ? OR LOWER(email) = ?", id, id).First(&user).Error; err == nil {
+		return user.Address, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", apperrors.Internal("failed to resolve recipient")
+	}
+
+	return "", apperrors.NotFound("recipient not found - use a valid address, username, email, or wallet alias")
+}
+
+// WalletDirectoryEntry is the public-safe view of a UserWallet used to
+// preview/confirm a payment recipient before sending - deliberately
+// narrower than the full row (no UserID or LinkedWalletAddress).
+type WalletDirectoryEntry struct {
+	Address   string `json:"address"`
+	Alias     string `json:"alias,omitempty"`
+	Tag       string `json:"tag,omitempty"`
+	IsPrimary bool   `json:"isPrimary"`
+}
+
+// LookupWalletDirectoryEntry resolves identifier the same way
+// ResolveRecipient does, then returns its directory entry - or, for a
+// bare address nobody in this system has registered a UserWallet row
+// for, an entry with just Address set, so a client can still show
+// "sending to this raw address" instead of treating an unrecognized-but-
+// valid address as an error (matching the original's own "you are about
+// to make payment to a public key directly" notice for the same case).
+func (s *Service) LookupWalletDirectoryEntry(identifier string) (*WalletDirectoryEntry, error) {
+	address, err := s.ResolveRecipient(identifier)
+	if err != nil {
+		return nil, err
+	}
+	var wallet models.UserWallet
+	if err := s.DB.Where("LOWER(address) = LOWER(?)", address).First(&wallet).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return &WalletDirectoryEntry{Address: address}, nil
+		}
+		return nil, apperrors.Internal("failed to load wallet")
+	}
+	return &WalletDirectoryEntry{Address: wallet.Address, Alias: wallet.Alias, Tag: wallet.Tag, IsPrimary: wallet.IsPrimary}, nil
 }
 
 // SetKYCVerifiedLevel directly sets a user's KYC verification level -

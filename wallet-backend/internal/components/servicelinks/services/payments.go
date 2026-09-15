@@ -59,9 +59,10 @@ func (s *Service) PaymentHistory(serviceLinkID, userID uint) ([]models.PaymentHi
 // RegisterSubWallet lets a partner register an additional address an owned
 // user controls (e.g. a second embedded-wallet address the partner
 // provisioned for them) alongside their primary wallet.
-func (s *Service) RegisterSubWallet(serviceLinkID, userID uint, address, label string) (*usersModels.UserWallet, error) {
-	if _, err := s.requireOwnedUser(serviceLinkID, userID); err != nil {
+func (s *Service) RegisterSubWallet(serviceLinkID, userID uint, address, tag string) (*usersModels.UserWallet, error) {
+	user, err := s.requireOwnedUser(serviceLinkID, userID)
+	if err != nil {
 		return nil, err
 	}
-	return s.Users.RegisterWallet(userID, address, label)
+	return s.Users.RegisterWalletForAddress(user.Address, address, tag, "", usersModels.WalletTypeNormal)
 }

@@ -72,6 +72,15 @@ func (f *fakeGroupWalletExecutor) ApproveAction(ctx context.Context, actionID ui
 	return f.approvedAction, nil
 }
 
+// fakeRecipientResolver is a pass-through RecipientResolver for tests that
+// don't exercise alias/username/email resolution itself - it just hands
+// back whatever identifier it was given, as if it were already an address.
+type fakeRecipientResolver struct{}
+
+func (fakeRecipientResolver) ResolveRecipient(identifier string) (string, error) {
+	return identifier, nil
+}
+
 func newTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -92,9 +101,66 @@ func TestBuildPaymentTx_FailsClosedWhenSharedAccessMissing(t *testing.T) {
 	}
 }
 
+func TestBuildPaymentTx_FailsClosedWhenRecipientsMissing(t *testing.T) {
+	svc := New(newTestDB(t))
+	svc.SharedAccess = &fakeGroupWalletExecutor{}
+	_, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, testTo, "", "1000")
+	if err == nil {
+		t.Fatal("expected an error when Recipients is unwired")
+	}
+}
+
+// aliasRecipientResolver resolves one fixed identifier ("alice") to
+// testTo and errors on anything else, so a test can prove BuildPaymentTx
+// actually routes `to` through RecipientResolver before validating it as
+// an address, rather than requiring `to` to already be one.
+type aliasRecipientResolver struct{ err error }
+
+func (a aliasRecipientResolver) ResolveRecipient(identifier string) (string, error) {
+	if a.err != nil {
+		return "", a.err
+	}
+	if identifier == "alice" {
+		return testTo, nil
+	}
+	return "", apperrors.NotFound("no such wallet, username, email, or alias")
+}
+
+func TestBuildPaymentTx_PropagatesRecipientResolutionError(t *testing.T) {
+	svc := New(newTestDB(t))
+	svc.SharedAccess = &fakeGroupWalletExecutor{}
+	svc.Recipients = aliasRecipientResolver{}
+	if _, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, "not-alice-or-an-address", "", "1000"); err == nil {
+		t.Fatal("expected the recipient resolution error to propagate")
+	}
+}
+
+func TestBuildPaymentTx_ResolvesRecipientBeforeValidating(t *testing.T) {
+	svc := New(newTestDB(t))
+	fake := &fakeGroupWalletExecutor{
+		group:          &sharedaccessModels.ClosedGroup{ID: 7},
+		proposedAction: &sharedaccessModels.PendingAction{ID: 42},
+		digest:         "0xdeadbeef",
+	}
+	svc.SharedAccess = fake
+	svc.Recipients = aliasRecipientResolver{}
+
+	proposal, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, "alice", "", "1000")
+	if err != nil {
+		t.Fatalf("unexpected error resolving a username/alias recipient: %v", err)
+	}
+	if proposal.ResolvedAddress != testTo {
+		t.Fatalf("expected ResolvedAddress %s, got %s", testTo, proposal.ResolvedAddress)
+	}
+	if fake.lastRecipient != testTo {
+		t.Fatalf("expected the resolved address to be proposed, got %s", fake.lastRecipient)
+	}
+}
+
 func TestBuildPaymentTx_RejectsInvalidAddress(t *testing.T) {
 	svc := New(newTestDB(t))
 	svc.SharedAccess = &fakeGroupWalletExecutor{}
+	svc.Recipients = fakeRecipientResolver{}
 	if _, err := svc.BuildPaymentTx(context.Background(), "not-an-address", testSigner, testTo, "", "1000"); err == nil {
 		t.Fatal("expected an error for an invalid wallet address")
 	}
@@ -106,6 +172,7 @@ func TestBuildPaymentTx_RejectsInvalidAddress(t *testing.T) {
 func TestBuildPaymentTx_RejectsNonDecimalAmount(t *testing.T) {
 	svc := New(newTestDB(t))
 	svc.SharedAccess = &fakeGroupWalletExecutor{}
+	svc.Recipients = fakeRecipientResolver{}
 	if _, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, testTo, "", "not-a-number"); err == nil {
 		t.Fatal("expected an error for a non-decimal amount")
 	}
@@ -115,6 +182,7 @@ func TestBuildPaymentTx_PropagatesGroupLookupError(t *testing.T) {
 	svc := New(newTestDB(t))
 	fake := &fakeGroupWalletExecutor{groupErr: apperrors.NotFound("no group")}
 	svc.SharedAccess = fake
+	svc.Recipients = fakeRecipientResolver{}
 	if _, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, testTo, "", "1000"); err == nil {
 		t.Fatal("expected the group lookup error to propagate")
 	}
@@ -128,6 +196,7 @@ func TestBuildPaymentTx_Success(t *testing.T) {
 		digest:         "0xdeadbeef",
 	}
 	svc.SharedAccess = fake
+	svc.Recipients = fakeRecipientResolver{}
 
 	proposal, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, testTo, "", "1000")
 	if err != nil {

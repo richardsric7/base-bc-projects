@@ -291,6 +291,19 @@ func main() {
 	paymentsSvc.SharedAccess = sharedaccessSvc
 	swapsSvc.SharedAccess = sharedaccessSvc
 	assetsSvc.SharedAccess = sharedaccessSvc
+	// A payment recipient may be an address, username, email, or wallet
+	// alias (users.UserWallet's own doc comment) - resolved here rather
+	// than duplicated in payments itself.
+	paymentsSvc.Recipients = usersSvc
+	// Gives every newly-created group Safe a users.UserWallet directory
+	// entry (Tag/Description/Alias) alongside its creator's own primary
+	// wallet - see sharedaccess.WalletDirectory's own doc comment.
+	sharedaccessSvc.WalletDirectory = usersSvc
+	// Lets sharedaccess's member-add/remove routes accept a username (the
+	// original's own convention) instead of requiring the caller to
+	// already know another user's primary wallet address - see
+	// sharedaccess.UsernameResolver's own doc comment.
+	sharedaccessSvc.Usernames = usersSvc
 	// Must run before the router starts serving traffic - see
 	// relayer.Pool.ReserveAtStartup's own doc comment on why it isn't
 	// safe to call once the pool is already handling concurrent Claims.

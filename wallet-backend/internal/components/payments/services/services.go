@@ -41,6 +41,16 @@ type GroupWalletExecutor interface {
 	ApproveAction(ctx context.Context, actionID uint, memberAddress, signatureHex string) (*sharedaccessModels.PendingAction, error)
 }
 
+// RecipientResolver turns a payment recipient identifier - an address,
+// username, email, or wallet alias (users.UserWallet's own doc comment) -
+// into the address to actually pay, matching the original's own
+// GetUser/GetWallet resolution. Narrowed to an interface like
+// GroupWalletExecutor so tests can supply a fake instead of a real
+// users.Service.
+type RecipientResolver interface {
+	ResolveRecipient(identifier string) (string, error)
+}
+
 type Service struct {
 	DB *gorm.DB
 	// SharedAccess resolves a wallet address to its group and actually
@@ -48,6 +58,11 @@ type Service struct {
 	// post-construction, in which case Build/Submit fail closed with a
 	// clear error rather than a nil-pointer panic.
 	SharedAccess GroupWalletExecutor
+	// Recipients resolves BuildPaymentTx's `to` parameter before it's
+	// validated as an address - nil until main.go wires it
+	// post-construction (paymentsSvc.Recipients = usersSvc), in which
+	// case Build fails closed the same way a missing SharedAccess does.
+	Recipients RecipientResolver
 	// Alerts reports a rejected submission to an operational channel -
 	// defaults to alerting.NoopNotifier (see New); main.go wires the real
 	// one in post-construction. See PLAN.md §4.13.
@@ -61,10 +76,16 @@ func New(db *gorm.DB) *Service {
 // PaymentProposal is what BuildPaymentTx returns: the real on-chain
 // SafeTxHash digest (see sharedaccess.DigestToSign) the caller must
 // personal_sign with their signer key to approve the payment, and the
-// PendingAction id that signature approves.
+// PendingAction id that signature approves. ResolvedAddress is what `to`
+// actually resolved to (RecipientResolver) - always present, even when
+// `to` was already a bare address, so a client can show a "sending to X"
+// confirmation before the caller commits to signing, the way the
+// original's own payment flow surfaced which alias/wallet an email or
+// username resolved to.
 type PaymentProposal struct {
-	ActionID     uint   `json:"actionId"`
-	DigestToSign string `json:"digestToSign"`
+	ActionID        uint   `json:"actionId"`
+	DigestToSign    string `json:"digestToSign"`
+	ResolvedAddress string `json:"resolvedAddress"`
 }
 
 // BuildPaymentTx proposes a native-ETH or ERC-20 transfer from walletAddress
@@ -75,12 +96,21 @@ type PaymentProposal struct {
 // to avoid floating-point precision loss. signerAddress is the caller's own
 // signer key - the group member whose approval this proposal needs, per
 // sharedaccess's group-membership model (PLAN.md §13.4) - not
-// walletAddress itself, which never has a private key of its own.
+// walletAddress itself, which never has a private key of its own. to is
+// resolved through RecipientResolver before validation, so it may be an
+// address, username, email, or wallet alias.
 func (s *Service) BuildPaymentTx(ctx context.Context, walletAddress, signerAddress, to, tokenAddress, amount string) (*PaymentProposal, error) {
 	if s.SharedAccess == nil {
 		return nil, apperrors.Internal("payments are not available: shared-access wiring is missing")
 	}
-	if !validators.IsValidAddress(walletAddress) || !validators.IsValidAddress(to) {
+	if s.Recipients == nil {
+		return nil, apperrors.Internal("payments are not available: recipient resolution wiring is missing")
+	}
+	resolvedTo, err := s.Recipients.ResolveRecipient(to)
+	if err != nil {
+		return nil, err
+	}
+	if !validators.IsValidAddress(walletAddress) || !validators.IsValidAddress(resolvedTo) {
 		return nil, apperrors.BadRequest("invalid address")
 	}
 	if _, ok := new(big.Int).SetString(amount, 10); !ok {
@@ -91,7 +121,7 @@ func (s *Service) BuildPaymentTx(ctx context.Context, walletAddress, signerAddre
 	if err != nil {
 		return nil, err
 	}
-	action, err := s.SharedAccess.ProposePayment(ctx, signerAddress, group.ID, "payment", to, tokenAddress, amount, "", "")
+	action, err := s.SharedAccess.ProposePayment(ctx, signerAddress, group.ID, "payment", resolvedTo, tokenAddress, amount, "", "")
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +129,7 @@ func (s *Service) BuildPaymentTx(ctx context.Context, walletAddress, signerAddre
 	if err != nil {
 		return nil, err
 	}
-	return &PaymentProposal{ActionID: action.ID, DigestToSign: digest}, nil
+	return &PaymentProposal{ActionID: action.ID, DigestToSign: digest, ResolvedAddress: resolvedTo}, nil
 }
 
 // SubmitPayment approves actionID (built via BuildPaymentTx) with

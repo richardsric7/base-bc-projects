@@ -31,6 +31,12 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	public := router.Group("/v1/users")
 	public.GET("/:username", getUser(svc, gc.Cache, gc.AddressWatcher))
 	public.GET("/security-questions", listSecurityQuestions(svc))
+	// Resolving a payment recipient (address/username/email/wallet alias,
+	// see UserWallet's own doc comment) is deliberately public, matching
+	// the original's own pre-payment "who does this belong to" preview -
+	// it only ever reveals the same alias/tag a wallet's owner already
+	// chose to make identifying, never anything account-private.
+	public.GET("/resolve/:identifier", resolveRecipient(svc))
 
 	authed := router.Group("/v1/users")
 	authed.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
@@ -38,6 +44,8 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	authed.POST("", register(svc))
 	authed.POST("/wallet/deploy", deployPrimaryWallet(svc))
 	authed.DELETE("/:username", deleteUser(svc))
+	authed.GET("/wallets", listMyWallets(svc))
+	authed.PUT("/wallets/:address", updateWalletMetadata(svc))
 	authed.POST("/security-answers", setSecurityAnswer(svc))
 	authed.POST("/security-answers/verify", verifySecurityAnswer(svc))
 	authed.POST("/account-recovery", enableAccountRecovery(svc))
@@ -100,6 +108,61 @@ func deployPrimaryWallet(svc *services.Service) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, user)
+	}
+}
+
+// resolveRecipient previews what a payment recipient identifier (address,
+// username, email, or wallet alias) actually names, the same lookup
+// payments.BuildPaymentTx uses server-side, so a client can show a
+// "sending to X" confirmation before the caller commits to signing -
+// matching the original's own pre-payment notice.
+func resolveRecipient(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		entry, err := svc.LookupWalletDirectoryEntry(c.Param("identifier"))
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, entry)
+	}
+}
+
+// listMyWallets returns the caller's own wallet directory - their primary
+// wallet and every additional wallet they've registered or created.
+func listMyWallets(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		wallets, err := svc.ListWalletsForUser(c.GetString(middleware.CtxSubject))
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, wallets)
+	}
+}
+
+type updateWalletMetadataRequest struct {
+	Tag         *string `json:"tag"`
+	Description *string `json:"description"`
+	Alias       *string `json:"alias"`
+}
+
+// updateWalletMetadata lets a wallet's owner change its Tag/Description/
+// Alias - services.UpdateWalletMetadata itself enforces that only the
+// wallet's owner may do this, checked against the verified caller
+// identity (CtxSubject), never a claim from the request body.
+func updateWalletMetadata(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req updateWalletMetadataRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			apperrors.Abort(c, apperrors.BadRequest("invalid request body"))
+			return
+		}
+		wallet, err := svc.UpdateWalletMetadata(c.GetString(middleware.CtxSubject), c.Param("address"), req.Tag, req.Description, req.Alias)
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, wallet)
 	}
 }
 

@@ -42,22 +42,31 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	// PendingAction that goes through the exact same approve/reject/
 	// execute routes above, not a separate pipeline.
 	group.POST("/groups/:groupId/members", proposeAddMember(svc))
-	group.POST("/groups/:groupId/members/:memberAddress/remove", proposeRemoveMember(svc))
+	group.POST("/groups/:groupId/members/:username/remove", proposeRemoveMember(svc))
 	group.POST("/groups/:groupId/threshold", proposeChangeThreshold(svc))
 	group.POST("/groups/:groupId/disable", proposeDisableGroup(svc))
 
 	return svc
 }
 
+// memberInput names a member by username - the original's own convention
+// (never a raw address the caller would have to already know) - resolved
+// to that user's primary wallet address (services.Service.
+// ResolveMemberAddress) before it ever reaches services.MemberInput.
 type memberInput struct {
-	Address string `json:"address" binding:"required"`
-	Role    string `json:"role" binding:"required"`
+	Username string `json:"username" binding:"required"`
+	Role     string `json:"role" binding:"required"`
 }
 
 type createGroupRequest struct {
 	Name      string        `json:"name" binding:"required"`
 	Threshold int           `json:"threshold" binding:"required"`
 	Members   []memberInput `json:"members" binding:"required"`
+	// Tag/Description are forwarded to the creator's own wallet directory
+	// entry for this new group (users.UserWallet) - both optional, same
+	// as they are on the directory row itself.
+	Tag         string `json:"tag"`
+	Description string `json:"description"`
 }
 
 func createGroup(svc *services.Service) gin.HandlerFunc {
@@ -69,10 +78,15 @@ func createGroup(svc *services.Service) gin.HandlerFunc {
 		}
 		members := make([]services.MemberInput, len(req.Members))
 		for i, m := range req.Members {
-			members[i] = services.MemberInput{Address: m.Address, Role: models.GroupRole(m.Role)}
+			address, err := svc.ResolveMemberAddress(m.Username)
+			if err != nil {
+				apperrors.AbortAny(c, err)
+				return
+			}
+			members[i] = services.MemberInput{Address: address, Role: models.GroupRole(m.Role)}
 		}
 		caller := c.GetString(middleware.CtxSubject)
-		group, err := svc.CreateGroup(c.Request.Context(), caller, req.Name, req.Threshold, members)
+		group, err := svc.CreateGroup(c.Request.Context(), caller, req.Name, req.Threshold, members, req.Tag, req.Description)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
@@ -288,7 +302,7 @@ func rejectAction(svc *services.Service) gin.HandlerFunc {
 }
 
 type addMemberRequest struct {
-	Address      string `json:"address" binding:"required"`
+	Username     string `json:"username" binding:"required"`
 	Role         string `json:"role" binding:"required"`
 	NewThreshold int    `json:"newThreshold" binding:"required"`
 }
@@ -301,11 +315,16 @@ func proposeAddMember(svc *services.Service) gin.HandlerFunc {
 		}
 		var req addMemberRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("address, role and newThreshold are required"))
+			apperrors.Abort(c, apperrors.BadRequest("username, role and newThreshold are required"))
+			return
+		}
+		newMemberAddress, err := svc.ResolveMemberAddress(req.Username)
+		if err != nil {
+			apperrors.AbortAny(c, err)
 			return
 		}
 		proposer := c.GetString(middleware.CtxSubject)
-		action, err := svc.ProposeAddMember(c.Request.Context(), proposer, groupID, req.Address, models.GroupRole(req.Role), req.NewThreshold)
+		action, err := svc.ProposeAddMember(c.Request.Context(), proposer, groupID, newMemberAddress, models.GroupRole(req.Role), req.NewThreshold)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
@@ -324,10 +343,14 @@ func proposeRemoveMember(svc *services.Service) gin.HandlerFunc {
 		if err != nil {
 			return
 		}
-		memberAddress := c.Param("memberAddress")
 		var req removeMemberRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			apperrors.Abort(c, apperrors.BadRequest("newThreshold is required"))
+			return
+		}
+		memberAddress, err := svc.ResolveMemberAddress(c.Param("username"))
+		if err != nil {
+			apperrors.AbortAny(c, err)
 			return
 		}
 		proposer := c.GetString(middleware.CtxSubject)

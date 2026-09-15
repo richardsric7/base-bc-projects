@@ -177,6 +177,125 @@ func TestRegister_Success(t *testing.T) {
 	if !wallet.IsPrimary || wallet.Address != wantAddress.Hex() {
 		t.Fatalf("unexpected primary wallet: %+v", wallet)
 	}
+	if wallet.Tag != "primary" || wallet.Alias != "alice" {
+		t.Fatalf("expected primary wallet Tag=primary Alias=alice, got %+v", wallet)
+	}
+}
+
+func TestRegisterWalletForAddress_DerivesAliasFromOwnerAndTag(t *testing.T) {
+	svc := newTestService(t)
+	signerAddress := randomAddress(t)
+	user, err := svc.Register(RegisterInput{Username: "bob", Email: "bob@example.com", SignerAddress: signerAddress})
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	subWalletAddress := randomAddress(t)
+
+	wallet, err := svc.RegisterWalletForAddress(user.Address, subWalletAddress, "savings", "for a rainy day", models.WalletTypeNormal)
+	if err != nil {
+		t.Fatalf("RegisterWalletForAddress returned error: %v", err)
+	}
+	if wallet.Alias != "bob_savings" {
+		t.Fatalf("expected alias bob_savings, got %q", wallet.Alias)
+	}
+	if wallet.WalletType != models.WalletTypeNormal {
+		t.Fatalf("expected WalletTypeNormal, got %v", wallet.WalletType)
+	}
+	if wallet.Tag != "savings" || wallet.Description != "for a rainy day" || wallet.IsPrimary {
+		t.Fatalf("unexpected wallet: %+v", wallet)
+	}
+}
+
+func TestRegisterWalletForAddress_PersistsNonDefaultWalletType(t *testing.T) {
+	svc := newTestService(t)
+	signerAddress := randomAddress(t)
+	user, err := svc.Register(RegisterInput{Username: "erin", Email: "erin@example.com", SignerAddress: signerAddress})
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	issuingWalletAddress := randomAddress(t)
+
+	wallet, err := svc.RegisterWalletForAddress(user.Address, issuingWalletAddress, "issuer", "", models.WalletTypeAssetIssuing)
+	if err != nil {
+		t.Fatalf("RegisterWalletForAddress returned error: %v", err)
+	}
+	if wallet.WalletType != models.WalletTypeAssetIssuing {
+		t.Fatalf("expected WalletTypeAssetIssuing, got %v", wallet.WalletType)
+	}
+
+	var reloaded models.UserWallet
+	if err := svc.DB.Where("address = ?", issuingWalletAddress).First(&reloaded).Error; err != nil {
+		t.Fatalf("failed to reload wallet: %v", err)
+	}
+	if reloaded.WalletType != models.WalletTypeAssetIssuing {
+		t.Fatalf("expected persisted WalletTypeAssetIssuing, got %v", reloaded.WalletType)
+	}
+}
+
+func TestUpdateWalletMetadata_OnlyOwnerMayEdit(t *testing.T) {
+	svc := newTestService(t)
+	ownerSigner := randomAddress(t)
+	owner, err := svc.Register(RegisterInput{Username: "carol", Email: "carol@example.com", SignerAddress: ownerSigner})
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	otherSigner := randomAddress(t)
+	other, err := svc.Register(RegisterInput{Username: "dave", Email: "dave@example.com", SignerAddress: otherSigner})
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	newTag, newAlias := "renamed", "carol_renamed"
+	updated, err := svc.UpdateWalletMetadata(owner.Address, owner.Address, &newTag, nil, &newAlias)
+	if err != nil {
+		t.Fatalf("owner UpdateWalletMetadata returned error: %v", err)
+	}
+	if updated.Tag != "renamed" || updated.Alias != "carol_renamed" {
+		t.Fatalf("unexpected wallet after update: %+v", updated)
+	}
+
+	if _, err := svc.UpdateWalletMetadata(other.Address, owner.Address, &newTag, nil, nil); err == nil {
+		t.Fatal("expected a non-owner to be rejected")
+	}
+}
+
+func TestResolveRecipient_AddressAliasUsernameEmail(t *testing.T) {
+	svc := newTestService(t)
+	signerAddress := randomAddress(t)
+	user, err := svc.Register(RegisterInput{Username: "erin", Email: "erin@example.com", SignerAddress: signerAddress})
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	rawAddress := randomAddress(t)
+
+	if got, err := svc.ResolveRecipient(rawAddress); err != nil || got != rawAddress {
+		t.Fatalf("address passthrough: got (%q, %v)", got, err)
+	}
+	if got, err := svc.ResolveRecipient("erin"); err != nil || got != user.Address {
+		t.Fatalf("alias resolution: got (%q, %v)", got, err)
+	}
+	if got, err := svc.ResolveRecipient("ERIN"); err != nil || got != user.Address {
+		t.Fatalf("username resolution (case-insensitive): got (%q, %v)", got, err)
+	}
+	if got, err := svc.ResolveRecipient("erin@example.com"); err != nil || got != user.Address {
+		t.Fatalf("email resolution: got (%q, %v)", got, err)
+	}
+	if _, err := svc.ResolveRecipient("nobody-by-this-name"); err == nil {
+		t.Fatal("expected an unresolvable identifier to error")
+	}
+}
+
+func TestLookupWalletDirectoryEntry_UnregisteredAddressStillReturnsEntry(t *testing.T) {
+	svc := newTestService(t)
+	rawAddress := randomAddress(t)
+
+	entry, err := svc.LookupWalletDirectoryEntry(rawAddress)
+	if err != nil {
+		t.Fatalf("LookupWalletDirectoryEntry returned error: %v", err)
+	}
+	if entry.Address != rawAddress || entry.Alias != "" || entry.IsPrimary {
+		t.Fatalf("expected a bare entry for an unregistered address, got %+v", entry)
+	}
 }
 
 func TestRegister_InvalidAddress(t *testing.T) {
@@ -225,6 +344,27 @@ func TestGetByAddress(t *testing.T) {
 
 	if _, err := svc.GetByAddress(randomAddress(t)); err == nil {
 		t.Fatal("expected a not-found error for an unregistered address")
+	}
+}
+
+func TestResolveUsernameToPrimaryWalletAddress(t *testing.T) {
+	svc := newTestService(t)
+	signerAddress := randomAddress(t)
+	registered, err := svc.Register(RegisterInput{Username: "frank", Email: "frank@example.com", SignerAddress: signerAddress})
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	address, err := svc.ResolveUsernameToPrimaryWalletAddress("frank")
+	if err != nil {
+		t.Fatalf("ResolveUsernameToPrimaryWalletAddress returned error: %v", err)
+	}
+	if address != registered.Address {
+		t.Fatalf("expected %s, got %s", registered.Address, address)
+	}
+
+	if _, err := svc.ResolveUsernameToPrimaryWalletAddress("nobody"); err == nil {
+		t.Fatal("expected a not-found error for an unregistered username")
 	}
 }
 

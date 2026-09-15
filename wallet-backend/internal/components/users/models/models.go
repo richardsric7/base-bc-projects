@@ -79,16 +79,107 @@ type User struct {
 	RegistrationHighRisk    bool   `gorm:"default:false" json:"registrationHighRisk,omitempty"`
 }
 
-// UserWallet lets a user register additional EVM addresses they control
-// (e.g. a hardware-wallet address) alongside their primary wallet.
+// UserWallet is this user's wallet directory: one row per wallet address
+// they own, primary wallet included - mirroring the original's own
+// UserWallet table (trovo-wallet-monorepo/backend's
+// internal/components/users/models/user.go), where "is this the primary
+// wallet" is likewise nothing more than a flag (there PrimaryWallet int,
+// here IsPrimary bool) on an otherwise ordinary row, not a structurally
+// different record. Every wallet a user can act through - their primary
+// Safe (registration creates this row, see services.Register) and every
+// sharedaccess group Safe they've created (services.RegisterWalletForAddress,
+// called from sharedaccess.CreateGroup) - gets exactly one entry here,
+// owned by whoever created it.
+//
+// Tag/Description/Alias port the original's identically-named fields
+// verbatim for display and lookup purposes: Alias is a unique, friendly
+// handle a payment can name directly (ResolveRecipient), following the
+// original's own convention exactly - a primary wallet's alias is its
+// owner's username, an additional wallet's is "<ownerUsername>_<tag>"
+// (see the original's own "primaryUsername_tag for sub wallets" comment).
+//
+// LinkedWalletAddress ports the original's LinkedWalletPublicKey field
+// (also a wallet - in the original, always another UserWallet row,
+// itself potentially a multisig/shared-access wallet, used to associate
+// a token-issuing wallet with its distribution wallet). Carried here as
+// schema-only display/reference metadata: the original's deeper
+// LinkedWalletMustSign co-signing behavior during asset issuance has no
+// equivalent hook in this port's tokenization component (which mints via
+// direct contract calls, not a wallet-to-wallet signed transfer), so it
+// is not reproduced - ported without wiring, not skipped, per this
+// project's established policy for a schema/behavior split (see
+// tokenization/models/payout.go's identical treatment of the dormant
+// dividend engine).
+//
+// WalletType ports the original's identically-named field verbatim (see
+// its own type doc below) - preserved because the person driving this
+// port explicitly requires it, correcting an earlier revision of this
+// model that reasoned it was superseded by sharedaccess.ClosedGroup/
+// GroupMember/PendingAction (PLAN.md §13) and dropped it. It is not: the
+// original's WalletType classifies what KIND of wallet this is
+// (ordinary, asset-issuing, market-making, bulk-payment) - a business
+// fact about the wallet itself - whereas ClosedGroup/GroupMember answer
+// the unrelated question of who controls it and how. The original's
+// deeper per-type Stellar mechanics (asset-issuing's AuthRequired/
+// Clawback/Revocable trustline flags; market-making/bulk-payment's
+// server-derived custodial signer at asymmetric weight) have no direct
+// Base/Safe equivalent and are not reproduced here - schema-only where
+// the underlying chain mechanic doesn't port, same treatment as
+// LinkedWalletAddress above - but the classification itself, and
+// everything about it that IS meaningful on Base (which distribution
+// wallet a tokenized asset's issuance is linked to via
+// LinkedWalletAddress; which wallets tokenization/market-making treat as
+// theirs), is preserved.
+//
+// SharedAccessEnabled/NumberOfApprovalsNeeded/Permissions remain
+// deliberately NOT ported: those specifically describe shared-access
+// control, which sharedaccess.ClosedGroup/GroupMember/PendingAction
+// already own for this port, in a real Safe-backed form the original's
+// server-derived-key design never had. Duplicating them here would
+// create two disagreeing sources of truth for that one fact;
+// WalletSummary.IsOwner/IsShared (§20) is this port's own answer to the
+// same "who controls this wallet" question.
 type UserWallet struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	UserID    uint      `gorm:"index;not null" json:"userId"`
-	Address   string    `gorm:"uniqueIndex;size:42;not null" json:"address"`
-	Label     string    `gorm:"size:64" json:"label"`
-	IsPrimary bool      `gorm:"default:false" json:"isPrimary"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID          uint       `gorm:"primaryKey" json:"id"`
+	UserID      uint       `gorm:"index;not null" json:"userId"`
+	Address     string     `gorm:"uniqueIndex;size:42;not null" json:"address"`
+	Tag         string     `gorm:"size:64" json:"tag"`
+	Description string     `gorm:"size:255" json:"description"`
+	WalletType  WalletType `gorm:"default:0" json:"walletType"`
+	// Alias is unique across every wallet in the system (not just this
+	// user's own) - exactly like the original's own unique index - since
+	// it has to be, being the very thing a payment or lookup names
+	// directly.
+	Alias string `gorm:"uniqueIndex;size:70" json:"alias"`
+	// LinkedWalletAddress is another wallet's address, purely a display/
+	// reference association - see doc comment above.
+	LinkedWalletAddress *string   `gorm:"size:42" json:"linkedWalletAddress,omitempty"`
+	IsPrimary           bool      `gorm:"default:false" json:"isPrimary"`
+	CreatedAt           time.Time `json:"createdAt"`
 }
+
+// WalletType mirrors the original's bare-int UserWallet.WalletType values
+// exactly (same four members, same integer values, so any migrated data
+// or admin tooling that already speaks in these numbers lines up
+// unchanged) but names them, rather than leaving them as the original's
+// unexplained magic numbers.
+type WalletType int
+
+const (
+	// WalletTypeNormal is an ordinary wallet: the primary wallet, or any
+	// additional/shared-access wallet with no special asset-issuing,
+	// market-making, or bulk-payment role.
+	WalletTypeNormal WalletType = 0
+	// WalletTypeAssetIssuing is a tokenized-asset issuer's wallet -
+	// LinkedWalletAddress names its distribution wallet (see that field's
+	// doc comment above).
+	WalletTypeAssetIssuing WalletType = 1
+	// WalletTypeMarketMaking is a wallet the market-making component
+	// (internal/components/market) treats as its own.
+	WalletTypeMarketMaking WalletType = 2
+	// WalletTypeBulkPayment is a wallet used for bulk/batch payment runs.
+	WalletTypeBulkPayment WalletType = 3
+)
 
 // SecurityQuestion is one entry in the fixed catalog users pick from when
 // setting up account-recovery questions.

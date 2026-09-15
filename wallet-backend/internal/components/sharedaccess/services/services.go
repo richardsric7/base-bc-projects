@@ -109,6 +109,23 @@ type Service struct {
 	// paymentsSvc.Alerts) - nil until then, in which case CuratedBalances
 	// fails closed rather than panicking.
 	Assets CuratedTokenLister
+	// WalletDirectory is users.Service, narrowed to
+	// RegisterWalletForAddress - CreateGroup calls it once a new group's
+	// Safe deploys, giving it a UserWallet directory entry alongside the
+	// creator's own primary wallet (users.UserWallet's own doc comment).
+	// Wired post-construction in main.go; nil skips directory
+	// registration entirely (e.g. in tests), matching Assets' own
+	// optional-dependency pattern rather than CuratedBalances' fail-
+	// closed one, since a missing directory entry doesn't make the new
+	// group wallet itself unusable.
+	WalletDirectory WalletDirectory
+	// Usernames resolves a member-add/remove request's username to the
+	// address this package actually operates on - see UsernameResolver.
+	// Wired post-construction in main.go, the same optional-dependency
+	// pattern as Assets/WalletDirectory; nil makes ResolveMemberAddress
+	// fail closed rather than silently accepting a raw address in place
+	// of a username.
+	Usernames UsernameResolver
 }
 
 // CuratedTokenLister is the slice of assets.Service this package needs -
@@ -116,6 +133,32 @@ type Service struct {
 // fake catalog instead of a live assets.Service.
 type CuratedTokenLister interface {
 	ListCurated() ([]assetsModels.CuratedToken, error)
+}
+
+// WalletDirectory is the slice of users.Service this package needs to
+// register a newly-deployed group Safe in its creator's wallet directory
+// (users.UserWallet) - narrowed to an interface for the same reason as
+// every other cross-component dependency here.
+type WalletDirectory interface {
+	RegisterWalletForAddress(ownerAddress, walletAddress, tag, description string, walletType usersModels.WalletType) (*usersModels.UserWallet, error)
+}
+
+// UsernameResolver is the slice of users.Service this package needs to
+// resolve a member by username - the original app's own convention
+// (members are named and added by username only, never a raw address a
+// caller would have to already know) preserved here via
+// ResolveMemberAddress: this package's own CreateGroup/ProposeAddMember/
+// ProposeRemoveMember still operate on the resolved primary-wallet
+// address internally (that's the real Safe-owner/GroupMember identity,
+// and is what their own extensive test coverage exercises directly), but
+// every controller-facing entry point resolves a caller-supplied username
+// through this interface first - see controllers.go.
+type UsernameResolver interface {
+	// ResolveUsernameToPrimaryWalletAddress returns the given username's
+	// primary wallet address - the identity this package's member rows are
+	// always keyed by (validateSafeOwnerCandidate/resolveGroupOwnerSigner),
+	// never their raw signer EOA.
+	ResolveUsernameToPrimaryWalletAddress(username string) (string, error)
 }
 
 func New(db *gorm.DB, blockchain BlockchainClient, deployerKeySalt string, chainID int64, relayerPool *relayer.Pool) *Service {
@@ -235,6 +278,17 @@ func (s *Service) validateSafeOwnerCandidate(address string) error {
 	return nil
 }
 
+// ResolveMemberAddress turns a username into the primary-wallet address
+// CreateGroup/ProposeAddMember/ProposeRemoveMember actually operate on -
+// see UsernameResolver's doc comment for why this is a separate step
+// rather than those functions taking a username directly.
+func (s *Service) ResolveMemberAddress(username string) (string, error) {
+	if s.Usernames == nil {
+		return "", apperrors.Internal("member lookup is not available: username resolution wiring is missing")
+	}
+	return s.Usernames.ResolveUsernameToPrimaryWalletAddress(username)
+}
+
 // resolveGroupOwnerSigner reports, for a Safe owner address (any member
 // with CanApprove(role)), whether it's a registered user's primary wallet
 // - in which case the actual EOA that must sign is that user's current
@@ -274,8 +328,13 @@ type MemberInput struct {
 // creatorAddress is recorded on the group (ClosedGroup.CreatedByAddress)
 // purely for a listing UI's "my wallets" vs "wallets shared with me"
 // distinction - it plays no part in authorization, which is entirely
-// membership/role-based.
-func (s *Service) CreateGroup(ctx context.Context, creatorAddress, name string, threshold int, members []MemberInput) (*models.ClosedGroup, error) {
+// membership/role-based. tag/description are forwarded to
+// WalletDirectory.RegisterWalletForAddress once the group's Safe has
+// deployed, giving it a users.UserWallet directory entry (Tag/
+// Description/Alias) the same way the creator's own primary wallet
+// already has one - see UserWallet's own doc comment for why every
+// wallet, not just the primary, belongs in that one directory.
+func (s *Service) CreateGroup(ctx context.Context, creatorAddress, name string, threshold int, members []MemberInput, tag, description string) (*models.ClosedGroup, error) {
 	if name == "" {
 		return nil, apperrors.BadRequest("name is required")
 	}
@@ -288,7 +347,7 @@ func (s *Service) CreateGroup(ctx context.Context, creatorAddress, name string, 
 			return nil, apperrors.BadRequest("invalid member address: " + m.Address)
 		}
 		switch m.Role {
-		case models.RoleInitiator, models.RoleApprover, models.RoleViewOnly, models.RoleInitiatorApprover:
+		case models.RoleInitiator, models.RoleApprover, models.RoleViewOnly:
 		default:
 			return nil, apperrors.BadRequest("invalid role for " + m.Address)
 		}
@@ -345,6 +404,16 @@ func (s *Service) CreateGroup(ctx context.Context, creatorAddress, name string, 
 	})
 	if txErr != nil {
 		return nil, apperrors.Internal("failed to record deployed group wallet")
+	}
+	if s.WalletDirectory != nil {
+		// A shared-access group is always an ordinary wallet from the
+		// wallet-directory's point of view - asset-issuing/market-making/
+		// bulk-payment classification (usersModels.WalletType) belongs to
+		// wallets those specific components create, not to this generic
+		// multi-party wallet mechanism.
+		if _, err := s.WalletDirectory.RegisterWalletForAddress(creatorAddress, addressHex, tag, description, usersModels.WalletTypeNormal); err != nil {
+			return nil, err
+		}
 	}
 	return &group, nil
 }
@@ -461,6 +530,19 @@ func (s *Service) ProposeContractCall(ctx context.Context, proposerAddress strin
 	})
 }
 
+// requireInitiator gates every Propose* call. Note what this deliberately
+// does NOT do relative to the original: the original separately collected
+// an initiator's own signature over the proposed transaction but never
+// cryptographically verified it (UX friction only - real authorization
+// was APPROVER-only). This port has no equivalent gap to close: every
+// route in this package sits behind middleware.SignatureAuth, so
+// `address` here has already been cryptographically proven to be the
+// caller for this exact request before requireInitiator ever runs - an
+// initiator's authority to propose is real, verified authentication, not
+// an unverified courtesy signature. APPROVER remains the only role whose
+// signature actually satisfies the Safe's on-chain threshold (see
+// models.CanApprove/ApproveAction) - the original's INITIATOR-is-DB-only
+// distinction is preserved, just met by a stronger mechanism throughout.
 func (s *Service) requireInitiator(groupID uint, address string) (*models.ClosedGroup, error) {
 	group, err := s.GetGroup(groupID)
 	if err != nil {
@@ -652,7 +734,7 @@ func (s *Service) ProposeAddMember(ctx context.Context, proposerAddress string, 
 		return nil, apperrors.BadRequest("invalid member address")
 	}
 	switch role {
-	case models.RoleInitiator, models.RoleApprover, models.RoleViewOnly, models.RoleInitiatorApprover:
+	case models.RoleInitiator, models.RoleApprover, models.RoleViewOnly:
 	default:
 		return nil, apperrors.BadRequest("invalid role")
 	}
@@ -767,7 +849,7 @@ func (s *Service) ProposeChangeThreshold(ctx context.Context, proposerAddress st
 	}
 	var approverCount int64
 	err = s.DB.Model(&models.GroupMember{}).
-		Where("group_id = ? AND role IN ?", groupID, []models.GroupRole{models.RoleApprover, models.RoleInitiatorApprover}).
+		Where("group_id = ? AND role IN ?", groupID, []models.GroupRole{models.RoleApprover}).
 		Count(&approverCount).Error
 	if err != nil {
 		return nil, apperrors.Internal("failed to count current approvers")

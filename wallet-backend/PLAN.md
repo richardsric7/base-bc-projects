@@ -4075,3 +4075,133 @@ new `creatorAddress` parameter - each already had a natural "first
 member" variable in scope to reuse, since every real caller already
 includes themselves as a member when creating a group). See
 `wallet-web/PLAN.md` §20's own update for the frontend filter/badge.
+
+## 21. Correction pass: exact preservation of the original's models/permissions, wallet directory, and closed-group enforcement
+
+A direct instruction from the person driving this port, given after
+reviewing §19/§20's wallet-alias work in progress: this port's guiding
+principle throughout is to preserve the original's DB models, business
+logic, and UX as closely as possible, changing only what's genuinely
+Stellar-specific, and to research the original thoroughly (backend, web,
+mobile) before diverging from it. Five research passes against the
+original (`trovo-wallet-monorepo`) - shared-access/payment-flow,
+registration/sub-wallets/wallet-types, tokenization asset-classes/
+closed-groups, and the web/mobile UI - turned up several places this
+port had drifted further than intended. This section documents each
+correction.
+
+**21.1 Shared-access role model collapsed from four roles to the
+original's exact three.** An earlier revision invented
+`RoleInitiatorApprover` (`models.go`) to let a sub-wallet's sole owner
+both propose and approve their own actions from one `GroupMember` row,
+since the row schema allows only one role per (group, address) pair. This
+was a real deviation from the original's exact `VIEW-ONLY`/`INITIATOR`/
+`APPROVER` three-tier permission model. Fixed by making the three roles a
+strict hierarchy instead of adding a fourth: `CanInitiate` now returns
+true for both `INITIATOR` and `APPROVER` (an approver's authority is a
+superset of an initiator's), so a sole owner holding plain `APPROVER`
+already satisfies both checks - no combined role needed. Every prior
+`RoleInitiatorApprover` assignment (primary-wallet self-groups,
+single-owner sub-wallets) becomes a plain `RoleApprover` assignment; the
+on-chain Safe-owner set this produces is identical either way, so no
+migration is needed for already-deployed groups. ~30 call sites across
+`services.go`/`services_test.go`/`users/services.go`/`deploy_test.go`
+renamed mechanically; `CanApprove` now checks only `RoleApprover`.
+
+**21.2 Member add/remove switched from address-based to username-based.**
+The original adds shared-access members by username only - a caller
+should never need to already know another user's wallet address. This
+port's `ProposeAddMember`/`ProposeRemoveMember`/`CreateGroup` still
+operate internally on the resolved primary-wallet address (that's the
+real Safe-owner/`GroupMember` identity their existing test coverage
+exercises directly), but a new `UsernameResolver` interface + `Usernames`
+field on `sharedaccess.Service`, and a `ResolveMemberAddress` method
+wired to `users.Service.ResolveUsernameToPrimaryWalletAddress`, let every
+controller-facing entry point (`POST /groups`, `POST /groups/:id/members`,
+`POST /groups/:id/members/:username/remove`) accept a username and
+resolve it before it ever reaches the address-keyed service layer. Wired
+in `main.go` as `sharedaccessSvc.Usernames = usersSvc`, the same
+post-construction pattern as `WalletDirectory`/`Assets`.
+
+**21.3 Any INITIATOR (not just the group's creator) may already modify
+shared access - verified, not changed.** Re-auditing `requireInitiator`
+(gates every `Propose*` call) confirmed it checks `models.CanInitiate`
+against the calling member's own role, never `ClosedGroup.CreatedByAddress`
+- so this was already correct per the original's own rule and needed no
+code change, only this note recording that it was checked.
+
+**21.4 `UserWallet.WalletType` restored.** §13.4's original extension of
+`UserWallet` (Tag/Description/Alias/LinkedWalletAddress/IsPrimary)
+reasoned that the original's `WalletType` (normal/asset-issuing/market-
+making/bulk-payment) was superseded by `sharedaccess.ClosedGroup`/
+`GroupMember`/`PendingAction` and dropped it - wrong: `WalletType`
+classifies what kind of wallet this is (a business fact), while
+`ClosedGroup`/`GroupMember` answer the unrelated question of who
+controls it. Restored as a named `WalletType` enum (same four members,
+same integer values as the original's bare ints) on `UserWallet`,
+threaded through `RegisterWalletForAddress`'s new `walletType` parameter;
+every current caller (shared-access group creation, servicelinks
+sub-wallets) passes `WalletTypeNormal`, since none of them create an
+asset-issuing/market-making/bulk-payment wallet today - a future caller
+in tokenization/market that does can now record it truthfully. The
+original's deeper per-type Stellar mechanics (asset-issuing's
+`AuthRequired`/`Clawback`/`Revocable` trustline flags; market-making/
+bulk-payment's asymmetric-weight custodial signer) have no direct Safe
+equivalent and stay unported, schema-only - the same treatment already
+established for `LinkedWalletAddress`.
+
+**21.5 Tokenization closed-group enforcement completed - a real gap, not
+a preserved original behavior.** Research into the original confirmed
+its `UserClosedGroup` join table and `GetUserClosedGroups` are dead code:
+no add/remove-member endpoint exists anywhere, and neither
+`SubscribeToTokenizedAsset` nor the asset-listing query ever checks
+membership - a private offering's `ClosedGroupID` is enforced as a
+required *paperwork* reference at mint time, never as an actual access
+gate. This port's own `enforceOfferingAccess` (§4.9) already implements
+the real membership check the original evidently intended but never
+wired up - that part was already right. What was still missing on this
+side: any way to *create* a `PurposePrivateOffering` `ClosedGroup` or add
+members to it at all, meaning a `PRIVATE` offering could never actually
+be minted (`RequestMint`'s guard requires a non-nil `ClosedGroupID`) nor
+managed. Added `CreatePrivateOfferingGroup`/`AddPrivateOfferingMember`/
+`RemovePrivateOfferingMember`/`ListPrivateOfferingMembers`
+(`tokenization/services/closed_groups.go`), gated to the asset's own
+`InitiatorUserID`, members named by username (§21.2's same convention),
+routed at `POST /v1/tokenization/:assetId/closed-group` and
+`.../closed-group/members[/:username]`. A private-offering group has no
+Safe of its own (`Address` stays nil) and no approval threshold - it's a
+plain allow-list, so membership changes are a direct DB write, not a
+`PendingAction` proposal.
+
+**21.6 Initiator-signature verification - already covered, needed no
+change.** The original separately collects an initiator's signature over
+a proposed transaction but never cryptographically verifies it (UX
+friction only; real authorization is `APPROVER`-only). This port has no
+equivalent gap: every `sharedaccess` route sits behind
+`middleware.SignatureAuth`, so the caller identity `requireInitiator`
+checks has already been cryptographically proven for that exact request
+before any role check runs - a stronger mechanism achieving the same
+"initiator authority is real, approver authority is what moves funds"
+split the original intended. Documented at `requireInitiator`'s own doc
+comment rather than adding an unnecessary second signature field.
+
+**21.7 Import-existing-wallet registration - already fully supported,
+verified.** `users.Register` takes an already-authenticated
+`SignerAddress` and is agnostic to how the client obtained it; both
+`wallet-web` and `wallet-mobile`'s onboarding wizards already have a
+complete "Import an existing wallet" step (mnemonic validation via
+`wallet-core`'s `validate_mnemonic`/`derive_preview_address`, vault
+encryption, then the same `Register` call the "create new wallet" path
+uses) alongside "Create a new wallet" - matching the original's two
+registration paths. No backend change was needed; this note records that
+the audit happened and found no gap.
+
+Verified: `go build`/`vet`/`test ./...` all clean across the whole
+module (new tests: `TestResolveMemberAddress_*`,
+`TestResolveUsernameToPrimaryWalletAddress`,
+`TestRegisterWalletForAddress_PersistsNonDefaultWalletType`,
+`TestCreatePrivateOfferingGroup_*`,
+`TestAddRemoveListPrivateOfferingMember`, plus the pre-existing
+`TestBuildPaymentTx_Success` fixed by wiring a fake `RecipientResolver`
+into its test setup, a break introduced earlier in this same work by
+making `BuildPaymentTx` fail closed on a nil `Recipients`).

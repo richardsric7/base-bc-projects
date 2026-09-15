@@ -144,7 +144,7 @@ func TestDeployPrimaryWallet_CreatesSharedAccessGroup(t *testing.T) {
 	if member.MemberAddress != signerAddress {
 		t.Fatalf("expected member address %s, got %s", signerAddress, member.MemberAddress)
 	}
-	if member.Role != sharedaccessModels.RoleInitiatorApprover {
+	if member.Role != sharedaccessModels.RoleApprover {
 		t.Fatalf("expected INITIATOR_APPROVER, got %s", member.Role)
 	}
 }

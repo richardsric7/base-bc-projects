@@ -159,7 +159,7 @@ func TestCreateGroup_DeploysARealSafe(t *testing.T) {
 	group, err := svc.CreateGroup(context.Background(), initiator, "family wallet", 1, []MemberInput{
 		{Address: initiator, Role: models.RoleInitiator},
 		{Address: approver, Role: models.RoleApprover},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -179,12 +179,105 @@ func TestCreateGroup_DeploysARealSafe(t *testing.T) {
 	other, err := svc.CreateGroup(context.Background(), approver, "other wallet", 1, []MemberInput{
 		{Address: approver, Role: models.RoleApprover},
 		{Address: initiator, Role: models.RoleInitiator},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
 	if *other.Address == *group.Address {
 		t.Fatal("expected two groups with the same members to still deploy at different addresses - CreateGroup must randomize its saltNonce")
+	}
+}
+
+// fakeWalletDirectory is a WalletDirectory that records every call, so a
+// test can assert CreateGroup forwards the right owner/address/tag/
+// description without needing a real users.Service.
+type fakeWalletDirectory struct {
+	calls []fakeWalletDirectoryCall
+	err   error
+}
+
+type fakeWalletDirectoryCall struct {
+	ownerAddress, walletAddress, tag, description string
+}
+
+func (f *fakeWalletDirectory) RegisterWalletForAddress(ownerAddress, walletAddress, tag, description string, walletType usersModels.WalletType) (*usersModels.UserWallet, error) {
+	f.calls = append(f.calls, fakeWalletDirectoryCall{ownerAddress, walletAddress, tag, description})
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &usersModels.UserWallet{Address: walletAddress, Tag: tag, Description: description, WalletType: walletType}, nil
+}
+
+// fakeUsernameResolver is a UsernameResolver backed by a plain map, so a
+// test can assert ResolveMemberAddress without a real users.Service.
+type fakeUsernameResolver map[string]string
+
+func (f fakeUsernameResolver) ResolveUsernameToPrimaryWalletAddress(username string) (string, error) {
+	address, ok := f[username]
+	if !ok {
+		return "", apperrors.NotFound("user not found")
+	}
+	return address, nil
+}
+
+func TestResolveMemberAddress_FailsClosedWhenUsernamesMissing(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xdeployed"))
+	if _, err := svc.ResolveMemberAddress("alice"); err == nil {
+		t.Fatal("expected an error when Usernames is unwired")
+	}
+}
+
+func TestResolveMemberAddress_PropagatesNotFound(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xdeployed"))
+	svc.Usernames = fakeUsernameResolver{}
+	if _, err := svc.ResolveMemberAddress("nobody"); err == nil {
+		t.Fatal("expected an error for an unknown username")
+	}
+}
+
+func TestResolveMemberAddress_Success(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xdeployed"))
+	address, _ := randomAddress(t)
+	svc.Usernames = fakeUsernameResolver{"alice": address}
+	got, err := svc.ResolveMemberAddress("alice")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != address {
+		t.Fatalf("expected %s, got %s", address, got)
+	}
+}
+
+func TestCreateGroup_RegistersANewWalletDirectoryEntry(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xdeployed"))
+	directory := &fakeWalletDirectory{}
+	svc.WalletDirectory = directory
+	creator, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), creator, "family wallet", 1, []MemberInput{
+		{Address: creator, Role: models.RoleApprover},
+	}, "savings", "for a rainy day")
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+	if len(directory.calls) != 1 {
+		t.Fatalf("expected exactly one directory registration, got %d", len(directory.calls))
+	}
+	call := directory.calls[0]
+	if call.ownerAddress != creator || call.walletAddress != *group.Address || call.tag != "savings" || call.description != "for a rainy day" {
+		t.Fatalf("unexpected directory registration call: %+v", call)
+	}
+}
+
+func TestCreateGroup_PropagatesWalletDirectoryError(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xdeployed"))
+	svc.WalletDirectory = &fakeWalletDirectory{err: apperrors.Conflict("alias already taken")}
+	creator, _ := randomAddress(t)
+
+	if _, err := svc.CreateGroup(context.Background(), creator, "family wallet", 1, []MemberInput{
+		{Address: creator, Role: models.RoleApprover},
+	}, "taken", ""); err == nil {
+		t.Fatal("expected a directory registration failure to propagate")
 	}
 }
 
@@ -196,7 +289,7 @@ func TestCreateGroup_ThresholdExceedsApprovers(t *testing.T) {
 	_, err := svc.CreateGroup(context.Background(), initiator, "bad group", 2, []MemberInput{
 		{Address: initiator, Role: models.RoleInitiator},
 		{Address: approver, Role: models.RoleApprover},
-	})
+	}, "", "")
 	if err == nil {
 		t.Fatal("expected an error when threshold exceeds the number of approvers")
 	}
@@ -213,8 +306,8 @@ func TestCreateGroup_CombinedRoleCountsAsAnApproverAndCanInitiate(t *testing.T) 
 	recipient, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), owner, "sub-wallet", 1, []MemberInput{
-		{Address: owner, Role: models.RoleInitiatorApprover},
-	})
+		{Address: owner, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -258,7 +351,7 @@ func TestCreateGroup_RejectsARegisteredUsersSignerAddress(t *testing.T) {
 
 	_, err = svc.CreateGroup(context.Background(), signerAddr, "bad group", 1, []MemberInput{
 		{Address: signerAddr, Role: models.RoleApprover},
-	})
+	}, "", "")
 	if err == nil {
 		t.Fatal("expected an error naming a registered user's raw signer address as an approver")
 	}
@@ -284,7 +377,7 @@ func TestCreateGroup_RejectsAnUndeployedPrimaryWallet(t *testing.T) {
 
 	_, err = svc.CreateGroup(context.Background(), primaryAddr, "bad group", 1, []MemberInput{
 		{Address: primaryAddr, Role: models.RoleApprover},
-	})
+	}, "", "")
 	if err == nil {
 		t.Fatal("expected an error naming an undeployed primary wallet as an approver")
 	}
@@ -311,7 +404,7 @@ func TestCreateGroup_AcceptsADeployedPrimaryWalletAsMember(t *testing.T) {
 
 	_, err = svc.CreateGroup(context.Background(), primaryAddr, "good group", 1, []MemberInput{
 		{Address: primaryAddr, Role: models.RoleApprover},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("expected a deployed primary wallet to be accepted as a member, got: %v", err)
 	}
@@ -335,8 +428,8 @@ func TestApproveAction_NestedPrimaryWalletMemberExecutesViaEIP1271(t *testing.T)
 	recipient, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), primaryAddr, "shared with dave", 1, []MemberInput{
-		{Address: primaryAddr, Role: models.RoleInitiatorApprover},
-	})
+		{Address: primaryAddr, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -385,7 +478,7 @@ func TestProposeAndApprove_ExecutesOnceThresholdIsMet(t *testing.T) {
 		{Address: initiator, Role: models.RoleInitiator},
 		{Address: approver1, Role: models.RoleApprover},
 		{Address: approver2, Role: models.RoleApprover},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -449,7 +542,7 @@ func TestApproveAction_RejectsForgedSignature(t *testing.T) {
 	group, err := svc.CreateGroup(context.Background(), initiator, "1-of-1", 1, []MemberInput{
 		{Address: initiator, Role: models.RoleInitiator},
 		{Address: approver, Role: models.RoleApprover},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -481,7 +574,7 @@ func TestApproveAction_RejectsNonApprover(t *testing.T) {
 	group, err := svc.CreateGroup(context.Background(), initiator, "1-of-1", 1, []MemberInput{
 		{Address: initiator, Role: models.RoleInitiator},
 		{Address: approver, Role: models.RoleApprover},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -514,7 +607,7 @@ func TestRejectAction(t *testing.T) {
 	group, err := svc.CreateGroup(context.Background(), initiator, "1-of-1", 1, []MemberInput{
 		{Address: initiator, Role: models.RoleInitiator},
 		{Address: approver, Role: models.RoleApprover},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -554,7 +647,7 @@ func TestApproveAction_RetryAfterFailedSubmissionDoesNotRequireASecondSignature(
 	group, err := svc.CreateGroup(context.Background(), initiator, "1-of-1", 1, []MemberInput{
 		{Address: initiator, Role: models.RoleInitiator},
 		{Address: approver, Role: models.RoleApprover},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -610,8 +703,8 @@ func TestProposeAddMember_ApprovingMemberBecomesRealSafeOwner(t *testing.T) {
 	newMember, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), owner, "1-of-1", 1, []MemberInput{
-		{Address: owner, Role: models.RoleInitiatorApprover},
-	})
+		{Address: owner, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -655,8 +748,8 @@ func TestProposeAddMember_NonApprovingMemberIsDBOnlyNoChainCall(t *testing.T) {
 	newMember, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), owner, "1-of-1", 1, []MemberInput{
-		{Address: owner, Role: models.RoleInitiatorApprover},
-	})
+		{Address: owner, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -700,9 +793,9 @@ func TestProposeRemoveMember_ApprovingMemberRemovedOnChain(t *testing.T) {
 	ownerB, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), ownerA, "2-approvers-1-of-2", 1, []MemberInput{
-		{Address: ownerA, Role: models.RoleInitiatorApprover},
+		{Address: ownerA, Role: models.RoleApprover},
 		{Address: ownerB, Role: models.RoleApprover},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -741,9 +834,9 @@ func TestProposeChangeThreshold_UpdatesGroupOnExecution(t *testing.T) {
 	ownerB, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), ownerA, "1-of-2", 1, []MemberInput{
-		{Address: ownerA, Role: models.RoleInitiatorApprover},
+		{Address: ownerA, Role: models.RoleApprover},
 		{Address: ownerB, Role: models.RoleApprover},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -779,8 +872,8 @@ func TestProposeChangeThreshold_RejectsExceedingApproverCount(t *testing.T) {
 	owner, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), owner, "1-of-1", 1, []MemberInput{
-		{Address: owner, Role: models.RoleInitiatorApprover},
-	})
+		{Address: owner, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -802,8 +895,8 @@ func TestProposeDisableGroup_ExecutesWithNoChainCallAndBlocksFurtherProposals(t 
 	recipient, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), owner, "1-of-1", 1, []MemberInput{
-		{Address: owner, Role: models.RoleInitiatorApprover},
-	})
+		{Address: owner, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -848,8 +941,8 @@ func TestRequireNoConflictingManagementAction_BlocksWhileOneIsPending(t *testing
 	newMember, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), owner, "1-of-1", 1, []MemberInput{
-		{Address: owner, Role: models.RoleInitiatorApprover},
-	})
+		{Address: owner, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -874,8 +967,8 @@ func TestProposePayment_BlocksASecondOutstandingOnChainAction(t *testing.T) {
 	recipient, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), initiator, "1-of-1", 1, []MemberInput{
-		{Address: initiator, Role: models.RoleInitiatorApprover},
-	})
+		{Address: initiator, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -899,8 +992,8 @@ func TestProposePayment_AllowedAgainOnceThePriorActionIsResolved(t *testing.T) {
 	recipient, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), initiator, "1-of-1", 1, []MemberInput{
-		{Address: initiator, Role: models.RoleInitiatorApprover},
-	})
+		{Address: initiator, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -936,8 +1029,8 @@ func TestExpireStalePendingActions_RejectsOnlyActionsOlderThanTTL(t *testing.T) 
 	recipient, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), initiator, "1-of-1", 1, []MemberInput{
-		{Address: initiator, Role: models.RoleInitiatorApprover},
-	})
+		{Address: initiator, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -987,8 +1080,8 @@ func TestDomainHook_InvokedOnExecutionWithTheRightDomainAndRecord(t *testing.T) 
 	})
 
 	group, err := svc.CreateGroup(context.Background(), initiator, "treasury", 1, []MemberInput{
-		{Address: initiator, Role: models.RoleInitiatorApprover},
-	})
+		{Address: initiator, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -1038,7 +1131,7 @@ func TestDomainHook_InvokedOnRejectionAndExpiry(t *testing.T) {
 	group, err := svc.CreateGroup(context.Background(), initiator, "market", 1, []MemberInput{
 		{Address: initiator, Role: models.RoleInitiator},
 		{Address: approver, Role: models.RoleApprover},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -1094,8 +1187,8 @@ func TestDomainHook_NeverFiresForAnOrdinaryAction(t *testing.T) {
 	svc.RegisterDomainHook("some-other-domain", func(*models.PendingAction) { fired = true })
 
 	group, err := svc.CreateGroup(context.Background(), initiator, "1-of-1", 1, []MemberInput{
-		{Address: initiator, Role: models.RoleInitiatorApprover},
-	})
+		{Address: initiator, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -1127,8 +1220,8 @@ func TestListWalletsForMember_IncludesPrimaryAndGroupWallets(t *testing.T) {
 	}
 
 	group, err := svc.CreateGroup(context.Background(), primaryAddr, "shared with erin", 1, []MemberInput{
-		{Address: primaryAddr, Role: models.RoleInitiatorApprover},
-	})
+		{Address: primaryAddr, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -1151,7 +1244,7 @@ func TestListWalletsForMember_IncludesPrimaryAndGroupWallets(t *testing.T) {
 			}
 		case "group":
 			sawGroup = true
-			if w.GroupID == nil || *w.GroupID != group.ID || w.Role != string(models.RoleInitiatorApprover) {
+			if w.GroupID == nil || *w.GroupID != group.ID || w.Role != string(models.RoleApprover) {
 				t.Fatalf("unexpected group wallet summary: %#v", w)
 			}
 			// Sole member - created by primaryAddr, not shared with anyone else.
@@ -1171,9 +1264,9 @@ func TestListWalletsForMember_DistinguishesOwnedFromSharedWithMe(t *testing.T) {
 	other, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), owner, "2-member", 1, []MemberInput{
-		{Address: owner, Role: models.RoleInitiatorApprover},
+		{Address: owner, Role: models.RoleApprover},
 		{Address: other, Role: models.RoleViewOnly},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -1212,7 +1305,7 @@ func TestListWalletsForMember_NoPrimaryWalletJustGroups(t *testing.T) {
 	group, err := svc.CreateGroup(context.Background(), initiator, "unregistered members", 1, []MemberInput{
 		{Address: initiator, Role: models.RoleInitiator},
 		{Address: approver, Role: models.RoleApprover},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -1233,10 +1326,10 @@ func TestListMembers_ReturnsAllMembersWithRoles(t *testing.T) {
 	viewer, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), initiator, "3-member", 1, []MemberInput{
-		{Address: initiator, Role: models.RoleInitiatorApprover},
+		{Address: initiator, Role: models.RoleApprover},
 		{Address: approver, Role: models.RoleApprover},
 		{Address: viewer, Role: models.RoleViewOnly},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -1252,7 +1345,7 @@ func TestListMembers_ReturnsAllMembersWithRoles(t *testing.T) {
 	for _, m := range members {
 		roleByAddress[m.MemberAddress] = m.Role
 	}
-	if roleByAddress[initiator] != models.RoleInitiatorApprover {
+	if roleByAddress[initiator] != models.RoleApprover {
 		t.Fatalf("expected initiator role INITIATOR_APPROVER, got %s", roleByAddress[initiator])
 	}
 	if roleByAddress[approver] != models.RoleApprover {
@@ -1269,8 +1362,8 @@ func TestListMembers_RejectsNonMember(t *testing.T) {
 	outsider, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), initiator, "1-of-1", 1, []MemberInput{
-		{Address: initiator, Role: models.RoleInitiatorApprover},
-	})
+		{Address: initiator, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -1290,8 +1383,8 @@ func TestCuratedBalances_ReturnsOnlyCuratedTokens(t *testing.T) {
 	initiator, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), initiator, "1-of-1", 1, []MemberInput{
-		{Address: initiator, Role: models.RoleInitiatorApprover},
-	})
+		{Address: initiator, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -1315,8 +1408,8 @@ func TestCuratedBalances_RejectsNonMember(t *testing.T) {
 	outsider, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), initiator, "1-of-1", 1, []MemberInput{
-		{Address: initiator, Role: models.RoleInitiatorApprover},
-	})
+		{Address: initiator, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -1363,8 +1456,8 @@ func TestProposePayment_ConcurrentProposalsOnlyOneSucceeds(t *testing.T) {
 	recipient, _ := randomAddress(t)
 
 	group, err := svc.CreateGroup(context.Background(), initiator, "1-of-1", 1, []MemberInput{
-		{Address: initiator, Role: models.RoleInitiatorApprover},
-	})
+		{Address: initiator, Role: models.RoleApprover},
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
@@ -1420,7 +1513,7 @@ func TestGetGroupByAddress_FindsTheDeployedGroup(t *testing.T) {
 	group, err := svc.CreateGroup(context.Background(), initiator, "family wallet", 1, []MemberInput{
 		{Address: initiator, Role: models.RoleInitiator},
 		{Address: approver, Role: models.RoleApprover},
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}

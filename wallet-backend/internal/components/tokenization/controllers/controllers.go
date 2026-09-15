@@ -43,6 +43,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 	registerDocumentRoutes(authed, svc)
 	registerMintingRoutes(authed, svc)
 	registerPurchaseRoutes(authed, svc)
+	registerClosedGroupRoutes(authed, svc)
 
 	admin := router.Group("/v1/admin/tokenization")
 	admin.Use(middleware.JWTAuth(gc.JWTSecret, middleware.AudienceAdmin))
