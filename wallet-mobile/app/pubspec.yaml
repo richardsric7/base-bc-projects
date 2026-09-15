@@ -81,6 +81,11 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
+  # Brand mark and wordmark from the real production mobile app
+  # (trovo-wallet-monorepo/mobile/assets/images) - PLAN.md §14.5.
+  assets:
+    - assets/images/
+
   # Same font files as wallet-web (app/public/fonts/, PLAN.md §1.1's
   # ported-theme convention) - copied here rather than re-sourced, so
   # both clients render identical typography from the identical files.

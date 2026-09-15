@@ -31,6 +31,15 @@ void main() {
     await tester.pumpWidget(_wrap(services));
     await tester.pumpAndSettle();
 
+    // Image.asset decode runs on a real background thread/timer, which
+    // testWidgets' fake-async test zone never advances on its own (it
+    // fast-forwards fake timers, not genuine platform-channel I/O) - so
+    // without escaping into tester.runAsync() here, the brand logo would
+    // never finish decoding before the golden capture below and the
+    // screenshot would show blank space in its place.
+    await tester.runAsync(() => precacheImage(const AssetImage('assets/images/trovo_app.png'), tester.element(find.byType(OnboardingWizard))));
+    await tester.pumpAndSettle();
+
     expect(find.text('Get started'), findsOneWidget);
     expect(find.text('Create a new wallet'), findsOneWidget);
     expect(find.text('Import an existing wallet'), findsOneWidget);

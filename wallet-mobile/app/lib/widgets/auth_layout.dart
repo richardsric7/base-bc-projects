@@ -2,9 +2,10 @@
 // header over the form content. wallet-web's split-screen brand panel
 // doesn't translate to a phone-width layout, so this collapses to a
 // single column (the same collapse wallet-web itself makes below its own
-// `md:` breakpoint).
+// `md:` breakpoint). The brand mark above the title is the real
+// production mobile app's own logo asset (PLAN.md §14.5), not a
+// re-drawn substitute.
 import 'package:flutter/material.dart';
-import '../theme/app_theme.dart';
 
 class AuthLayout extends StatelessWidget {
   const AuthLayout({super.key, required this.title, this.subtitle, required this.child});
@@ -25,11 +26,7 @@ class AuthLayout extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 const SizedBox(height: 24),
-                Text(
-                  'Trovo Wallet',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontFamily: AppFonts.matahariExtended, fontSize: 20, color: AppColors.primary800),
-                ),
+                Image.asset('assets/images/trovo_app.png', height: 32, semanticLabel: 'Trovo App'),
                 const SizedBox(height: 32),
                 Text(title, textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineMedium),
                 if (subtitle != null) ...[

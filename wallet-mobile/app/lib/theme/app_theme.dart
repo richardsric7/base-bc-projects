@@ -1,7 +1,11 @@
-// Ported verbatim from wallet-web's tailwind.config.js (itself ported
-// from trovo-wallet-monorepo/web/tailwind.config.js, PLAN.md §1.1) - the
-// same color/font tokens, so this app and wallet-web read as the same
-// product on two platforms.
+// Color scale matches wallet-web's tailwind.config.js almost exactly
+// (itself ported from trovo-wallet-monorepo/web/tailwind.config.js,
+// PLAN.md §1.1) - primary100-700 below are identical hex values to
+// trovoblue50-90 in the real production mobile app's own
+// lib/custom_bloc_observer/colors.dart. The one value that had drifted,
+// primary800, is corrected here to that app's actual trovoblue
+// (0xFF00225A) instead of wallet-web's invented 0xFF004988 - see
+// PLAN.md §14.5.
 import 'package:flutter/material.dart';
 
 class AppColors {
@@ -13,16 +17,18 @@ class AppColors {
   static const primary500 = Color(0xFF99B6CF);
   static const primary600 = Color(0xFF6692B8);
   static const primary700 = Color(0xFF336DA0);
-  static const primary800 = Color(0xFF004988);
+  static const primary800 = Color(0xFF00225A);
 
   static const trovoredLight = Color(0xFFFFE7E2);
   static const trovoredPrimary = Color(0xFFBE3800);
 
-  // New here too, matching wallet-web's own addition for the
-  // online/offline connectivity indicator (PLAN.md §6.4) - the original
-  // theme has no positive/success color.
-  static const positiveLight = Color(0xFFE3F5E9);
-  static const positivePrimary = Color(0xFF1E8E4F);
+  // The real mobile app's own success/positive green (colors.dart's
+  // `green`/`platinum`, 0xff00a859) and its 60%-tint background
+  // (colors.dart's `colorGreen60`), reused here for the online/offline
+  // connectivity indicator (PLAN.md §6.4) - the original web theme had
+  // no positive/success color of its own to port instead.
+  static const positiveLight = Color(0xFFE6FBF1);
+  static const positivePrimary = Color(0xFF00A859);
 
   static const gray200 = Color(0xFFE5E7EB);
   static const gray300 = Color(0xFFD1D5DB);

@@ -11,6 +11,7 @@ import '../../app_services.dart';
 import '../../store/wallet_state.dart';
 import '../../api/assets_api.dart';
 import '../../api/payments_api.dart';
+import '../../theme/app_theme.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -105,7 +106,13 @@ class _AppDrawer extends StatelessWidget {
     return Drawer(
       child: ListView(
         children: [
-          const DrawerHeader(child: Text('Trovo Wallet')),
+          DrawerHeader(
+            decoration: const BoxDecoration(color: AppColors.primary800),
+            child: Align(
+              alignment: Alignment.bottomLeft,
+              child: Image.asset('assets/images/trovo_white.png', height: 40, semanticLabel: 'Trovo App'),
+            ),
+          ),
           ListTile(leading: const Icon(Icons.dashboard), title: const Text('Dashboard'), onTap: () => Navigator.of(context).pop()),
           ListTile(
             leading: const Icon(Icons.send),

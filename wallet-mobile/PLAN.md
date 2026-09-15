@@ -478,3 +478,67 @@ everything short of on-device testing:
 
 `flutter analyze` is clean (0 issues) and all 10 Dart tests pass
 (`flutter test`), alongside `wallet-core`'s existing Rust test suite.
+
+### 14.5 Real theme and brand artifacts, sourced from `trovo-wallet-monorepo/mobile`
+
+§14.1-14.4 above ported wallet-web's own tailwind-derived theme
+(`AppColors`/`AppFonts` in `theme/app_theme.dart`), since at the time
+this app had no color/logo assets of its own. `trovo-wallet-monorepo`
+(a separate, read-only reference repository - never modified by this
+project, per explicit instruction) is the actual original production
+Flutter app this whole `wallet-mobile` effort is porting from, and its
+`lib/custom_bloc_observer/colors.dart` and `assets/images/` are the real
+source of truth for the brand, so this pass reconciled the two:
+
+- **Colors**: comparing `colors.dart` against the existing
+  `AppColors` scale showed `primary100`-`primary700` were already
+  byte-for-byte identical to the real app's `trovoblue50`-`trovoblue90`
+  tints - wallet-web's tailwind config had evidently been built from the
+  same source at some point. Only `primary800` had drifted (wallet-web's
+  invented `0xFF004988` vs. the real app's actual brand navy,
+  `trovoblue` = `0xFF00225A`) - corrected here. The positive/success
+  green (`positiveLight`/`positivePrimary`, used for the online/offline
+  indicator - PLAN.md §6.4 - which wallet-web had invented outright since
+  its own theme had no success color to port) was replaced with the real
+  app's own `green`/`colorGreen60` (`0xFF00A859` / `0xFFE6FBF1`).
+- **Artifacts**: `trovo_app.png` (the color wordmark) and `trovo_white.png`
+  (the white mark, for use on colored backgrounds) were copied byte-for-
+  byte from the real app's `assets/images/` into this app's own
+  `assets/images/` (a one-time copy, not a shared/linked path - the two
+  repos remain otherwise unrelated). `trovo_app.png` replaces the plain
+  "Trovo Wallet" text that previously stood in for a logo atop
+  `AuthLayout` (used by onboarding and unlock); `trovo_white.png` sits on
+  a `trovoblue`-colored `DrawerHeader` in the dashboard's navigation
+  drawer, mirroring how a colored nav header with a white mark is used
+  throughout the real app.
+- **A real decode bug found and fixed along the way**: `trovo_app.png`
+  carried an embedded custom ICC color-profile chunk (`iCCP`). Once
+  wired into a widget via `Image.asset`, this sandbox's headless
+  `flutter_tester` engine decoded the image but only after several
+  minutes of real wall-clock time (observed directly with an isolated
+  `ui.instantiateImageCodec` probe) - far slower than any widget test's
+  settle window, so the image silently rendered as blank space in every
+  test that used it. The ICC chunk was stripped by re-encoding the PNG
+  through Pillow (pixel data byte-identical, confirmed by direct visual
+  comparison) as the fix for the file itself, but the underlying
+  Flutter-test gotcha is separate and applies to *any* `Image.asset` in
+  a golden test regardless of the file: `testWidgets`' fake-async test
+  zone advances fake timers but never drains genuine platform-channel/
+  native-codec I/O, so `pumpAndSettle()` alone cannot wait for a real
+  image decode to finish. `test/pages/onboarding_wizard_test.dart`'s
+  choose-signer golden and the new `test/pages/dashboard_page_test.dart`
+  both now call `precacheImage(...)` inside `tester.runAsync(...)`
+  before pumping, which escapes the fake-async zone and lets the decode
+  actually complete - the documented, standard fix for this class of
+  problem. Both goldens now show the real multi-color logo pixels
+  (confirmed by direct pixel sampling of the PNG, not just visual
+  inspection) rather than blank space.
+- **New test**: `test/pages/dashboard_page_test.dart` (previously the
+  dashboard/drawer had no test coverage at all) opens the drawer and
+  golden-asserts `test/goldens/dashboard_drawer.png`, the first visual
+  check of the drawer's brand header.
+
+`flutter analyze` is clean and all 11 Dart tests pass after this pass
+(10 from §14.4 plus the new dashboard drawer test); the two pre-existing
+goldens (`onboarding_choose_signer.png`, `send_page_idle.png`) were
+regenerated to reflect the corrected `primary800` and the real logo.
