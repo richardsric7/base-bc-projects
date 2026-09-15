@@ -1325,3 +1325,39 @@ endpoint and the error path renders correctly. Approvals then correctly
 showed "No pending actions" (the group was never created, so nothing
 to show) - screenshots confirm real rendering against the live backend
 throughout, not just a clean build.
+
+## 21. My Wallets / Wallets Shared With Me filter + shared-with-others badge
+
+User feedback on §20's shared-access UI: the wallets list had no way to
+tell "my wallets" from "wallets shared with me", and no indicator on a
+wallet the caller owns to show it's been shared with someone else -
+`wallet-backend`'s own `ListWalletsForMember` doc comment had flagged
+exactly this as something the unified schema (PLAN.md §13.4) erased
+relative to the original's separate `GetAllWallets`/
+`WalletsSharedWithUser` queries. `wallet-backend` PLAN.md §20 fixes
+this at the source (`ClosedGroup.CreatedByAddress`, `WalletSummary.
+IsOwner`/`IsShared`) - closing that gap here is porting the new fields
+into the wallets list.
+
+`sharedAccessApi.ts`'s `WalletSummary` gains `isOwner`/`isShared`.
+`SharedAccessHome.tsx`'s `MyWallets` component gains a second-level
+filter (`My Wallets` / `Wallets Shared With Me`, `filter(w => filter ===
+'mine' ? w.isOwner : !w.isOwner)`) and a small inline-SVG `SharedBadge`
+shown only when `w.isOwner && w.isShared` - a wallet of mine I've
+actually shared with someone, not a private single-member sub-wallet.
+No new icon asset exists to port from the original for this (the
+original's own equivalent screens don't carry a distinct "shared"
+glyph either), so this is a small inline SVG rather than a new image
+dependency.
+
+**Verified**: `tsc -b && vite build` clean. Live E2E against a locally
+booted `wallet-backend`: onboarded a fresh wallet, opened Shared
+access, confirmed "My Wallets" (the default) correctly lists the
+primary wallet with no badge (not shared with anyone), and "Wallets
+Shared With Me" correctly shows its empty state. Verifying the badge
+itself needs a second real member on an actually-deployed group, which
+needs a real Safe deployment - blocked by the same sandboxed Base RPC
+egress restriction noted in §20 and throughout this project's live
+tests, not a code defect; the field plumbing (`isOwner`/`isShared`
+flowing from `wallet-backend`'s response through to the filter/badge
+logic) is confirmed correct from the owning side.

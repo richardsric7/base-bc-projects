@@ -51,10 +51,33 @@ export default function SharedAccessHome() {
   );
 }
 
+type WalletFilter = 'mine' | 'sharedWithMe';
+
+// A small "shared with others" badge - shown only on a wallet the caller
+// owns (isOwner) that also has more than one member (isShared), per
+// wallet-backend PLAN.md §20's isOwner/isShared fields. Inline SVG rather
+// than an image asset - no such icon exists to port from the original,
+// and this app otherwise avoids pulling in an icon library for one glyph.
+function SharedBadge() {
+  return (
+    <svg
+      role="img"
+      aria-label="Shared with others"
+      viewBox="0 0 24 24"
+      className="h-4 w-4 text-primary-600 shrink-0"
+      fill="currentColor"
+    >
+      <title>Shared with others</title>
+      <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z" />
+    </svg>
+  );
+}
+
 function MyWallets() {
   const primaryAddress = useAppSelector((s) => s.wallet.primary.address);
   const [wallets, setWallets] = useState<WalletSummary[] | null>(null);
   const [error, setError] = useState('');
+  const [filter, setFilter] = useState<WalletFilter>('mine');
 
   useEffect(() => {
     if (!primaryAddress) return;
@@ -66,30 +89,55 @@ function MyWallets() {
   if (error) return <p className="text-red-500 text-sm">{error}</p>;
   if (!wallets) return <p className="text-gray-600 text-sm">Loading…</p>;
 
+  const filtered = wallets.filter((w) => (filter === 'mine' ? w.isOwner : !w.isOwner));
+
   return (
-    <ul className="space-y-2">
-      {wallets.map((w) => (
-        <li key={w.address} className="bg-primary-100 rounded-lg p-4 flex items-center justify-between">
-          <div>
-            <p className="font-montserratSemiBold text-primary-800">
-              {w.name || (w.kind === 'primary' ? 'Primary wallet' : `Group #${w.groupId}`)}
-            </p>
-            <p className="text-gray-600 text-xs break-all">{w.address}</p>
-            <p className="text-gray-500 text-xs">
-              {w.role}
-              {w.kind === 'group' && ` · threshold ${w.threshold}`}
-              {w.disabled && ' · disabled'}
-            </p>
-          </div>
-          {w.kind === 'group' && w.groupId && (
-            <Link to={`/shared-access/groups/${w.groupId}`} className="text-primary-700 text-sm underline">
-              Manage
-            </Link>
-          )}
-        </li>
-      ))}
-      {wallets.length === 0 && <p className="text-gray-600 text-sm">No wallets found.</p>}
-    </ul>
+    <div className="space-y-3">
+      <div className="flex gap-2">
+        {(['mine', 'sharedWithMe'] as WalletFilter[]).map((f) => (
+          <button
+            key={f}
+            type="button"
+            onClick={() => setFilter(f)}
+            className={`px-3 py-1.5 rounded-md font-montserratMedium text-xs ${
+              filter === f ? 'bg-primary-800 text-white' : 'bg-primary-100 text-primary-700 hover:bg-primary-200'
+            }`}
+          >
+            {f === 'mine' ? 'My Wallets' : 'Wallets Shared With Me'}
+          </button>
+        ))}
+      </div>
+      <ul className="space-y-2">
+        {filtered.map((w) => (
+          <li key={w.address} className="bg-primary-100 rounded-lg p-4 flex items-center justify-between">
+            <div>
+              <div className="flex items-center gap-1.5">
+                <p className="font-montserratSemiBold text-primary-800">
+                  {w.name || (w.kind === 'primary' ? 'Primary wallet' : `Group #${w.groupId}`)}
+                </p>
+                {w.isOwner && w.isShared && <SharedBadge />}
+              </div>
+              <p className="text-gray-600 text-xs break-all">{w.address}</p>
+              <p className="text-gray-500 text-xs">
+                {w.role}
+                {w.kind === 'group' && ` · threshold ${w.threshold}`}
+                {w.disabled && ' · disabled'}
+              </p>
+            </div>
+            {w.kind === 'group' && w.groupId && (
+              <Link to={`/shared-access/groups/${w.groupId}`} className="text-primary-700 text-sm underline">
+                Manage
+              </Link>
+            )}
+          </li>
+        ))}
+        {filtered.length === 0 && (
+          <p className="text-gray-600 text-sm">
+            {filter === 'mine' ? 'No wallets found.' : 'No wallets have been shared with you.'}
+          </p>
+        )}
+      </ul>
+    </div>
   );
 }
 

@@ -38,6 +38,13 @@ export interface WalletSummary {
   disabled: boolean;
   groupId?: number;
   name?: string;
+  // isOwner: true for the primary wallet, or a group this caller created.
+  // false for a group someone else created and added this caller to -
+  // "shared with me". isShared: true when the underlying wallet has more
+  // than one member - combined with isOwner, "a wallet of mine I've
+  // shared with others" (wallet-backend PLAN.md §20).
+  isOwner: boolean;
+  isShared: boolean;
 }
 
 export interface CuratedBalance {
