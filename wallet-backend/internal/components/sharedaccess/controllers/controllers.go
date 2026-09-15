@@ -71,7 +71,8 @@ func createGroup(svc *services.Service) gin.HandlerFunc {
 		for i, m := range req.Members {
 			members[i] = services.MemberInput{Address: m.Address, Role: models.GroupRole(m.Role)}
 		}
-		group, err := svc.CreateGroup(c.Request.Context(), req.Name, req.Threshold, members)
+		caller := c.GetString(middleware.CtxSubject)
+		group, err := svc.CreateGroup(c.Request.Context(), caller, req.Name, req.Threshold, members)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return

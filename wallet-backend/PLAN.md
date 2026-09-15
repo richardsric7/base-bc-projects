@@ -4032,3 +4032,46 @@ matching `<Route>` is a dead link even in the original itself):
   `VerifySecurityAnswer`) already.
 
 See `wallet-web/PLAN.md` §20 for the shared-access UI itself.
+
+## 20. `ClosedGroup.CreatedByAddress` + `WalletSummary.IsOwner`/`IsShared` - reconstructing "my wallets" vs "shared with me"
+
+User feedback on the §19 shared-access UI: the wallets list had no way
+to filter "My Wallets" from "Wallets Shared With Me", and no indicator
+on a wallet the caller owns to show it's actually been shared with
+someone else. `ListWalletsForMember`'s own doc comment already flagged
+the underlying cause: PLAN.md §13.4/§13.8 deliberately unified the
+original's two separate queries (`GetAllWallets`/
+`WalletsSharedWithUser`) into one, on the basis that "a sub-wallet and a
+genuinely shared multi-party wallet are indistinguishable here by
+design" - true structurally, but that also erased the one bit of
+information (who created it) a listing UI needs to tell them apart.
+
+Fixed by adding `ClosedGroup.CreatedByAddress` (set in `CreateGroup` from
+the caller, and in `users.ensurePrimaryWalletGroup` from the primary
+wallet's own address) and extending `WalletSummary` with:
+
+- `IsOwner` - true for every `"primary"` entry, and for a `"group"`
+  entry where `CreatedByAddress` matches the caller. False for a group
+  someone else created and added the caller to as a member.
+- `IsShared` - true when the underlying group (via a single grouped
+  `COUNT(*) ... GROUP BY group_id` query covering every relevant group
+  ID at once, including the primary wallet's own lazily-created
+  self-group if one exists) has more than one member - i.e. actually
+  shared with someone, not just a private single-member sub-wallet.
+
+Neither field affects authorization at all (that stays entirely
+membership/role-based, per `CreateGroup`'s own doc comment) - both exist
+purely for a listing UI: `IsOwner && IsShared` is "my wallet I've shared
+with others" (show a shared-with-others badge); `IsOwner == false` is
+"shared with me" (a separate filter tab). Tests:
+`TestListWalletsForMember_DistinguishesOwnedFromSharedWithMe` (creator
+sees `IsOwner=true, IsShared=true`; the other member sees
+`IsOwner=false, IsShared=true`), plus updated assertions on the existing
+`TestListWalletsForMember_IncludesPrimaryAndGroupWallets`.
+
+Verified: `go build`/`vet`/`test ./...` and `gofmt -l .` all clean (34
+existing `CreateGroup` call sites across the test suite updated for the
+new `creatorAddress` parameter - each already had a natural "first
+member" variable in scope to reuse, since every real caller already
+includes themselves as a member when creating a group). See
+`wallet-web/PLAN.md` §20's own update for the frontend filter/badge.

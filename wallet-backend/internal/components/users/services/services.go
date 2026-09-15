@@ -314,10 +314,11 @@ func (s *Service) ensurePrimaryWalletGroup(user *models.User) error {
 
 	addressHex := user.Address
 	group := sharedaccessModels.ClosedGroup{
-		Name:      "Primary wallet",
-		Purpose:   sharedaccessModels.PurposeWalletAccess,
-		Address:   &addressHex,
-		Threshold: 1,
+		Name:             "Primary wallet",
+		Purpose:          sharedaccessModels.PurposeWalletAccess,
+		Address:          &addressHex,
+		Threshold:        1,
+		CreatedByAddress: user.Address,
 	}
 	return s.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&group).Error; err != nil {

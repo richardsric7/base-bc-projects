@@ -73,13 +73,25 @@ const (
 // coexist under one uniqueIndex (SQL treats NULLs as distinct from each
 // other, unlike empty strings).
 type ClosedGroup struct {
-	ID        uint               `gorm:"primaryKey" json:"id"`
-	Name      string             `gorm:"size:128;not null" json:"name"`
-	Purpose   ClosedGroupPurpose `gorm:"size:20;not null;default:WALLET_ACCESS" json:"purpose"`
-	Address   *string            `gorm:"uniqueIndex;size:42" json:"address,omitempty"`
-	Threshold int                `json:"threshold,omitempty"`
-	Disabled  bool               `gorm:"default:false" json:"disabled"`
-	CreatedAt time.Time          `json:"createdAt"`
+	ID      uint               `gorm:"primaryKey" json:"id"`
+	Name    string             `gorm:"size:128;not null" json:"name"`
+	Purpose ClosedGroupPurpose `gorm:"size:20;not null;default:WALLET_ACCESS" json:"purpose"`
+	Address *string            `gorm:"uniqueIndex;size:42" json:"address,omitempty"`
+	// CreatedByAddress is who initiated this group - always a
+	// primary-wallet address (or, for the primary-wallet's own
+	// self-group, that same wallet's own address - see
+	// users.ensurePrimaryWalletGroup). Not an access-control field
+	// (membership/role governs that entirely); it exists purely so a
+	// listing UI can distinguish "my wallets" (this address) from
+	// "wallets shared with me" (a GroupMember row whose address differs
+	// from this one) - a distinction the original app kept as two
+	// separate queries (GetAllWallets/WalletsSharedWithUser) that this
+	// port's unified schema (PLAN.md §13.4/§13.8) otherwise has no way
+	// to reconstruct. Empty for rows created before this field existed.
+	CreatedByAddress string    `gorm:"size:42" json:"createdByAddress,omitempty"`
+	Threshold        int       `json:"threshold,omitempty"`
+	Disabled         bool      `gorm:"default:false" json:"disabled"`
+	CreatedAt        time.Time `json:"createdAt"`
 }
 
 // GroupMember is one member's role on a group.

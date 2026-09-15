@@ -271,7 +271,11 @@ type MemberInput struct {
 // they hold no on-chain signing power). A sub-wallet (PLAN.md §13.6) is
 // simply the single-member case: one member, role INITIATOR_APPROVER,
 // threshold 1, address the caller's own primary wallet.
-func (s *Service) CreateGroup(ctx context.Context, name string, threshold int, members []MemberInput) (*models.ClosedGroup, error) {
+// creatorAddress is recorded on the group (ClosedGroup.CreatedByAddress)
+// purely for a listing UI's "my wallets" vs "wallets shared with me"
+// distinction - it plays no part in authorization, which is entirely
+// membership/role-based.
+func (s *Service) CreateGroup(ctx context.Context, creatorAddress, name string, threshold int, members []MemberInput) (*models.ClosedGroup, error) {
 	if name == "" {
 		return nil, apperrors.BadRequest("name is required")
 	}
@@ -323,7 +327,10 @@ func (s *Service) CreateGroup(ctx context.Context, name string, threshold int, m
 	}
 
 	addressHex := groupAddress.Hex()
-	group := models.ClosedGroup{Name: name, Purpose: models.PurposeWalletAccess, Threshold: threshold, Address: &addressHex}
+	group := models.ClosedGroup{
+		Name: name, Purpose: models.PurposeWalletAccess, Threshold: threshold,
+		Address: &addressHex, CreatedByAddress: creatorAddress,
+	}
 	txErr := s.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&group).Error; err != nil {
 			return err
@@ -1402,9 +1409,11 @@ func (s *Service) ListMembers(groupID uint, callerAddress string) ([]models.Grou
 // WalletSummary is one entry in ListWalletsForMember's result - either the
 // caller's own primary wallet (Kind "primary", GroupID nil) or a
 // ClosedGroup they're a GroupMember of (Kind "group") - a sub-wallet and a
-// genuinely shared multi-party wallet are indistinguishable here by
-// design, since PLAN.md §13.4 makes a sub-wallet simply the single-member
-// case of the same schema.
+// genuinely shared multi-party wallet are indistinguishable *structurally*
+// here by design (PLAN.md §13.4 makes a sub-wallet simply the
+// single-member case of the same schema), but IsOwner/IsShared below let a
+// listing UI still tell them apart the way the original's separate
+// GetAllWallets/WalletsSharedWithUser queries did.
 type WalletSummary struct {
 	Address string `json:"address"`
 	Kind    string `json:"kind"` // "primary" or "group"
@@ -1416,6 +1425,18 @@ type WalletSummary struct {
 	Disabled  bool   `json:"disabled"`
 	GroupID   *uint  `json:"groupId,omitempty"`
 	Name      string `json:"name,omitempty"`
+	// IsOwner is true for every "primary" entry (always the caller's
+	// own), and for a "group" entry where the caller is the one who
+	// created it (ClosedGroup.CreatedByAddress) - i.e. "my wallets" as
+	// opposed to "wallets shared with me" (IsOwner false, a "group"
+	// entry created by someone else who added the caller as a member).
+	IsOwner bool `json:"isOwner"`
+	// IsShared is true when the underlying group has more than one
+	// member - i.e. this wallet (mine or not) is actually shared with
+	// someone, not just a private single-member sub-wallet. Combined
+	// with IsOwner, a UI can show a "shared with others" badge on
+	// exactly the wallets the caller owns and has actually shared.
+	IsShared bool `json:"isShared"`
 }
 
 // ListWalletsForMember returns every wallet memberAddress can see: its own
@@ -1423,15 +1444,24 @@ type WalletSummary struct {
 // of, own or shared-to-it alike - the port's equivalent of the original's
 // GetAllWallets + WalletsSharedWithUser reverse association (PLAN.md
 // §13.8), unified into one query per PLAN.md §13.4's own schema design
-// rather than two separate ones the way the original needed.
+// rather than two separate ones the way the original needed (IsOwner/
+// IsShared reconstruct that same distinction for a listing UI).
 func (s *Service) ListWalletsForMember(memberAddress string) ([]WalletSummary, error) {
 	var summaries []WalletSummary
 
+	var primaryGroupID *uint
 	var user usersModels.User
 	err := s.DB.Where("LOWER(address) = LOWER(?)", memberAddress).First(&user).Error
 	if err == nil {
+		var ownGroup models.ClosedGroup
+		if err := s.DB.Where("address = ?", user.Address).First(&ownGroup).Error; err == nil {
+			id := ownGroup.ID
+			primaryGroupID = &id
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperrors.Internal("failed to check for a primary wallet group")
+		}
 		summaries = append(summaries, WalletSummary{
-			Address: user.Address, Kind: "primary", Role: "OWNER", Threshold: 1,
+			Address: user.Address, Kind: "primary", Role: "OWNER", Threshold: 1, IsOwner: true,
 		})
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, apperrors.Internal("failed to look up primary wallet")
@@ -1441,14 +1471,44 @@ func (s *Service) ListWalletsForMember(memberAddress string) ([]WalletSummary, e
 	if err := s.DB.Where("member_address = ?", memberAddress).Find(&memberships).Error; err != nil {
 		return nil, apperrors.Internal("failed to load group memberships")
 	}
-	if len(memberships) == 0 {
-		return summaries, nil
+
+	countGroupIDs := make([]uint, 0, len(memberships)+1)
+	if primaryGroupID != nil {
+		countGroupIDs = append(countGroupIDs, *primaryGroupID)
 	}
 	groupIDs := make([]uint, len(memberships))
 	roleByGroup := make(map[uint]models.GroupRole, len(memberships))
 	for i, m := range memberships {
 		groupIDs[i] = m.GroupID
 		roleByGroup[m.GroupID] = m.Role
+	}
+	countGroupIDs = append(countGroupIDs, groupIDs...)
+
+	memberCounts := make(map[uint]int, len(countGroupIDs))
+	if len(countGroupIDs) > 0 {
+		type groupCount struct {
+			GroupID uint
+			Count   int
+		}
+		var counts []groupCount
+		if err := s.DB.Model(&models.GroupMember{}).
+			Select("group_id, count(*) as count").
+			Where("group_id IN ?", countGroupIDs).
+			Group("group_id").
+			Scan(&counts).Error; err != nil {
+			return nil, apperrors.Internal("failed to count group memberships")
+		}
+		for _, c := range counts {
+			memberCounts[c.GroupID] = c.Count
+		}
+	}
+
+	if primaryGroupID != nil {
+		summaries[0].IsShared = memberCounts[*primaryGroupID] > 1
+	}
+
+	if len(memberships) == 0 {
+		return summaries, nil
 	}
 	var groups []models.ClosedGroup
 	if err := s.DB.Where("id IN ? AND purpose = ?", groupIDs, models.PurposeWalletAccess).Find(&groups).Error; err != nil {
@@ -1463,6 +1523,8 @@ func (s *Service) ListWalletsForMember(memberAddress string) ([]WalletSummary, e
 		summaries = append(summaries, WalletSummary{
 			Address: addr, Kind: "group", Role: string(roleByGroup[g.ID]),
 			Threshold: g.Threshold, Disabled: g.Disabled, GroupID: &gid, Name: g.Name,
+			IsOwner:  strings.EqualFold(g.CreatedByAddress, memberAddress),
+			IsShared: memberCounts[g.ID] > 1,
 		})
 	}
 	return summaries, nil
