@@ -21,6 +21,7 @@ import SharedAccessHome from './pages/sharedaccess/SharedAccessHome';
 import GroupDetail from './pages/sharedaccess/GroupDetail';
 import Approvals from './pages/sharedaccess/Approvals';
 import ApprovalDetail from './pages/sharedaccess/ApprovalDetail';
+import MyWallets from './pages/wallets/MyWallets';
 import AppLayout from './layout/AppLayout';
 
 // The primary wallet is a Safe with no private key of its own (PLAN.md
@@ -124,6 +125,7 @@ export default function App() {
         <Route path="/shared-access/groups/:groupId" element={<GroupDetail />} />
         <Route path="/shared-access/approvals" element={<Approvals />} />
         <Route path="/shared-access/approvals/:actionId" element={<ApprovalDetail />} />
+        <Route path="/wallets" element={<MyWallets />} />
         <Route path="/settings" element={<Settings />} />
       </Route>
       <Route

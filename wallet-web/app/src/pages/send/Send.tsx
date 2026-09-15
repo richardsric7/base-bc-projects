@@ -26,6 +26,10 @@ export default function Send() {
   const [error, setError] = useState('');
   const [txHash, setTxHash] = useState('');
   const [record, setRecord] = useState<PaymentHistoryRecord | null>(null);
+  // What `destination` actually resolved to (it may be an address,
+  // username, email, or wallet alias) - shown once /build responds so the
+  // sender can confirm who they're paying before signing.
+  const [resolvedAddress, setResolvedAddress] = useState('');
 
   useEffect(() => {
     listCuratedTokens()
@@ -41,16 +45,20 @@ export default function Send() {
     }
     setError('');
     setTxHash('');
+    setResolvedAddress('');
     try {
       setStatus('building');
       // Proposes the transfer as a real Safe transaction against the
       // primary wallet (PLAN.md §17) and returns the digest to approve it.
       // Wrapped so an undeployed Safe (no shared-access group yet) is
       // deployed on the spot and the build is retried, rather than failing
-      // outright - see usersApi.ts's withWalletDeployRetry.
+      // outright - see usersApi.ts's withWalletDeployRetry. destination may
+      // be an address, username, email, or wallet alias - the backend
+      // resolves it and returns what it resolved to as resolvedAddress.
       const proposal = await withWalletDeployRetry(signerAddress, () =>
         buildPayment(primaryAddress, destination, amount, tokenAddress || undefined),
       );
+      if (proposal.resolvedAddress) setResolvedAddress(proposal.resolvedAddress);
 
       setStatus('signing');
       // personal_sign over the digest's raw bytes with the signer's own
@@ -66,7 +74,11 @@ export default function Send() {
         idempotencyKey,
         proposal.actionId,
         signature,
-        destination,
+        // The actual address, not whatever destination was typed as
+        // (username/email/alias/address) - the history record's toAddress
+        // is a display field, and the real address is what a receipt
+        // should show.
+        proposal.resolvedAddress || destination,
         amount,
         tokenAddress || undefined,
       );
@@ -91,7 +103,15 @@ export default function Send() {
         </p>
       )}
       <form onSubmit={handleSend} className="space-y-4">
-        <TextInput label="Recipient address" value={destination} onChange={setDestination} placeholder="0x..." />
+        <TextInput
+          label="Recipient"
+          value={destination}
+          onChange={setDestination}
+          placeholder="Address, username, email, or wallet alias"
+        />
+        {resolvedAddress && (
+          <p className="text-gray-600 text-xs break-all">Sending to: {resolvedAddress}</p>
+        )}
         <TextInput label="Amount (base units)" value={amount} onChange={setAmount} placeholder="1000000000000000000" />
         <div>
           <label className="text-primary-700 font-montserratMedium">Asset</label>

@@ -1361,3 +1361,59 @@ egress restriction noted in §20 and throughout this project's live
 tests, not a code defect; the field plumbing (`isOwner`/`isShared`
 flowing from `wallet-backend`'s response through to the filter/badge
 logic) is confirmed correct from the owning side.
+
+## 22. Fixing shared-access member management for `wallet-backend` PLAN.md §21's role/username correction, plus alias-aware Send and a wallet-directory page
+
+`wallet-backend` PLAN.md §21 corrected the shared-access permission
+model to the original's exact three tiers (dropping the synthetic
+`INITIATOR_APPROVER` role) and switched member add/remove from
+address-based to username-based - both real, intentional API-contract
+changes, and both broke this app's existing shared-access UI outright
+(built in §20 against the old contract): `GroupDetail.tsx`'s "Add/
+remove member" forms collected an address and posted it as `address`/
+in the `:memberAddress` path segment; `SharedAccessHome.tsx`'s
+new-group form defaulted every member row to `INITIATOR_APPROVER`, a
+role value the backend no longer accepts at all.
+
+Fixed by following the backend change through: `sharedAccessApi.ts`'s
+`GroupRole` drops `INITIATOR_APPROVER`; `createGroup`'s `members` and
+`proposeAddMember`/`proposeRemoveMember` now take a `username` instead
+of an `address` (`proposeRemoveMember`'s URL segment too, matching the
+backend's route rename); `GroupDetail.tsx`'s and `SharedAccessHome.tsx`'s
+forms collect a username with a `username` placeholder instead of
+`0x...`, and their role `<select>`s drop the removed option.
+`NewGroupForm` also now pre-fills its first member row with the
+caller's own username (`state.auth.username`) rather than an empty
+string, since the backend doesn't implicitly add the creator as a
+member the way the old default row's placeholder role implied it might.
+
+Two more, smaller gaps this session's own research turned up alongside
+the role-model fix, both closed here rather than left as follow-ups:
+
+- **`Send.tsx` didn't expose alias/username/email as valid recipients**
+  even though `wallet-backend`'s `/v1/payments/build` has resolved
+  `destination` through all four (address/username/email/wallet alias)
+  since §21's predecessor work. Fixed by widening the "Recipient" field's
+  label/placeholder, and surfacing the new `resolvedAddress` field on
+  `paymentsApi.ts`'s `ActionProposal` as a "Sending to: X" confirmation
+  once `/build` responds - the same "who does this identifier actually
+  name" confirmation `wallet-backend`'s own `PaymentProposal` doc comment
+  says it exists to support. `submitPayment`'s `destination` argument
+  now passes the resolved address (falling back to whatever was typed)
+  rather than the raw identifier, so a payment history record's
+  `toAddress` always displays a real address, not a username someone
+  might later rename.
+- **No UI existed at all to edit a wallet's Tag/Description/Alias** -
+  `wallet-backend`'s `GET/PUT /v1/users/wallets*` routes (from the
+  predecessor work this section's role-model fix accompanies) had no
+  client. Added `usersApi.ts`'s `UserWallet`/`listMyWallets`/
+  `updateWalletMetadata`/`resolveRecipient`/`WalletDirectoryEntry`, and a
+  new page (`pages/wallets/MyWallets.tsx`, routed at `/wallets`, linked
+  from Settings' existing "Wallets" section) listing the caller's own
+  wallet directory with an inline edit form per wallet.
+
+**Verified**: `tsc --noEmit` clean. No live E2E against a real
+`wallet-backend` in this pass (same sandboxed Base RPC egress
+restriction as §20/§21) - the fix is a mechanical API-contract
+alignment plus new client code with no server dependency to fake, so
+static typechecking is the meaningful check here.

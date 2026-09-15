@@ -38,6 +38,13 @@ export default function Settings() {
         <h2 className="text-primary-800 font-montserratSemiBold text-lg">Wallets</h2>
         <p className="text-gray-600 text-sm">Signer: {wallet.signer.address ?? 'not set'}</p>
         <p className="text-gray-600 text-sm">Primary wallet: {wallet.primary.address ?? 'not set'}</p>
+        <button
+          type="button"
+          className="text-primary-700 text-sm underline"
+          onClick={() => navigate('/wallets')}
+        >
+          Manage tags, descriptions and aliases
+        </button>
       </section>
 
       <section className="space-y-3">

@@ -10,7 +10,15 @@
 // domains like paymentsApi.ts use).
 import { apiRequest } from './httpClient';
 
-export type GroupRole = 'INITIATOR' | 'APPROVER' | 'VIEW_ONLY' | 'INITIATOR_APPROVER';
+// The original's exact three-tier permission model: APPROVER is the only
+// role that becomes an on-chain Safe owner and whose signature can
+// satisfy the group's threshold; INITIATOR may propose actions but not
+// approve them (a strict subset of APPROVER's own authority - see
+// wallet-backend's sharedaccess.CanInitiate); VIEW_ONLY may only view
+// balances/history. There is no combined role: a member who needs both
+// initiate and approve authority (e.g. a sub-wallet's sole owner) simply
+// holds APPROVER.
+export type GroupRole = 'INITIATOR' | 'APPROVER' | 'VIEW_ONLY';
 
 export interface ClosedGroup {
   id: number;
@@ -98,7 +106,10 @@ export function createGroup(
   primaryAddress: string,
   name: string,
   threshold: number,
-  members: { address: string; role: GroupRole }[],
+  // Members are named by username, never an address the caller would
+  // have to already know - the original's own convention, resolved
+  // server-side (wallet-backend's sharedaccess.ResolveMemberAddress).
+  members: { username: string; role: GroupRole }[],
 ): Promise<ClosedGroup> {
   return apiRequest<ClosedGroup>('/v1/shared-access/groups', {
     method: 'POST',
@@ -192,24 +203,24 @@ export function rejectAction(primaryAddress: string, actionId: number, reason: s
 export function proposeAddMember(
   primaryAddress: string,
   groupId: number,
-  address: string,
+  username: string,
   role: GroupRole,
   newThreshold: number,
 ): Promise<PendingAction> {
   return apiRequest<PendingAction>(`/v1/shared-access/groups/${groupId}/members`, {
     method: 'POST',
     walletAddress: primaryAddress,
-    body: { address, role, newThreshold },
+    body: { username, role, newThreshold },
   });
 }
 
 export function proposeRemoveMember(
   primaryAddress: string,
   groupId: number,
-  memberAddress: string,
+  username: string,
   newThreshold: number,
 ): Promise<PendingAction> {
-  return apiRequest<PendingAction>(`/v1/shared-access/groups/${groupId}/members/${memberAddress}/remove`, {
+  return apiRequest<PendingAction>(`/v1/shared-access/groups/${groupId}/members/${username}/remove`, {
     method: 'POST',
     walletAddress: primaryAddress,
     body: { newThreshold },

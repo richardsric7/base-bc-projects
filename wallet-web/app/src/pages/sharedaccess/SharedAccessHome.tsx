@@ -143,16 +143,22 @@ function MyWallets() {
 
 function NewGroupForm({ disabled }: { disabled: boolean }) {
   const primaryAddress = useAppSelector((s) => s.wallet.primary.address);
+  const myUsername = useAppSelector((s) => s.auth.username);
   const [name, setName] = useState('');
   const [threshold, setThreshold] = useState('1');
-  const [members, setMembers] = useState<{ address: string; role: GroupRole }[]>([
-    { address: '', role: 'INITIATOR_APPROVER' },
+  // The creator isn't implicitly added as a member server-side (wallet-
+  // backend's CreateGroup only trusts/records who's actually listed) -
+  // pre-fill the first row with the caller's own username, editable like
+  // any other row, so an easy-to-miss step doesn't lock the creator out
+  // of their own new group.
+  const [members, setMembers] = useState<{ username: string; role: GroupRole }[]>([
+    { username: myUsername ?? '', role: 'APPROVER' },
   ]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [created, setCreated] = useState<number | null>(null);
 
-  const updateMember = (i: number, patch: Partial<{ address: string; role: GroupRole }>) => {
+  const updateMember = (i: number, patch: Partial<{ username: string; role: GroupRole }>) => {
     setMembers((prev) => prev.map((m, idx) => (idx === i ? { ...m, ...patch } : m)));
   };
 
@@ -166,7 +172,7 @@ function NewGroupForm({ disabled }: { disabled: boolean }) {
         primaryAddress,
         name,
         Number(threshold),
-        members.filter((m) => m.address),
+        members.filter((m) => m.username),
       );
       setCreated(group.id);
     } catch (err) {
@@ -190,18 +196,17 @@ function NewGroupForm({ disabled }: { disabled: boolean }) {
           <div key={i} className="flex gap-2">
             <input
               className="ring-1 ring-gray-200 focus:ring-primary-600 rounded-md flex-1 h-12 px-2"
-              value={m.address}
-              onChange={(e) => updateMember(i, { address: e.target.value })}
-              placeholder="0x..."
+              value={m.username}
+              onChange={(e) => updateMember(i, { username: e.target.value })}
+              placeholder="username"
             />
             <select
               className="ring-1 ring-gray-200 focus:ring-primary-600 rounded-md h-12 px-2"
               value={m.role}
               onChange={(e) => updateMember(i, { role: e.target.value as GroupRole })}
             >
-              <option value="INITIATOR_APPROVER">Initiator + Approver</option>
+              <option value="APPROVER">Approver</option>
               <option value="INITIATOR">Initiator only</option>
-              <option value="APPROVER">Approver only</option>
               <option value="VIEW_ONLY">View only</option>
             </select>
           </div>
@@ -209,7 +214,7 @@ function NewGroupForm({ disabled }: { disabled: boolean }) {
         <button
           type="button"
           className="text-primary-700 text-sm underline"
-          onClick={() => setMembers((prev) => [...prev, { address: '', role: 'APPROVER' }])}
+          onClick={() => setMembers((prev) => [...prev, { username: '', role: 'APPROVER' }])}
         >
           + Add another member
         </button>

@@ -124,11 +124,11 @@ export default function GroupDetail() {
       />
       <ManageMembersSection
         disabled={!isOnline || group.disabled}
-        onAddMember={(address, role, newThreshold) =>
-          proposeAndSelfApprove(() => proposeAddMember(primaryAddress!, id, address, role, newThreshold))
+        onAddMember={(username, role, newThreshold) =>
+          proposeAndSelfApprove(() => proposeAddMember(primaryAddress!, id, username, role, newThreshold))
         }
-        onRemoveMember={(address, newThreshold) =>
-          proposeAndSelfApprove(() => proposeRemoveMember(primaryAddress!, id, address, newThreshold))
+        onRemoveMember={(username, newThreshold) =>
+          proposeAndSelfApprove(() => proposeRemoveMember(primaryAddress!, id, username, newThreshold))
         }
         onChangeThreshold={(newThreshold) =>
           proposeAndSelfApprove(() => proposeChangeThreshold(primaryAddress!, id, newThreshold))
@@ -193,14 +193,14 @@ function ManageMembersSection({
   onDisable,
 }: {
   disabled: boolean;
-  onAddMember: (address: string, role: GroupRole, newThreshold: number) => Promise<void>;
-  onRemoveMember: (address: string, newThreshold: number) => Promise<void>;
+  onAddMember: (username: string, role: GroupRole, newThreshold: number) => Promise<void>;
+  onRemoveMember: (username: string, newThreshold: number) => Promise<void>;
   onChangeThreshold: (newThreshold: number) => Promise<void>;
   onDisable: () => Promise<void>;
 }) {
-  const [newAddress, setNewAddress] = useState('');
+  const [newUsername, setNewUsername] = useState('');
   const [newRole, setNewRole] = useState<GroupRole>('APPROVER');
-  const [removeAddress, setRemoveAddress] = useState('');
+  const [removeUsername, setRemoveUsername] = useState('');
   const [threshold, setThreshold] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -217,7 +217,7 @@ function ManageMembersSection({
     <div className="space-y-4">
       <p className="font-montserratSemiBold text-primary-800">Manage group</p>
       <div className="space-y-2">
-        <TextInput label="Add member address" value={newAddress} onChange={setNewAddress} placeholder="0x..." />
+        <TextInput label="Add member username" value={newUsername} onChange={setNewUsername} placeholder="username" />
         <select
           className="ring-1 ring-gray-200 focus:ring-primary-600 rounded-md w-full h-12 px-2"
           value={newRole}
@@ -225,24 +225,23 @@ function ManageMembersSection({
         >
           <option value="APPROVER">Approver</option>
           <option value="INITIATOR">Initiator</option>
-          <option value="INITIATOR_APPROVER">Initiator + Approver</option>
           <option value="VIEW_ONLY">View only</option>
         </select>
         <TextInput label="New threshold after adding" value={threshold} onChange={setThreshold} placeholder="2" />
         <Button
           type="button"
           label="Propose add member"
-          disabled={disabled || busy || !newAddress || !threshold}
-          onClick={() => run(() => onAddMember(newAddress, newRole, Number(threshold)))}
+          disabled={disabled || busy || !newUsername || !threshold}
+          onClick={() => run(() => onAddMember(newUsername, newRole, Number(threshold)))}
         />
       </div>
       <div className="space-y-2">
-        <TextInput label="Remove member address" value={removeAddress} onChange={setRemoveAddress} placeholder="0x..." />
+        <TextInput label="Remove member username" value={removeUsername} onChange={setRemoveUsername} placeholder="username" />
         <Button
           type="button"
           label="Propose remove member"
-          disabled={disabled || busy || !removeAddress || !threshold}
-          onClick={() => run(() => onRemoveMember(removeAddress, Number(threshold)))}
+          disabled={disabled || busy || !removeUsername || !threshold}
+          onClick={() => run(() => onRemoveMember(removeUsername, Number(threshold)))}
         />
       </div>
       <div className="space-y-2">

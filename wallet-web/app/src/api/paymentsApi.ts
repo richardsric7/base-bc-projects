@@ -11,6 +11,12 @@ import { assertOnline } from '../connectivity/assertOnline';
 export interface ActionProposal {
   actionId: number;
   digestToSign: string;
+  // resolvedAddress is only present on a payment proposal (wallet-backend's
+  // payments.PaymentProposal) - what `destination` actually resolved to,
+  // since it may be an address, username, email, or wallet alias
+  // (users.UserWallet's own doc comment). swapsApi.ts's identically-shaped
+  // proposal has no recipient to resolve, so this is always absent there.
+  resolvedAddress?: string;
 }
 
 export interface PaymentHistoryRecord {

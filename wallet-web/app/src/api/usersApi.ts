@@ -57,6 +57,66 @@ export function deployPrimaryWallet(signerAddress: string): Promise<User> {
   return apiRequest<User>('/v1/users/wallet/deploy', { method: 'POST', walletAddress: signerAddress });
 }
 
+// UserWallet is one entry in the caller's own wallet directory - their
+// primary wallet, and every additional wallet they've registered or
+// created (a sharedaccess group Safe, an imported address, ...). Mirrors
+// wallet-backend's users.UserWallet.
+export interface UserWallet {
+  id: number;
+  userId: number;
+  address: string;
+  tag: string;
+  description: string;
+  walletType: number;
+  // alias is unique across every wallet on the platform - what a payment
+  // or lookup can name this wallet by, alongside address/username/email.
+  alias: string;
+  linkedWalletAddress?: string;
+  isPrimary: boolean;
+  createdAt: string;
+}
+
+// GET /v1/users/wallets (SignatureAuth, self-signed) - the caller's own
+// wallet directory, for a "my wallets" management screen where a Tag/
+// Description/Alias can be edited (see updateWalletMetadata below).
+export function listMyWallets(signerAddress: string): Promise<UserWallet[]> {
+  return apiRequest<UserWallet[]>('/v1/users/wallets', { walletAddress: signerAddress });
+}
+
+// PUT /v1/users/wallets/:address (SignatureAuth, self-signed) - only the
+// wallet's own owner may edit it (enforced server-side against the
+// verified caller, never a body claim). Pass only the fields to change;
+// omitted fields are left as-is.
+export function updateWalletMetadata(
+  signerAddress: string,
+  address: string,
+  updates: { tag?: string; description?: string; alias?: string },
+): Promise<UserWallet> {
+  return apiRequest<UserWallet>(`/v1/users/wallets/${address}`, {
+    method: 'PUT',
+    walletAddress: signerAddress,
+    body: updates,
+  });
+}
+
+// WalletDirectoryEntry previews what a payment recipient identifier
+// (address, username, email, or wallet alias) actually names - the same
+// lookup payments.BuildPaymentTx uses server-side, so a client can show a
+// "sending to X" confirmation before the caller commits to signing.
+export interface WalletDirectoryEntry {
+  address: string;
+  alias: string;
+  tag: string;
+  isPrimary: boolean;
+}
+
+// GET /v1/users/resolve/:identifier (public - no wallet exists yet to
+// authenticate as during onboarding-adjacent flows, and this is a lookup,
+// not an action).
+export function resolveRecipient(identifier: string): Promise<WalletDirectoryEntry> {
+  return apiRequest<WalletDirectoryEntry>(`/v1/users/resolve/${encodeURIComponent(identifier)}`);
+}
+
 // A payment/swap/approve `build` call 404s with this specific message when
 // the primary wallet's Safe hasn't been deployed yet (services.go's
 // GroupWalletExecutor finds no ClosedGroup for it - see
