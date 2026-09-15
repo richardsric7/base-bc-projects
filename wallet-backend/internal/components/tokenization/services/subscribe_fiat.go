@@ -63,6 +63,14 @@ func (s *Service) BuildFiatPurchase(ctx context.Context, buyerUserID, assetID ui
 	if err := s.authorizeHolder(ctx, asset, buyer.Address); err != nil {
 		return nil, err
 	}
+	// See BuildCryptoPurchase's identical call: the fiat-denominated
+	// purchase amount is quoted in this country's internal-balance asset
+	// (PLAN.md §22.4), itself restricted - mirrors upstream's
+	// checkDistributionWalletHasQuoteCurrencyAuthorization. A no-op for a
+	// country with no internal-balance asset deployed.
+	if err := s.AuthorizeInternalBalanceHolder(ctx, asset.AssetCountryLocation, buyer.Address); err != nil {
+		return nil, err
+	}
 
 	distributionKey, err := s.deriveDistributionKey(assetID)
 	if err != nil {

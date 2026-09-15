@@ -24,6 +24,125 @@ func registerAdminRoutes(admin *gin.RouterGroup, svc *services.Service) {
 	admin.POST("/:assetId/acknowledge-fee", acknowledgeFeePayment(svc))
 	admin.PUT("/:assetId/sales-dates", updateSalesDates(svc))
 	admin.DELETE("/:assetId", adminDeleteApplication(svc))
+	admin.POST("/:assetId/authorize-holder", authorizeAssetHolder(svc))
+	admin.POST("/:assetId/deauthorize-holder", deauthorizeAssetHolder(svc))
+	admin.POST("/country-config/:countryCode/internal-balance/deploy", deployInternalBalanceAsset(svc))
+	admin.POST("/country-config/:countryCode/internal-balance/authorize-holder", authorizeInternalBalanceHolder(svc))
+	admin.POST("/country-config/:countryCode/internal-balance/deauthorize-holder", deauthorizeInternalBalanceHolder(svc))
+}
+
+// holderAddressRequest is the shared request body for every
+// authorize/deauthorize admin endpoint below.
+type holderAddressRequest struct {
+	HolderAddress string `json:"holderAddress" binding:"required"`
+}
+
+// authorizeAssetHolder lets an admin authorize a wallet to hold a
+// tokenized asset outside the purchase flow (which already
+// self-authorizes its own buyer) - e.g. a secondary-market recipient,
+// PLAN.md §22.3's previously-flagged gap.
+func authorizeAssetHolder(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		assetID, ok := assetIDParam(c)
+		if !ok {
+			return
+		}
+		var req holderAddressRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			apperrors.Abort(c, apperrors.BadRequest("holderAddress is required"))
+			return
+		}
+		if err := svc.AuthorizeHolder(c.Request.Context(), assetID, req.HolderAddress); err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+// deauthorizeAssetHolder disables a wallet from further holding, sending,
+// or receiving a tokenized asset - the "disabling it from being held"
+// half of the restricted-asset policy (PLAN.md §22.4). The holder's
+// existing balance is untouched.
+func deauthorizeAssetHolder(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		assetID, ok := assetIDParam(c)
+		if !ok {
+			return
+		}
+		var req holderAddressRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			apperrors.Abort(c, apperrors.BadRequest("holderAddress is required"))
+			return
+		}
+		if err := svc.DeauthorizeHolder(c.Request.Context(), assetID, req.HolderAddress); err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+type deployInternalBalanceAssetRequest struct {
+	Name     string `json:"name" binding:"required"`
+	Symbol   string `json:"symbol" binding:"required"`
+	Decimals uint8  `json:"decimals"`
+}
+
+// deployInternalBalanceAsset deploys a country's restricted internal-
+// balance asset (PLAN.md §22.4) - idempotent, returns the existing
+// contract if this country already has one.
+func deployInternalBalanceAsset(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req deployInternalBalanceAssetRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			apperrors.Abort(c, apperrors.BadRequest("name and symbol are required"))
+			return
+		}
+		cfg, err := svc.DeployInternalBalanceAsset(c.Request.Context(), c.Param("countryCode"), req.Name, req.Symbol, req.Decimals)
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, cfg)
+	}
+}
+
+// authorizeInternalBalanceHolder lets an admin manually authorize a
+// wallet to hold a country's internal-balance asset outside the purchase
+// flow (which already self-authorizes the buyer and, at mint time, the
+// distribution wallet).
+func authorizeInternalBalanceHolder(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req holderAddressRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			apperrors.Abort(c, apperrors.BadRequest("holderAddress is required"))
+			return
+		}
+		if err := svc.AuthorizeInternalBalanceHolder(c.Request.Context(), c.Param("countryCode"), req.HolderAddress); err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+// deauthorizeInternalBalanceHolder disables a wallet from further
+// holding a country's internal-balance asset - the "disabling it from
+// being held" half of the policy, applied to this restricted asset too.
+func deauthorizeInternalBalanceHolder(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req holderAddressRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			apperrors.Abort(c, apperrors.BadRequest("holderAddress is required"))
+			return
+		}
+		if err := svc.DeauthorizeInternalBalanceHolder(c.Request.Context(), c.Param("countryCode"), req.HolderAddress); err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
 }
 
 type vetApplicationRequest struct {

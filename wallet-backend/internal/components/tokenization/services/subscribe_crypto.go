@@ -119,6 +119,15 @@ func (s *Service) BuildCryptoPurchase(ctx context.Context, buyerUserID uint, ass
 	if err := s.authorizeHolder(ctx, asset, buyer.Address); err != nil {
 		return nil, err
 	}
+	// The internal-balance/quote-currency asset the buyer's payment is
+	// denominated in is itself restricted (PLAN.md §22.4, internal_balance.go)
+	// - mirrors upstream's checkDistributionWalletHasQuoteCurrencyAuthorization
+	// gate, extended to the buyer the same way tokenized-asset
+	// authorization was. A no-op for a country with no internal-balance
+	// asset deployed.
+	if err := s.AuthorizeInternalBalanceHolder(ctx, asset.AssetCountryLocation, buyer.Address); err != nil {
+		return nil, err
+	}
 
 	data, err := contracts.EncodeBuy(toBaseUnits(quantity, asset.AssetDecimals))
 	if err != nil {

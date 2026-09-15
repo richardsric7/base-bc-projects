@@ -157,6 +157,69 @@ func TestMintFlow_ExecutesOnceThresholdReached(t *testing.T) {
 	}
 }
 
+// TestMintFlow_AuthorizesDistributionWalletOnInternalBalanceAssetWhenDeployed
+// verifies executeMint restores upstream's
+// checkDistributionWalletHasQuoteCurrencyAuthorization gate (PLAN.md
+// §22.4): once a country has a deployed internal-balance asset, minting
+// an asset in that country authorizes the new distribution wallet to
+// hold it.
+func TestMintFlow_AuthorizesDistributionWalletOnInternalBalanceAssetWhenDeployed(t *testing.T) {
+	blockchain := &fakeBlockchain{}
+	svc, db := newTestService(t, blockchain)
+	seedCountryAndCurrencies(t, db)
+	if _, err := svc.DeployInternalBalanceAsset(context.Background(), "NG", "Internal NGN Balance", "iNGN", 6); err != nil {
+		t.Fatalf("deploy internal balance asset: %v", err)
+	}
+	blockchain.deployCount = 0
+
+	user := createTestUser(t, db, "alice", true)
+	if err := db.Create(&models.TokenizationMintingInitiator{UserID: user.ID}).Error; err != nil {
+		t.Fatalf("seed minting initiator: %v", err)
+	}
+	asset, err := svc.SubmitApplication(user.ID, validDraftAsset())
+	if err != nil {
+		t.Fatalf("SubmitApplication returned error: %v", err)
+	}
+
+	addr1, key1 := randomAddress(t)
+	addr2, key2 := randomAddress(t)
+	addr3, _ := randomAddress(t)
+	addr4, _ := randomAddress(t)
+	asset.Status = models.StatusFeeAcknowledged
+	asset.MintingApprovers = addr1 + "," + addr2 + "," + addr3 + "," + addr4
+	if err := db.Save(asset).Error; err != nil {
+		t.Fatalf("advance status: %v", err)
+	}
+
+	approval, err := svc.RequestMint(user.ID, asset.ID)
+	if err != nil {
+		t.Fatalf("RequestMint returned error: %v", err)
+	}
+	message, err := svc.CanonicalMintMessage(approval.ID)
+	if err != nil {
+		t.Fatalf("CanonicalMintMessage returned error: %v", err)
+	}
+
+	ctx := context.Background()
+	if _, err := svc.SignMintApproval(ctx, approval.ID, addr1, sign(t, key1, message)); err != nil {
+		t.Fatalf("first signoff returned error: %v", err)
+	}
+	if _, err := svc.SignMintApproval(ctx, approval.ID, addr2, sign(t, key2, message)); err != nil {
+		t.Fatalf("second signoff returned error: %v", err)
+	}
+
+	var mintedAsset models.TokenizedAsset
+	if err := db.First(&mintedAsset, asset.ID).Error; err != nil {
+		t.Fatalf("reload asset: %v", err)
+	}
+	if mintedAsset.DistributionAddress == nil {
+		t.Fatal("expected a distribution address to be set")
+	}
+	if !authorizeCallFor(t, blockchain, *mintedAsset.DistributionAddress) {
+		t.Fatal("expected the distribution wallet to be authorized on the internal balance asset at mint time")
+	}
+}
+
 func TestSignMintApproval_RejectsUnauthorizedSigner(t *testing.T) {
 	svc, db := newTestService(t, &fakeBlockchain{})
 	seedCountryAndCurrencies(t, db)

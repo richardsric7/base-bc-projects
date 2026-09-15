@@ -174,6 +174,85 @@ func TestBuildCryptoPurchase_AuthorizesBuyerOnChainBeforePurchase(t *testing.T) 
 	}
 }
 
+func TestBuildCryptoPurchase_AuthorizesBuyerOnInternalBalanceAssetWhenDeployed(t *testing.T) {
+	fake := &fakeBlockchain{}
+	svc, db := newTestService(t, fake)
+	seedCountryAndCurrencies(t, db)
+	buyer := createTestUser(t, db, "buyer", true)
+	if _, err := svc.DeployInternalBalanceAsset(context.Background(), "NG", "Internal NGN Balance", "iNGN", 6); err != nil {
+		t.Fatalf("deploy internal balance asset: %v", err)
+	}
+	fake.deployCount = 0 // isolate the purchase flow's own on-chain calls below
+
+	saleAddr := "0xsale00000000000000000000000000000000000"
+	issuerAddr := "0xissuer0000000000000000000000000000000000"
+	asset := models.TokenizedAsset{
+		Status:                models.StatusPrimarySaleActive,
+		OfferingType:          models.OfferingPublic,
+		AssetQuoteCurrency:    "USDC",
+		PricePerToken:         "2",
+		AssetDecimals:         2,
+		SaleContractAddress:   &saleAddr,
+		IssuerContractAddress: &issuerAddr,
+	}
+	if err := db.Create(&asset).Error; err != nil {
+		t.Fatalf("seed asset: %v", err)
+	}
+
+	svc.SharedAccess = readyGroupWalletExecutor("0xtxhash")
+	if _, err := svc.BuildCryptoPurchase(context.Background(), buyer.ID, asset.ID, decimal.NewFromInt(10), testSigner); err != nil {
+		t.Fatalf("BuildCryptoPurchase returned error: %v", err)
+	}
+	if !authorizeCallFor(t, fake, buyer.Address) {
+		t.Fatal("expected the buyer to be authorized on the tokenized asset")
+	}
+	// authorizeCallFor only checks the call was made somewhere among
+	// signedData - since the tokenized-asset and internal-balance
+	// contracts are different addresses, seeing exactly 2 signed calls
+	// (rather than 1) is what actually proves the internal-balance
+	// authorization fired too.
+	if len(fake.signedData) != 2 {
+		t.Fatalf("expected 2 authorize calls (tokenized asset + internal balance asset), got %d", len(fake.signedData))
+	}
+}
+
+func TestBuildFiatPurchase_AuthorizesBuyerOnInternalBalanceAssetWhenDeployed(t *testing.T) {
+	fake := &fakeBlockchain{}
+	svc, db := newTestService(t, fake)
+	seedCountryAndCurrencies(t, db)
+	buyer := createTestUser(t, db, "buyer", true)
+	if _, err := svc.DeployInternalBalanceAsset(context.Background(), "NG", "Internal NGN Balance", "iNGN", 6); err != nil {
+		t.Fatalf("deploy internal balance asset: %v", err)
+	}
+	fake.deployCount = 0
+
+	distributionAddr := "0xdist0000000000000000000000000000000000"
+	issuerAddr := "0xissuer00000000000000000000000000000000"
+	asset := models.TokenizedAsset{
+		Status:                models.StatusPrimarySaleActive,
+		OfferingType:          models.OfferingPublic,
+		AssetQuoteCurrency:    "USDC",
+		PricePerToken:         "2",
+		AssetDecimals:         2,
+		DistributionAddress:   &distributionAddr,
+		IssuerContractAddress: &issuerAddr,
+	}
+	if err := db.Create(&asset).Error; err != nil {
+		t.Fatalf("seed asset: %v", err)
+	}
+	svc.CreateFiatInvoice = func(string, string, string, string, float64, string, *string) error { return nil }
+
+	if _, err := svc.BuildFiatPurchase(context.Background(), buyer.ID, asset.ID, decimal.NewFromInt(5), "invoice-1", "NGN"); err != nil {
+		t.Fatalf("BuildFiatPurchase returned error: %v", err)
+	}
+	if len(fake.signedData) != 3 {
+		// tokenized-asset authorize + internal-balance authorize + the
+		// distribution-key transfer itself (SignTx also appends to
+		// signedData in this fake).
+		t.Fatalf("expected 3 signed calls (2 authorizes + the transfer), got %d", len(fake.signedData))
+	}
+}
+
 func TestBuildFiatPurchase_RequiresBuyerKYC(t *testing.T) {
 	fake := &fakeBlockchain{}
 	svc, db := newTestService(t, fake)

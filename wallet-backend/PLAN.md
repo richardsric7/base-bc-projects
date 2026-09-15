@@ -4271,3 +4271,62 @@ including new tests `TestEncodeAuthorize`/`TestEncodeDeauthorize`
 `TestBuildFiatPurchase_AuthorizesBuyerOnChainBeforeInvoice`
 (`tokenization/services`, asserting the exact encoded `authorize` call
 appears among the fake blockchain's signed transactions).
+
+**22.4 The internal-balance/quote-currency asset is restricted too - and
+§22.3's gap is closed.** A further direct correction from the person
+driving this port: every restricted asset in this system must use the
+identical B20/restricted-ERC-20 mechanism, and that includes the
+internal-balance/quote-currency asset upstream's `InternalBalanceTokenCode`/
+`InternalTokenIssuer` pair represented (models' `reference_data.go` had
+documented this as entirely dropped - "nothing replaces them" - since the
+Stellar multi-hop path-payment routing it enabled has no Base equivalent
+worth building). That routing genuinely stays dropped: a purchase still
+settles in one direct ERC-20 transfer/call, exactly as before. What's
+restored is upstream's own `checkDistributionWalletHasQuoteCurrencyAuthorization`
+gate - the requirement that a wallet be authorized before it may hold this
+asset at all, "the logic of allowing it to be held and disabling it from
+being held," in the requester's own words.
+
+- **Model**: `TokenizationCountryConfig.InternalBalanceContractAddress
+  *string` (`tokenization/models/reference_data.go`) - nil until deployed
+  for that country, the same "nothing to authorize against yet" posture
+  an un-minted `TokenizedAsset` has toward its own gate.
+- **New file `tokenization/services/internal_balance.go`**:
+  `deriveInternalBalanceIssuerKey(countryCode)` (a country-scoped sibling
+  of `deriveIssuerKey`); `DeployInternalBalanceAsset(ctx, countryCode,
+  name, symbol, decimals)` - deploys via the exact same
+  `contracts.TokenizedAssetDeployData` tokenized assets use (literally the
+  same B20 contract type, per the requester's explicit instruction that
+  every restricted asset share one mechanism), idempotent per country;
+  `AuthorizeInternalBalanceHolder`/`DeauthorizeInternalBalanceHolder`,
+  mirroring `authorizeHolder`'s on-chain call shape exactly.
+- **Purchase-flow wiring**: `BuildCryptoPurchase`/`BuildFiatPurchase` each
+  gained one more call, right after the existing tokenized-asset
+  `authorizeHolder`: `s.AuthorizeInternalBalanceHolder(ctx,
+  asset.AssetCountryLocation, buyer.Address)` - a no-op if that country has
+  no internal-balance asset deployed. `executeMint` (`minting.go`) does
+  the same for the newly-derived **distribution** wallet, once, at mint
+  time rather than re-checking on every purchase - this is the literal
+  restoration of upstream's distribution-wallet-scoped check, extended to
+  the buyer the same way tokenized-asset authorization already was.
+- **§22.3's gap, closed**: `EncodeDeauthorize` existed since §22.1 but
+  nothing had ever called it for a tokenized asset either - a real gap,
+  not a deliberate omission. `Service.DeauthorizeHolder`/`AuthorizeHolder`
+  (exported, unlike the purchase-flow-only unexported `authorizeHolder`)
+  now exist for exactly the case §22.3 flagged: an admin authorizing a
+  non-purchasing secondary-market counterparty, or disabling a holder.
+  Wired to new admin routes (`controllers/admin.go`):
+  `POST /v1/admin/tokenization/:assetId/authorize-holder`,
+  `.../deauthorize-holder`, and the internal-balance-asset equivalents
+  under `/v1/admin/tokenization/country-config/:countryCode/internal-balance/
+  {deploy,authorize-holder,deauthorize-holder}`.
+
+Verified: `go build ./...`, `go vet ./...`, and `gofmt -l .` all clean.
+New tests in `tokenization/services`:
+`TestDeployInternalBalanceAsset_{DeploysAndRecordsContract,
+IdempotentOnceDeployed,UnknownCountry}`,
+`Test{Authorize,Deauthorize}InternalBalanceHolder_*`,
+`TestBuild{Crypto,Fiat}Purchase_AuthorizesBuyerOnInternalBalanceAssetWhenDeployed`
+(asserting exactly 2, resp. 3, signed on-chain calls once an
+internal-balance asset is deployed for the purchase's country), and
+`TestMintFlow_AuthorizesDistributionWalletOnInternalBalanceAssetWhenDeployed`.

@@ -165,6 +165,49 @@ func (s *Service) authorizeHolder(ctx context.Context, asset *models.TokenizedAs
 	return nil
 }
 
+// DeauthorizeHolder revokes holderAddress's ability to further hold,
+// send, or receive asset's restricted token on-chain
+// (TokenizedAsset.deauthorize) - their existing balance is untouched,
+// there is no seize/clawback. Exported (unlike authorizeHolder) since
+// this is an explicit admin action rather than something a purchase flow
+// triggers automatically - see controllers/admin.go. Closes PLAN.md
+// §22.3's previously-flagged gap: EncodeDeauthorize existed since §22.1
+// but nothing ever called it.
+func (s *Service) DeauthorizeHolder(ctx context.Context, assetID uint, holderAddress string) error {
+	asset, err := s.getAsset(assetID)
+	if err != nil {
+		return err
+	}
+	if asset.IssuerContractAddress == nil {
+		return apperrors.Conflict("this asset has not been minted yet")
+	}
+	issuerKey, err := s.deriveIssuerKey(asset.ID)
+	if err != nil {
+		return err
+	}
+	data, err := contracts.EncodeDeauthorize(holderAddress)
+	if err != nil {
+		return apperrors.Internal("failed to encode deauthorize call")
+	}
+	assetAddr := common.HexToAddress(*asset.IssuerContractAddress)
+	if _, err := s.Blockchain.SignAndSubmitTx(ctx, issuerKey, &assetAddr, big.NewInt(0), data, nil); err != nil {
+		return apperrors.Internal("failed to deauthorize wallet from holding this asset: " + err.Error())
+	}
+	return nil
+}
+
+// AuthorizeHolder is the exported form of authorizeHolder, for the admin
+// path that authorizes a non-purchasing counterparty (e.g. a secondary-
+// market recipient) to hold asset - PLAN.md §22.3's previously-flagged
+// gap. Purchase flows still call the unexported authorizeHolder directly.
+func (s *Service) AuthorizeHolder(ctx context.Context, assetID uint, holderAddress string) error {
+	asset, err := s.getAsset(assetID)
+	if err != nil {
+		return err
+	}
+	return s.authorizeHolder(ctx, asset, holderAddress)
+}
+
 func (s *Service) getUserByID(userID uint) (*usersModels.User, error) {
 	var user usersModels.User
 	if err := s.DB.First(&user, userID).Error; err != nil {

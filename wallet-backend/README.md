@@ -517,12 +517,17 @@ available at `GET /v1/tokenization/public` (unauthenticated subset) and
 `GET /v1/tokenization/reference` (full, authed).
 
 **Deliberately dropped or simplified versus the original** (all documented
-in `PLAN.md` §4.9): no synthetic intermediate "internal balance" quote
-currency or multi-hop DEX pathfinding (a purchase settles in exactly the
-asset's configured quote currency); no trustline/authorization-flag
-concept anywhere; the dormant proceed/payout-schedule engine is ported as
-schema only, never wired to a route or worker, matching its actual
-(non-functional) state upstream; the partner-API passthrough
+in `PLAN.md` §4.9/§22.4): Stellar's multi-hop path-payment routing through
+a synthetic intermediate "internal balance" quote-currency asset has no
+Base equivalent worth building (a purchase settles in exactly the asset's
+configured quote currency, in one direct ERC-20 transfer/call). The
+restricted-holding requirement upstream enforced on that asset IS
+restored, though, as a genuine B20/restricted-ERC-20 asset per country
+(`internal_balance.go`) - every tokenized asset, and this internal-balance
+asset alike, uses the same `TokenizedAsset.sol` `isAuthorized` allow-list;
+the dormant proceed/payout-schedule engine is ported as schema only, never
+wired to a route or worker, matching its actual (non-functional) state
+upstream; the partner-API passthrough
 (`/v1/trovo-api/assets/...`) is deferred to Phase 11 alongside its API-key
 middleware, since the `servicelinks` component it belongs to doesn't exist
 yet.

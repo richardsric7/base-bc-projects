@@ -119,8 +119,15 @@ type TokenizationPublicAssetAllowedCountry struct {
 
 // TokenizationCountryConfig holds the fee/compliance settings that are
 // genuinely per-country. Upstream's InternalBalanceTokenCode/
-// InternalTokenIssuer fields are dropped, not ported - see PLAN.md §4.9's
-// "Quote currency" note for why nothing replaces them.
+// InternalTokenIssuer pair (a Stellar asset code+issuer identifying the
+// synthetic intermediate quote-currency asset Stellar's path-payment
+// engine routed a purchase through) is not ported as-is - PLAN.md §4.9's
+// "Quote currency" note explains why the multi-hop path-payment routing
+// itself has no Base equivalent worth building (direct ERC-20 transfers
+// already do the job in one hop). What IS restored, per PLAN.md §22.4:
+// the restricted-holding requirement upstream enforced on that asset
+// (`checkDistributionWalletHasQuoteCurrencyAuthorization`) - see
+// InternalBalanceContractAddress below.
 type TokenizationCountryConfig struct {
 	CountryCode                              string `gorm:"primaryKey;size:2" json:"countryCode"`
 	SECTokenizationFeePercent                string `json:"secTokenizationFeePercent"`
@@ -133,6 +140,16 @@ type TokenizationCountryConfig struct {
 	TokenizationApplicationFee               string `json:"tokenizationApplicationFee"`
 	TokenizationApplicationFeeAsset          string `gorm:"default:TROV" json:"tokenizationApplicationFeeAsset"` // a CuratedToken symbol
 	VATPercent                               string `json:"vatPercent"`
+	// InternalBalanceContractAddress is this country's deployed internal-
+	// balance restricted asset - the same TokenizedAsset.sol contract
+	// tokenized assets themselves use (PLAN.md §22.1's isAuthorized
+	// allow-list), replacing upstream's InternalBalanceTokenCode/
+	// InternalTokenIssuer pair. Nil until DeployInternalBalanceAsset is
+	// called for this country (services/internal_balance.go); a country
+	// with no deployed internal-balance asset simply carries no
+	// restriction on it yet, the same posture an un-minted TokenizedAsset
+	// has toward its own authorization gate.
+	InternalBalanceContractAddress *string `json:"internalBalanceContractAddress,omitempty"`
 }
 
 // TokenizationMintingApprover and TokenizationMintingInitiator are the

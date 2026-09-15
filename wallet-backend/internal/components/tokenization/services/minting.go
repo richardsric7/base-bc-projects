@@ -170,6 +170,17 @@ func (s *Service) executeMint(ctx context.Context, approval *models.MintApproval
 	issuerAddr := crypto.PubkeyToAddress(issuerKey.PublicKey).Hex()
 	distributionAddr := crypto.PubkeyToAddress(distributionKey.PublicKey).Hex()
 
+	// Upstream's checkDistributionWalletHasQuoteCurrencyAuthorization
+	// gated a purchase on the distribution wallet already being authorized
+	// to hold the internal-balance/quote-currency asset - authorizing it
+	// once here at mint time (rather than re-checking on every purchase)
+	// matches how authorizeHolder itself is called once per new holder,
+	// not once per transfer. A no-op if this country has no internal-
+	// balance asset deployed (internal_balance.go, PLAN.md §22.4).
+	if err := s.AuthorizeInternalBalanceHolder(ctx, asset.AssetCountryLocation, distributionAddr); err != nil {
+		return err
+	}
+
 	quoteToken, err := s.curatedToken(asset.AssetQuoteCurrency)
 	if err != nil {
 		return err
