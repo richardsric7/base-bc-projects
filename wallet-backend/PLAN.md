@@ -618,28 +618,34 @@ is only the handful of fields that named a Stellar primitive:
 | `IssuingWalletPublicKey` (a Stellar issuer account) | `IssuerContractAddress` (the deployed `TokenizedAsset.sol` address) | Base's issuer is a contract, not an account — §2. |
 | `MarketMakingWallet`/`WalletToHoldAssetsNotForSale` | `DistributionAddress` (a `cryptoutil.DeriveKey`-derived per-asset key holding un-sold supply and signing fiat-purchase transfers) | Same per-asset-derived-key pattern used everywhere else in this port. |
 | (no equivalent — Stellar's `ManageSellOffer` *was* the sale) | `SaleContractAddress` (the deployed `Sale.sol` address) | The atomic buy() this port already built in Phase 8. |
-| `AssetQuoteCurrency` + resolving a Stellar issuer via `CountryConfig.InternalBalanceTokenCode/InternalTokenIssuer` | `AssetQuoteCurrency` (a `CuratedToken` symbol, resolved directly — no separate issuer lookup) | See "Quote currency" below. |
+| `AssetQuoteCurrency` + resolving a Stellar issuer via `CountryConfig.InternalBalanceTokenCode/InternalTokenIssuer` | `AssetQuoteCurrency` (a `CuratedToken` symbol, resolved directly — no separate issuer lookup) + `CountryConfig.InternalBalanceAssetCode/InternalBalanceContractAddress` (§22.4 — see "Quote currency" below, corrected) | See "Quote currency" below. |
 | `ClosedGroupID` → a tokenization-only `ClosedGroup` | `ClosedGroupID` → `sharedaccess.ClosedGroup{Purpose: PRIVATE_OFFERING}` (§4.2, already built) | One table for both purposes rather than a parallel one. |
-| `PostTokenizationTrustlineCandidate` + its worker | dropped entirely | No trustline/opt-in concept on Base — §2. |
+| `PostTokenizationTrustlineCandidate` + its worker | dropped entirely | Upstream's own async request/approve trustline workflow (a buyer submits `ChangeTrust`, then waits for the issuer to separately authorize it later) has no Base equivalent even after §22.4's correction: authorization here is instant, backend-controlled, and bundled synchronously into the purchase call itself (`authorizeHolder`/`AuthorizeInternalBalanceHolder`) - there is no asynchronous request to queue candidates for in the first place. This is a genuinely dropped *mechanism* (an async workflow made obsolete by a synchronous one), not a dropped *field* - distinct from §22.4's correction, which restored fields that really had no substitute yet. |
 
-**Quote currency — simplified, not just substituted.** Upstream resolves a
-purchase's settlement currency through a `CountryConfig`-scoped "internal
-balance token" (a synthetic intermediate Stellar asset, 1:1-minted per
-purchase, existing only to let Stellar's path-payment engine route
-`CNGN → NGN → AssetCode` in one atomic transaction — see
-`TOKENIZATION_PLAN.md` upstream) plus a "trustline authorization required"
-flag check with no ERC-20 equivalent. None of this exists to solve a
-problem Base has: an ERC-20 holder needs no opt-in, so there is nothing to
-authorize, and a purchase settles in exactly the token the asset is quoted
-in — no intermediate currency, no multi-hop pathfinding. `AssetQuoteCurrency`
-is simply a `CuratedToken` symbol (e.g. `"USDC"`); a buyer who holds a
-different token swaps into it beforehand via the already-generic
-`internal/components/swaps` component rather than the purchase transaction
-doing an implicit conversion. `CountryConfig` keeps only the fee/compliance
-fields that are genuinely per-country (SEC fee rates, VAT, application fee,
-minimum-balance-to-apply); `InternalBalanceTokenCode`/`InternalTokenIssuer`
-and `checkDistributionWalletHasQuoteCurrencyAuthorization` are dropped, not
-ported — documented here as a deliberate simplification, not an oversight.
+**Quote currency — simplified, not just substituted; corrected by §22.4.**
+Upstream resolves a purchase's settlement currency through a
+`CountryConfig`-scoped "internal balance token" (a synthetic intermediate
+Stellar asset, 1:1-minted per purchase, existing only to let Stellar's
+path-payment engine route `CNGN → NGN → AssetCode` in one atomic
+transaction — see `TOKENIZATION_PLAN.md` upstream) plus a "trustline
+authorization required" flag check. The multi-hop *routing* genuinely has
+no Base equivalent worth building: an ERC-20 holder needs no opt-in to
+receive a transfer, and a purchase settles in exactly the token the asset
+is quoted in — no intermediate currency, no multi-hop pathfinding.
+`AssetQuoteCurrency` is simply a `CuratedToken` symbol (e.g. `"USDC"`); a
+buyer who holds a different token swaps into it beforehand via the
+already-generic `internal/components/swaps` component rather than the
+purchase transaction doing an implicit conversion. `CountryConfig` keeps
+the fee/compliance fields that are genuinely per-country (SEC fee rates,
+VAT, application fee, minimum-balance-to-apply) — **but, per §22.4, the
+restricted-holding half of `InternalBalanceTokenCode`/`InternalTokenIssuer`
+and `checkDistributionWalletHasQuoteCurrencyAuthorization` is NOT dropped**:
+this section originally said it was, before a direct correction from the
+person driving this port. It is restored as
+`InternalBalanceAssetCode`/`InternalBalanceContractAddress` - see §22.4 for
+the full design; treat this paragraph's "dropped" framing above as
+superseded by that section, kept here only so the reasoning for what
+*genuinely* has no Base equivalent (the routing) isn't lost.
 
 **Minting.** Two independent gates port directly: a global
 `MintingApprover`/`MintingInitiator` staff allow-list (who may call the
