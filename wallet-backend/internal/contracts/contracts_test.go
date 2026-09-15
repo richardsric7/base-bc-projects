@@ -71,6 +71,50 @@ func TestEncodeMint(t *testing.T) {
 	}
 }
 
+func TestEncodeAuthorize(t *testing.T) {
+	account := "0x0000000000000000000000000000000000aabb"
+	data, err := EncodeAuthorize(account)
+	if err != nil {
+		t.Fatalf("EncodeAuthorize returned error: %v", err)
+	}
+	method, err := TokenizedAssetABI.MethodById(data[:4])
+	if err != nil {
+		t.Fatalf("failed to resolve method by selector: %v", err)
+	}
+	if method.Name != "authorize" {
+		t.Fatalf("expected method 'authorize', got %q", method.Name)
+	}
+	unpacked, err := method.Inputs.Unpack(data[4:])
+	if err != nil {
+		t.Fatalf("failed to unpack authorize args: %v", err)
+	}
+	if unpacked[0].(common.Address) != common.HexToAddress(account) {
+		t.Fatalf("unexpected account: %+v", unpacked[0])
+	}
+}
+
+func TestEncodeDeauthorize(t *testing.T) {
+	account := "0x0000000000000000000000000000000000ccdd"
+	data, err := EncodeDeauthorize(account)
+	if err != nil {
+		t.Fatalf("EncodeDeauthorize returned error: %v", err)
+	}
+	method, err := TokenizedAssetABI.MethodById(data[:4])
+	if err != nil {
+		t.Fatalf("failed to resolve method by selector: %v", err)
+	}
+	if method.Name != "deauthorize" {
+		t.Fatalf("expected method 'deauthorize', got %q", method.Name)
+	}
+	unpacked, err := method.Inputs.Unpack(data[4:])
+	if err != nil {
+		t.Fatalf("failed to unpack deauthorize args: %v", err)
+	}
+	if unpacked[0].(common.Address) != common.HexToAddress(account) {
+		t.Fatalf("unexpected account: %+v", unpacked[0])
+	}
+}
+
 func TestEncodeBurn(t *testing.T) {
 	amount := big.NewInt(500)
 	data, err := EncodeBurn(amount)

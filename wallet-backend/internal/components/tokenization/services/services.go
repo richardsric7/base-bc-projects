@@ -24,6 +24,7 @@ import (
 	sharedaccessModels "wallet-backend/internal/components/sharedaccess/models"
 	"wallet-backend/internal/components/tokenization/models"
 	usersModels "wallet-backend/internal/components/users/models"
+	"wallet-backend/internal/contracts"
 	"wallet-backend/internal/cryptoutil"
 	"wallet-backend/internal/network"
 	"wallet-backend/internal/storage"
@@ -120,6 +121,48 @@ func (s *Service) deriveDistributionKey(assetID uint) (*ecdsa.PrivateKey, error)
 		return nil, apperrors.Internal("failed to derive the asset's distribution key")
 	}
 	return key, nil
+}
+
+// requireBuyerKYC gates a purchase on the buyer's own KYC status - the
+// original's SubscribeToTokenizedAsset checked exactly this
+// (`walletOwner.KYCVerified == 0` -> "has not passed KYC to purchase this
+// tokenized asset"), a check this port's own purchase paths had never
+// carried over until now.
+func (s *Service) requireBuyerKYC(buyer *usersModels.User) error {
+	if buyer.KYCVerifiedLevel == 0 {
+		return apperrors.Forbidden("you must pass KYC verification before purchasing a tokenized asset")
+	}
+	return nil
+}
+
+// authorizeHolder authorizes buyerAddress to hold, send, and receive
+// asset's restricted token on-chain (TokenizedAsset.authorize, see that
+// contract's own doc comment) - called with the asset's per-asset issuer
+// key, the only address the contract accepts this call from. Every
+// tokenized asset is a restricted security: a wallet may never hold,
+// send, or receive one without this authorization, mirroring the
+// original's own issuer-authorized-Stellar-trustline requirement.
+// Callers must check requireBuyerKYC first - this call itself performs
+// no compliance check of its own, matching the contract's separation
+// between on-chain policy enforcement (this) and off-chain compliance
+// decision-making (the backend, immediately before calling this).
+func (s *Service) authorizeHolder(ctx context.Context, asset *models.TokenizedAsset, holderAddress string) error {
+	if asset.IssuerContractAddress == nil {
+		return apperrors.Conflict("this asset has not been minted yet")
+	}
+	issuerKey, err := s.deriveIssuerKey(asset.ID)
+	if err != nil {
+		return err
+	}
+	data, err := contracts.EncodeAuthorize(holderAddress)
+	if err != nil {
+		return apperrors.Internal("failed to encode authorize call")
+	}
+	assetAddr := common.HexToAddress(*asset.IssuerContractAddress)
+	if _, err := s.Blockchain.SignAndSubmitTx(ctx, issuerKey, &assetAddr, big.NewInt(0), data, nil); err != nil {
+		return apperrors.Internal("failed to authorize wallet to hold this asset: " + err.Error())
+	}
+	return nil
 }
 
 func (s *Service) getUserByID(userID uint) (*usersModels.User, error) {

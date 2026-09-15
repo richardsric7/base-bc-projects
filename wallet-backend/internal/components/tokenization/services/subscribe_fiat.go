@@ -48,7 +48,19 @@ func (s *Service) BuildFiatPurchase(ctx context.Context, buyerUserID, assetID ui
 	if err != nil {
 		return nil, err
 	}
+	if err := s.requireBuyerKYC(buyer); err != nil {
+		return nil, err
+	}
 	if err := s.enforceOfferingAccess(asset, buyer.Address); err != nil {
+		return nil, err
+	}
+	// See BuildCryptoPurchase's identical call for why: the buyer's wallet
+	// must be authorized to hold this restricted asset before the
+	// distribution-key transfer below can ever land (it's pre-signed now
+	// but only submitted once payment clears - authorizing immediately,
+	// rather than waiting for settlement, means it's already true well
+	// before that submission happens).
+	if err := s.authorizeHolder(ctx, asset, buyer.Address); err != nil {
 		return nil, err
 	}
 

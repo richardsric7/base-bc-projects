@@ -4205,3 +4205,69 @@ module (new tests: `TestResolveMemberAddress_*`,
 `TestBuildPaymentTx_Success` fixed by wiring a fake `RecipientResolver`
 into its test setup, a break introduced earlier in this same work by
 making `BuildPaymentTx` fail closed on a nil `Recipients`).
+
+## 22. Restricted-asset correction: on-chain holder authorization + the missing buyer-KYC gate
+
+A direct correction from the person driving this port: every tokenized
+asset is a restricted security, and this was under-built in two ways -
+`TokenizedAsset.sol` had no on-chain holding/transfer restriction at all
+(§4.9/§8's own README documented this as a deliberate simplification,
+now reversed), and neither purchase path ever checked the buyer's own
+KYC status, a real gap relative to the original's
+`SubscribeToTokenizedAsset` (`walletOwner.KYCVerified == 0` → forbidden).
+
+**22.1 On-chain allow-list.** `TokenizedAsset.sol` gains
+`isAuthorized(address) → bool`, `authorize`/`deauthorize` (both
+`onlyOwner` - the asset's per-asset issuer key), and a
+`_beforeTokenTransfer` override requiring both `from` and `to` already
+authorized on any ordinary transfer. `mint` auto-authorizes its
+recipient rather than requiring a separate call first - this is
+deliberate, not an oversight: it reproduces the original's own
+subscription flow, where a Stellar `ChangeTrust` + `SetTrustLineFlags`
+authorization was bundled into the same transaction as the balance-
+granting operation, rather than a two-step "authorize, then separately
+fund" dance. Recompiled with the exact toolchain `solidity/README.md`
+already documented (solc 0.8.24, `@openzeppelin/contracts` 4.9.6,
+optimizer 200 runs) - `Sale.sol`/`RecoveryGuard.sol`'s artifacts are
+byte-for-byte unchanged, confirmed by diffing the recompiled output
+against the checked-in ones before overwriting only `TokenizedAsset`'s.
+
+**22.2 Purchase-time authorization + KYC gate.** New
+`Service.authorizeHolder(ctx, asset, holderAddress)`
+(`tokenization/services/services.go`) submits `TokenizedAsset.authorize`
+using the asset's own issuer key (`contracts.EncodeAuthorize`/
+`EncodeDeauthorize` added alongside the existing `EncodeMint`/
+`EncodeBurn`). New `Service.requireBuyerKYC` gates on
+`buyer.KYCVerifiedLevel == 0`. Both are called, KYC first, from
+`BuildCryptoPurchase` and `BuildFiatPurchase` right after
+`enforceOfferingAccess` - authorizing immediately once compliance is
+confirmed, before the purchase transaction is even proposed/signed, so
+the transfer that eventually executes (a user-signed `Sale.buy()` for
+crypto, a pre-signed distribution-key transfer submitted later once fiat
+payment clears) never reverts for lack of authorization. Distribution/
+sale-contract/fee-wallet addresses need no separate authorization call
+of their own - §22.1's mint-auto-authorizes behavior already covers
+every address `executeMint` mints to.
+
+**22.3 What's deliberately not covered.** A secondary-market trade
+(Phase 7's market component) moving a tokenized asset to a wallet that
+never went through a primary-sale purchase will revert on-chain if that
+wallet isn't separately authorized - by design, matching the original's
+own behavior for an ordinary payment of a regulated asset (`pay.go`:
+"has not yet opted to receive this asset"), where only a dedicated
+subscription bundled authorization inline. Wiring an equivalent
+authorization step into the market component's own settlement path
+(gated on the counterparty's KYC, the same as a primary-sale purchase)
+is real future work, not something this pass silently papered over -
+flagging it explicitly here rather than leaving it to be rediscovered
+as a bug later.
+
+Verified: `go build`/`vet`/`test ./...` and `gofmt -l .` all clean,
+including new tests `TestEncodeAuthorize`/`TestEncodeDeauthorize`
+(`internal/contracts`) and
+`TestBuildCryptoPurchase_RequiresBuyerKYC`/
+`TestBuildCryptoPurchase_AuthorizesBuyerOnChainBeforePurchase`/
+`TestBuildFiatPurchase_RequiresBuyerKYC`/
+`TestBuildFiatPurchase_AuthorizesBuyerOnChainBeforeInvoice`
+(`tokenization/services`, asserting the exact encoded `authorize` call
+appears among the fake blockchain's signed transactions).

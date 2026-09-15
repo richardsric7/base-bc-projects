@@ -60,12 +60,20 @@ Safe's own `Enum.Operation` - ABI-equivalent, since Solidity
 canonicalizes an enum parameter to `uint8` in a function signature
 either way).
 
-## Why plain ERC-20, not a compliance-aware standard
+## Restricted-asset authorization (PLAN.md §22 - supersedes the original "plain ERC-20" design)
 
-Per PLAN.md §11: the original's actual on-chain representation of a
-tokenized asset was a plain Stellar asset code/issuer pair with no
-on-chain transfer restrictions - every compliance/KYC gate was enforced
-off-chain, in the backend, before it would ever build a transfer for a
-restricted asset. `TokenizedAsset` keeps that same split rather than
-adopting a standard like ERC-1400: the chain enforces supply and
-ownership, the backend enforces who is allowed to end up holding it.
+Every tokenized asset is a restricted/regulated security - `TokenizedAsset`
+now carries its own on-chain allow-list (`isAuthorized`, `authorize`/
+`deauthorize`, both `onlyOwner`) rather than being a plain unrestricted
+ERC-20: every transfer (mint included) requires both sender and recipient
+to already be authorized, and `mint` auto-authorizes its recipient. This
+mirrors the original's Stellar design more faithfully than the earlier
+"plain ERC-20, all compliance off-chain" version of this contract did -
+Stellar enforced the identical policy on-chain via the issuer account's
+`AUTH_REQUIRED` flag plus a per-holder trustline the issuer had to
+explicitly authorize, with a subscription's own transaction bundling
+that authorization inline. The KYC gate itself still lives in the
+backend (`tokenization/services.authorizeHolder`, checked before a
+purchase is built) - only the actual holding/transfer restriction moved
+on-chain, since Base has no trustline-authorization primitive to lean on
+the way Stellar did.

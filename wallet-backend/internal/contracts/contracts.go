@@ -105,6 +105,31 @@ func EncodeMint(to string, amount *big.Int) ([]byte, error) {
 	return data, nil
 }
 
+// EncodeAuthorize ABI-encodes a TokenizedAsset.authorize(account) call -
+// callable only by the contract's owner (the asset's per-asset issuer
+// key). See TokenizedAsset.sol's own doc comment for why every holder
+// must be authorized before it may send, receive, or be minted this
+// restricted asset.
+func EncodeAuthorize(account string) ([]byte, error) {
+	data, err := TokenizedAssetABI.Pack("authorize", common.HexToAddress(account))
+	if err != nil {
+		return nil, fmt.Errorf("encode authorize: %w", err)
+	}
+	return data, nil
+}
+
+// EncodeDeauthorize ABI-encodes a TokenizedAsset.deauthorize(account)
+// call - callable only by the contract's owner, revoking a holder's
+// ability to further send or receive the asset (their existing balance
+// is untouched - there is no seize/clawback).
+func EncodeDeauthorize(account string) ([]byte, error) {
+	data, err := TokenizedAssetABI.Pack("deauthorize", common.HexToAddress(account))
+	if err != nil {
+		return nil, fmt.Errorf("encode deauthorize: %w", err)
+	}
+	return data, nil
+}
+
 // EncodeBurn ABI-encodes a TokenizedAsset.burn(amount) call - burns from
 // the caller's own balance (ERC20Burnable, no special permission needed).
 func EncodeBurn(amount *big.Int) ([]byte, error) {

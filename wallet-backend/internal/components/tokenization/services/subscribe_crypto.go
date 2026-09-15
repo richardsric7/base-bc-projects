@@ -104,7 +104,19 @@ func (s *Service) BuildCryptoPurchase(ctx context.Context, buyerUserID uint, ass
 	if err != nil {
 		return nil, err
 	}
+	if err := s.requireBuyerKYC(buyer); err != nil {
+		return nil, err
+	}
 	if err := s.enforceOfferingAccess(asset, buyer.Address); err != nil {
+		return nil, err
+	}
+	// Every tokenized asset is a restricted security - the buyer's wallet
+	// must be authorized to hold it before Sale.buy() can transfer any to
+	// them, or the on-chain transfer will revert (TokenizedAsset.sol's own
+	// doc comment). Authorizing here, now that KYC has just been
+	// confirmed, mirrors the original's own subscription flow bundling
+	// trustline authorization into the purchase.
+	if err := s.authorizeHolder(ctx, asset, buyer.Address); err != nil {
 		return nil, err
 	}
 
