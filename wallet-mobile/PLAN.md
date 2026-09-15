@@ -347,19 +347,134 @@ might suggest.
 - `APPROVER` vs `AUTHORIZER` naming, shared with `wallet-backend/
   PLAN.md` §13.8/§13.9.
 
-## 13. Phased build roadmap (not started - design only)
+## 13. Phased build roadmap
 
-| Phase | Scope | Depends on |
-|---|---|---|
-| 1 | `wallet-core`: FFI bindings (§4.1) for the existing crate, including `sign_hex_digest` (§4.2) | — |
-| 2 | App scaffold: Flutter project, ported theme (§3, colors/fonts/`ColorNotifier`), router port | Phase 1 |
-| 3 | Vault + secure storage (§4.3), onboarding/import screens | Phase 1, 2 |
-| 4 | Networking layer with the finalized signature-auth headers (§5) and the testnet/mainnet environment switch (§5.1) | `wallet-backend` §12 shipped |
-| 5 | Dashboard, send/receive, swap - straightforward ports | Phase 4 |
-| 6 | Sub-wallets (§6), shared access (§7) | `wallet-backend` §13 shipped |
-| 7 | Servicelinks QR scanning + approval screens, including the new `EVENT` case (§8) | `wallet-backend` §14 shipped |
-| 8 | Wallet recovery enable/disable + execution screens (§9) | `wallet-backend` §15 shipped |
-| 9 | KYC, subscriptions, asset tokenization, backup/delete-account | Phase 5 |
-| 10 | Full integration pass against Base Sepolia; push | Everything above |
+| Phase | Scope | Depends on | Status |
+|---|---|---|---|
+| 1 | `wallet-core`: FFI bindings (§4.1) for the existing crate, including `sign_hex_digest` (§4.2) | — | **Done** - see §14, using a hand-rolled `dart:ffi` bridge instead of `flutter_rust_bridge` (§14.1 explains the change) |
+| 2 | App scaffold: Flutter project, ported theme (§3, colors/fonts/`ColorNotifier`), router port | Phase 1 | **Done** |
+| 3 | Vault + secure storage (§4.3), onboarding/import screens | Phase 1, 2 | **Done** |
+| 4 | Networking layer with the finalized signature-auth headers (§5) and the testnet/mainnet environment switch (§5.1) | `wallet-backend` §12 shipped | **Done** |
+| 5 | Dashboard, send/receive, swap - straightforward ports | Phase 4 | **Partial** - dashboard and send done; swap not ported (§14.2) |
+| 6 | Sub-wallets (§6), shared access (§7) | `wallet-backend` §13 shipped | Not started |
+| 7 | Servicelinks QR scanning + approval screens, including the new `EVENT` case (§8) | `wallet-backend` §14 shipped | Not started |
+| 8 | Wallet recovery enable/disable + execution screens (§9) | `wallet-backend` §15 shipped | Not started |
+| 9 | KYC, subscriptions, asset tokenization, backup/delete-account | Phase 5 | Not started |
+| 10 | Full integration pass against Base Sepolia; push | Everything above | Not started |
 
-Implementation does not begin until explicitly authorized.
+## 14. Implementation status (Phases 1-4, partial 5)
+
+This app is no longer design-only. Phases 1-4 and the dashboard/send
+half of Phase 5 are implemented, tested, and visually verified. What
+follows records what was actually built, where it diverges from this
+plan's original design, and exactly what's left.
+
+### 14.1 FFI: hand-rolled `dart:ffi`, not `flutter_rust_bridge`
+
+§4.1 recommended `flutter_rust_bridge`. In practice a plain C-ABI bridge
+was used instead: `wallet-web/wallet-core/src/ffi.rs` adds 12
+`#[no_mangle] pub extern "C" fn` exports (mnemonic generate/validate/
+derive, vault encrypt/unlock/lock/lock_all/is_unlocked, and the three
+signing functions from §4.2) alongside the crate's existing
+`wasm-bindgen` exports - `Cargo.toml`'s `crate-type = ["cdylib", "rlib"]`
+now produces both the WASM build (`wasm-pack`, for `wallet-web`) and a
+plain native `.so`/`.dylib`/`.dll` (`cargo build`, for `wallet-mobile`)
+from the same source tree. Each fallible call returns a JSON envelope
+(`{"ok":bool,"value":..,"error":..}`) through an owned C string the
+caller must free (`ffi_free_string`) - this is simpler than it sounds
+because Dart's side (`lib/core/wallet_core_bindings.dart`,
+`wallet_core_client.dart`) wraps every call in one `_callEnveloped`
+helper that decodes the envelope and frees the string in a `finally`.
+
+Reasoning for the change: `flutter_rust_bridge` needs its codegen
+tool wired into the build for a platform-specific Flutter toolchain,
+and its main benefit (typed async/Result/struct bindings) isn't needed
+here - the function surface is small (12 functions, all synchronous,
+all string-in/string-out) and this crate already has a JSON-envelope
+convention from its `wasm-bindgen` side that a hand-rolled bridge could
+reuse directly. This also kept the same underlying `.so` file
+independently testable via `flutter test` on the Dart VM (which loads a
+real native library on Linux, not a mock) - see §14.4.
+
+Session-state note: `FFI_SESSION` (`ffi.rs`) is a `thread_local!` inside
+the Rust library, which for a same-process embedding is effectively
+one shared table for the whole app (mirroring the existing
+`wasm-bindgen` module's single in-memory session). This matches the
+original design intent (one signer role unlocked at a time, `lock_all`
+clears it) but is worth keeping in mind if mobile ever needs isolates.
+
+### 14.2 What's built
+
+- **Theme** (`lib/theme/app_theme.dart`): colors and font families
+  ported verbatim from `wallet-web/app/tailwind.config.js`; the 5 font
+  files copied into `assets/fonts/` and registered in `pubspec.yaml`.
+- **Network config** (`lib/config/network.dart`): testnet/mainnet
+  switch via `String.fromEnvironment`/`--dart-define`, the mobile
+  equivalent of `wallet-web`'s Vite `import.meta.env.VITE_*` (§5.1).
+- **Offline cache** (`lib/store/offline_cache.dart`) and **vault
+  storage** (`lib/core/vault_storage.dart`, on top of
+  `flutter_secure_storage` for the OS Keychain/Keystore) - the non-secret
+  and secret persistence halves, matching `wallet-web`'s split.
+- **API clients** (`lib/api/`): `http_client.dart` (SignatureAuth
+  headers per §5), `users_api.dart`, `assets_api.dart`,
+  `payments_api.dart` - ported from `wallet-web`'s equivalents,
+  including `withWalletDeployRetry` and the `ActionProposal`/
+  `digestToSign` approval shape from `wallet-backend` §13.
+- **State** (`lib/store/wallet_state.dart`): a `ChangeNotifier`-based
+  `WalletState`/`RoleState`, per §2's `provider` recommendation.
+- **Screens**: onboarding wizard (create/import, mnemonic reveal,
+  password set), unlock, dashboard, send, and a simplified settings
+  page (wallet addresses, network label, wipe-device danger zone).
+  Swap was **not** ported in this pass - Phase 5 is only partially
+  done.
+- **Not ported this pass, tracked as follow-ups**: swap screen; a
+  recovery entry point on the unlock screen (`unlock_page.dart` has a
+  `TODO(wallet-mobile)` marking exactly where `wallet-web`'s
+  `RecoveryWizard`, §9, would plug in); Phases 6-10 in full
+  (sub-wallets, shared access, servicelinks, wallet recovery, KYC/
+  subscriptions/tokenization/backup).
+
+### 14.3 Open decision resolved
+
+§12 left `flutter_bloc`/`get` vs. `provider` open. Resolved in favor of
+`provider` alone, per that section's own recommendation - neither of
+the other two packages was added.
+
+### 14.4 How this was verified without a device or emulator
+
+This sandbox has no Android/iOS emulator, no GUI, and no browser
+dedicated to Flutter. Two of Flutter's own headless mechanisms cover
+everything short of on-device testing:
+
+- **Native FFI correctness**: `flutter test` runs Dart on the Dart VM,
+  which runs natively on Linux and can `dlopen` a real compiled
+  `.so` - `test/core/wallet_core_client_test.dart` (7 tests) exercises
+  the actual `libwallet_core.so` (via `WALLET_CORE_LIB_PATH`), not a
+  mock: mnemonic generate/validate/derive, `createVault` -> `lock` ->
+  `unlock` round-trips to the same address, wrong-password rejection,
+  and `signHexDigest` vs. `signRequestMessage` producing different
+  (both valid) signatures. `wallet-core`'s own Rust test module
+  (`ffi.rs`) adds 3 more round-trip tests at the Rust level.
+- **Visual verification**: Flutter's golden-screenshot testing
+  (`matchesGoldenFile`) renders real PNGs through Flutter's software
+  rendering pipeline, viewable directly - no emulator or browser
+  needed. `test/goldens/onboarding_choose_signer.png` and
+  `test/goldens/send_page_idle.png` are checked-in golden references,
+  visually confirmed to render correctly (button/border colors, layout,
+  font). A third golden for the mnemonic-reveal screen was deliberately
+  **not** kept as a pixel-diff assertion: `generate_mnemonic()` returns
+  a fresh random phrase on every run, so that screen's text (and every
+  pixel) legitimately differs run to run - a fixed golden there would
+  be flaky by construction. That screen's test instead asserts its
+  structure (a "Your recovery phrase" heading and 12 numbered words)
+  and was visually spot-checked once by hand.
+- **Not verifiable in this sandbox**: real Android/iOS packaging
+  (placing the native library under `jniLibs`/using
+  `DynamicLibrary.process()` via static linking on iOS, per
+  `wallet_core_bindings.dart`'s `_open()`), platform channels, and any
+  on-device behavior. This needs Android Studio + an emulator, or Xcode
+  on macOS - outside any environment currently available to this
+  session.
+
+`flutter analyze` is clean (0 issues) and all 10 Dart tests pass
+(`flutter test`), alongside `wallet-core`'s existing Rust test suite.

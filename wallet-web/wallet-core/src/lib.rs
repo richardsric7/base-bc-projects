@@ -16,6 +16,7 @@
 //! a concern that has nothing to do with cryptography. This module only
 //! ever produces or consumes plain JSON strings.
 
+mod ffi;
 mod mnemonic;
 mod rlp;
 mod signing;
