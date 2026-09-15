@@ -17,6 +17,10 @@ import FundWallet from './pages/fund/FundWallet';
 import TokenizeHome from './pages/tokenize/TokenizeHome';
 import AssetDetail from './pages/tokenize/AssetDetail';
 import Receipt from './pages/receipt/Receipt';
+import SharedAccessHome from './pages/sharedaccess/SharedAccessHome';
+import GroupDetail from './pages/sharedaccess/GroupDetail';
+import Approvals from './pages/sharedaccess/Approvals';
+import ApprovalDetail from './pages/sharedaccess/ApprovalDetail';
 import AppLayout from './layout/AppLayout';
 
 // The primary wallet is a Safe with no private key of its own (PLAN.md
@@ -116,6 +120,10 @@ export default function App() {
         <Route path="/tokenize" element={<TokenizeHome />} />
         <Route path="/tokenize/:assetId" element={<AssetDetail />} />
         <Route path="/receipt" element={<Receipt />} />
+        <Route path="/shared-access" element={<SharedAccessHome />} />
+        <Route path="/shared-access/groups/:groupId" element={<GroupDetail />} />
+        <Route path="/shared-access/approvals" element={<Approvals />} />
+        <Route path="/shared-access/approvals/:actionId" element={<ApprovalDetail />} />
         <Route path="/settings" element={<Settings />} />
       </Route>
       <Route

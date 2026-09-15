@@ -40,6 +40,9 @@ export default function AppLayout() {
           <NavLink to="/tokenize" className={navLinkClasses}>
             Tokenize
           </NavLink>
+          <NavLink to="/shared-access" className={navLinkClasses}>
+            Shared access
+          </NavLink>
           <NavLink to="/settings" className={navLinkClasses}>
             Settings
           </NavLink>

@@ -1232,3 +1232,96 @@ dashboard, then navigated to `/fund` and `/tokenize` and opened the new-
 application form, screenshotting each to confirm real rendering (not
 just a clean build) against the live backend - the same verification
 discipline as §16's live recovery-flow check.
+
+## 20. Closing §8's last real v1 exclusion: shared-access group wallets
+
+Asked to resume outstanding implementation and audit `wallet-web` for
+any remaining gap against the original app - not just the tokenization/
+funding/receipt list from §19, but everything. That audit (documented in
+full in `wallet-backend/PLAN.md` §19, since most of it turned on
+checking what the original backend actually had a working *frontend*
+for) resolved every remaining sidebar item except one:
+
+- **Shared-access group wallets** - the one item §8 itself had already
+  flagged as a real, deliberate v1 exclusion ("a real, already-built
+  feature... a distinct enough surface to be its own follow-up"). The
+  original's `dashboard/sharedAccess/{landing,add,update,walletInfo,
+  approvals,approvalDetails}` pages are a complete, working feature, and
+  `wallet-backend`'s `sharedaccess` component (PLAN.md §13's whole
+  design) already implements every bit of backend support it needs.
+  This is the one gap this pass actually closes.
+- Patron ("Trovo Patron"), Market ("market-trade"), and "closed groups"
+  sidebar links, the Yield/dividend page, and a Sumsub/Doja KYC page all
+  turned out **not** to be real gaps once checked against the original's
+  actual router (`appRouter.tsx`), not just its sidebar - see
+  `wallet-backend/PLAN.md` §19 for the full accounting of each. Security
+  questions are already covered by this app's own recovery redesign
+  (§13/`RecoveryWizard.tsx`/`RecoverySettings.tsx`).
+
+**A small real backend gap found while building this**: no
+`wallet-backend` route ever exposed a group's membership list - only a
+caller's own role, used internally for access checks. A member picking
+"add member" or "change threshold" needs to see who's already on the
+group first. Fixed on the backend side with
+`Service.ListMembers`/`GET /v1/shared-access/groups/:groupId/members`
+(`wallet-backend/PLAN.md` §19).
+
+**What was built** - `src/api/sharedAccessApi.ts` (the full
+`/v1/shared-access/*` client: `listWallets`, `createGroup`, `getGroup`,
+`listMembers`, `getBalance`, `getCuratedBalances`, `proposePayment`/
+`proposeContractCall`, `listPending`, `getAction`, `approveAction`/
+`rejectAction`, and the four member-management proposal calls) and four
+pages under `src/pages/sharedaccess/`:
+
+- `SharedAccessHome.tsx` - tabbed (My wallets / Create group), folding
+  the original's separate `landing.tsx` and `add.tsx` into one page, the
+  same simplification §19's `FundWallet.tsx`/`TokenizeHome.tsx` already
+  established for this app's own multi-tab pages.
+- `GroupDetail.tsx` - a group's balance (native + curated tokens),
+  member list, a propose-payment form, and inline add/remove-member,
+  change-threshold and disable-group forms - folding the original's
+  separate `walletInfo.tsx` and `update.tsx` into one page for the same
+  reason: member-management proposals go through the exact same
+  propose/approve/execute pipeline as a payment (`wallet-backend`
+  PLAN.md §13.10 Phase 5), so there's nothing structurally different
+  about "update" that would justify its own route once both are
+  on-screen together. Proposing here immediately attempts a
+  self-approval (build → `getAction` for the digest → `signHexDigest`
+  → `approveAction`, the same build→sign→submit shape as `Send.tsx`) -
+  meaningful for a 1-of-1 group or when the proposer alone satisfies the
+  threshold; a genuine multi-party proposal still needs the other
+  members' own approvals via the Approvals queue regardless.
+- `Approvals.tsx` / `ApprovalDetail.tsx` - the original's
+  `approvals.tsx`/`approvalDetails.tsx`, largely unchanged in shape:
+  a queue of every pending action visible to the caller across every
+  group they belong to, and a detail view to approve (sign the exact
+  digest `getAction` returns) or reject (with a reason) one action.
+
+Every `sharedAccessApi.ts` call passes the caller's own `primaryAddress`
+as `walletAddress`, never a group's own address - unlike
+`paymentsApi.ts`/`tokenizationApi.ts`, which act *as* a specific wallet
+they name, `sharedaccess`'s own routes always identify the target group
+by its own `:groupId` path/body param and authenticate the caller as
+themselves (`wallet-backend`'s `signature_auth.go` "wallet == signer's
+own owned wallet" fast path - see PLAN.md §13's `GroupMember.MemberAddress`
+note: it's always a participant's *primary-wallet* address, resolved
+through nested EIP-1271, never their raw signer key).
+
+Routes added: `/shared-access`, `/shared-access/groups/:groupId`,
+`/shared-access/approvals`, `/shared-access/approvals/:actionId`, with a
+"Shared access" link in `AppLayout.tsx`'s nav bar.
+
+**Verified**: `tsc -b && vite build` clean. Live E2E against a locally
+booted `wallet-backend` (matching §19's own methodology): onboarded a
+fresh wallet through to the dashboard, opened Shared access (My
+wallets tab correctly listing the primary wallet as "OWNER"), and
+submitted the Create group form - `CreateGroup` correctly attempted a
+real Safe deployment and the error it returned ("failed to deploy group
+wallet: fetch nonce: Post https://sepolia.base.org: Forbidden")
+surfaced cleanly in the form, the same sandboxed-egress limitation
+noted throughout this project's live-testing sessions (e.g. §16, §19),
+not a code defect - confirms the request reaches the real backend
+endpoint and the error path renders correctly. Approvals then correctly
+showed "No pending actions" (the group was never created, so nothing
+to show) - screenshots confirm real rendering against the live backend
+throughout, not just a clean build.
