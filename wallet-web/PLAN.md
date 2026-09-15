@@ -850,3 +850,103 @@ same starting problem.
 Not implemented here - tracked as a dependency this app's own
 implementation will need once `wallet-backend`'s §15 lands, the same way
 §11/§12 track that project's other pending dependencies.
+
+## 14. Closing the two-mnemonic model and wiring the Safe-based payments/swaps fix
+
+`wallet-backend/PLAN.md` §17 closed a severe bug there: `payments`/
+`swaps`/`assets/approve` built plain EIP-1559 transactions "from" a Safe
+wallet address, which is unsignable (a Safe has no private key). Fixing
+that changed `/build`'s response shape (`{actionId, digestToSign}`
+instead of a raw unsigned transaction) and `/submit`'s request shape
+(`{actionId, signature}` instead of `{signedTx}`). This app's own
+`OnboardingWizard.tsx` predated §13's Safe redesign entirely and still
+implemented §3's since-corrected two-mnemonic model (import/create a
+*separate* "primary wallet" phrase, call a `link-primary` endpoint that
+never existed server-side) - both sides needed a full pass, not just the
+response-shape update.
+
+- **Removed the vestigial second-mnemonic onboarding steps entirely**
+  (`'primary-choice' | 'primary-password' | 'import-primary' |
+  'primary-password-separate'` from `OnboardingWizard.tsx`'s `Step`
+  union, and `usersApi.ts`'s dead `linkPrimaryWallet`/
+  `LinkPrimaryNotSupportedError`) - there is no local key for the
+  primary wallet to hold, so there was never anything for a second
+  mnemonic to do. `finishWithPrimaryWallet` now records the
+  wallet-backend-*computed* Safe address (`user.address` from
+  `registerUser`/`getMyUser`) as `wallet.primary`, reusing the
+  `vaultCreated` Redux action as bookkeeping convenience only -
+  `hasVault`/`isUnlocked` being `true` for `primary` means "we know its
+  address," not "a vault exists," since a Safe has nothing to unlock
+  (`walletSlice.ts`'s `RoleState` doc comment spells this out so it isn't
+  rediscovered as a bug later). Dropped `walletSlice.ts`'s now-meaningless
+  `primarySameAsSigner` field along with it.
+- **`paymentsApi.ts`/`swapsApi.ts`/`assetsApi.ts` updated to the new
+  `{actionId, digestToSign}` / `{actionId, signature}` shapes** (a shared
+  `ActionProposal` type in `paymentsApi.ts`, imported by the other two).
+  `Send.tsx`/`Swap.tsx` now `signRequestMessage('signer', digestToSign)`
+  instead of `signTransaction('primary', ...)` - approval is a plain
+  `personal_sign` over a digest (`sharedaccess.DigestToSign`'s own design,
+  see `wallet-backend/PLAN.md` §17), not EIP-712 typed-data signing, so no
+  new `wallet-core` primitive was needed despite this and the sibling
+  projects' own earlier planning assuming otherwise.
+- **A real bug in the existing-user lookup, found while wiring this**:
+  `handleSignerPasswordSubmit` called `getUser(address)` - `address`
+  being the *signer's* address - against `GET /v1/users/:username`,
+  which only ever resolves by the literal `username` column. Every
+  re-import of an already-registered signer therefore always 404'd and
+  fell through to the registration branch instead of recognizing the
+  existing account (which would then itself fail server-side on the
+  already-registered address). Fixed by adding `GET /v1/users/me`
+  server-side (self-signed, resolves by `CtxSubject`; see
+  `wallet-backend/PLAN.md` §17) and a matching `getMyUser()` here -
+  `getUser(username)` itself is now dead code (nothing else called it)
+  and was deleted rather than left as an unused export.
+- **A second real gap, found only by driving the flow live**: a fresh
+  registration leaves the Safe undeployed (`PrimaryWalletDeployed =
+  false` - `wallet-backend/PLAN.md` §13.11's deliberate
+  "registration never requires activation"), and an undeployed Safe has
+  no `sharedaccess` `ClosedGroup` row yet either, so `/build` 404s with
+  "no shared-access group found for this wallet address" for anyone who
+  hasn't separately called the self-service
+  `POST /v1/users/wallet/deploy`- which this app never called at all.
+  Added `deployPrimaryWallet()` to `usersApi.ts` and two call sites: a
+  best-effort, non-blocking call at the end of onboarding (deployment is
+  idempotent and platform-fee-paid, so firing it early costs nothing and
+  usually means it's already done by the time a user first tries to pay),
+  and `usersApi.ts`'s `withWalletDeployRetry()` wrapping `buildPayment`/
+  `buildSwap` in `Send.tsx`/`Swap.tsx` as the real backstop - it catches
+  that specific 404, calls `deployPrimaryWallet`, and retries the build
+  once. Not wired into `assetsApi.ts`'s `buildApprove` since nothing in
+  this app calls it yet (dead code, pre-existing, out of scope here).
+- **`App.tsx`'s reload hydration no longer checks a vault that will never
+  exist**: it previously called `hasVault('primary')`/
+  `getKnownAddress('primary')` (the IndexedDB-backed vault system) to
+  decide whether onboarding was complete, which is always `false` now
+  that no local vault is ever created for `primary` - every full page
+  reload incorrectly bounced straight back to `/onboarding`, discovered
+  by extending the live E2E test past the initial onboarding-to-Dashboard
+  path. Fixed by resolving the primary address from the offline,
+  non-secret IndexedDB cache (`cache/offlineCache.ts`'s new
+  `cacheKeys.primaryWalletAddress(signerAddress)`, written by
+  `finishWithPrimaryWallet` at the end of onboarding) first, falling back
+  to a live `GET /v1/users/me` (caching its result) only if nothing is
+  cached yet; primary's `isUnlocked` is now derived from "is its address
+  known" rather than tracked separately, matching signer's real
+  vault-backed unlock but without inventing an unlock step Unlock.tsx
+  would otherwise present for a wallet with nothing to unlock (`Unlock.tsx`
+  needed no code change - its `hasVault && !isUnlocked` filter already
+  never selects `primary` once the two flags move together).
+- **Verified live**, not just build/typecheck: booted a real
+  `wallet-backend` instance (SQLite) and drove the actual UI with
+  Playwright + Chromium through registration → Dashboard → a full page
+  reload → Send, confirming (a) onboarding reaches Dashboard directly
+  with none of the removed primary-choice steps, (b) a reload now
+  correctly lands on `/unlock` rather than bouncing to `/onboarding`, and
+  (c) `Send`'s `buildPayment` call, `withWalletDeployRetry`, and
+  `deployPrimaryWallet` all fire in the right order end-to-end - the
+  Safe deployment itself fails cleanly with wallet-backend's own honest
+  error (`fetch nonce: ... Forbidden`) because this sandbox's egress
+  policy blocks `sepolia.base.org`, the same pre-existing, documented
+  limitation noted throughout this document and `wallet-backend/PLAN.md`
+  §17 - not a bug in this fix. `npx tsc -b` and `npm run build:app-only`
+  both clean throughout.

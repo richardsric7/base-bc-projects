@@ -108,7 +108,7 @@ Phase 106-109) with exactly the primitives a mobile client needs:
 (`mnemonic.rs`), `encrypt_vault`/`unlock`/`lock`/`lock_all`/`is_unlocked`
 (`vault.rs`, an encrypted-at-rest vault keyed by password, one unlocked
 role's key ever held in memory, zeroized on lock), and
-`sign_siwe_message`/`sign_transaction` (`signing.rs`). This is real,
+`sign_request_message`/`sign_transaction` (`signing.rs`). This is real,
 working code already exposed via `wasm-bindgen` for the browser - the
 task here is exposing the *same* crate to Dart, not writing a second
 implementation.
@@ -142,7 +142,7 @@ target.
 |---|---|
 | `generate_mnemonic`, `validate_mnemonic`, `derive_preview_address` | Reuse as-is |
 | `encrypt_vault`, `unlock`, `lock`, `lock_all`, `is_unlocked` | Reuse as-is - this becomes mobile's answer to the original's plaintext-sembast problem (§4.3) |
-| `sign_siwe_message` | Reused for the new per-request signature scheme too, despite the name - `wallet-backend/PLAN.md` §12.6 already flags this function as message-agnostic EIP-191 `personal_sign`; consider the rename to `sign_request_message` mentioned there happening once, shared by both apps, not twice |
+| `sign_request_message` | Already renamed from `sign_siwe_message` (wallet-core/wallet-web PLAN.md §11 - it was always message-agnostic EIP-191 `personal_sign`, so this was a rename only, no behavior change) and used for the per-request signature scheme in both `wallet-web` and `wallet-backend`'s own approval digests (`sharedaccess.DigestToSign`, `wallet-backend/PLAN.md` §17) - reuse the same shared, already-renamed function here rather than reintroducing the old name |
 | `sign_transaction` (EIP-1559) | Narrower role than originally scoped - kept for any plain-EOA signing need, but no longer how primary-wallet or sub-wallet payments/swaps are authorized (see below) |
 | **New: EIP-712 typed-data signing** (`sign_typed_data`) | Needed for **every** payment or swap this app submits, not just shared-access approvals - once the primary wallet is a Safe (`wallet-backend/PLAN.md` §13.3, extended from sub-wallets-only by §15's recovery design), authorizing any transaction sourced from it means signing that transaction's `SafeTxHash` (EIP-712), not a plain `personal_sign`/raw EIP-1559 signature. This is a `wallet-core` gap on **both** platforms today (`wallet-web` doesn't have it either) - tracked here and in `wallet-web/PLAN.md` §12 as one shared addition to `signing.rs`, not a mobile-only one. |
 

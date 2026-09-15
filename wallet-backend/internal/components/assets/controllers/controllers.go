@@ -61,10 +61,9 @@ func getBalance(svc *services.Service) gin.HandlerFunc {
 }
 
 type buildApproveRequest struct {
-	TokenAddress string  `json:"tokenAddress" binding:"required"`
-	Spender      string  `json:"spender" binding:"required"`
-	Amount       string  `json:"amount" binding:"required"`
-	Nonce        *uint64 `json:"nonce"` // optional - see PLAN.md §3 on offline-batched nonces
+	TokenAddress string `json:"tokenAddress" binding:"required"`
+	Spender      string `json:"spender" binding:"required"`
+	Amount       string `json:"amount" binding:"required"`
 }
 
 func buildApprove(svc *services.Service) gin.HandlerFunc {
@@ -74,28 +73,31 @@ func buildApprove(svc *services.Service) gin.HandlerFunc {
 			apperrors.Abort(c, apperrors.BadRequest("tokenAddress, spender and amount are required"))
 			return
 		}
-		owner := c.GetString(middleware.CtxSubject)
-		tx, err := svc.BuildApproveTx(c.Request.Context(), owner, req.TokenAddress, req.Spender, req.Amount, req.Nonce)
+		wallet := c.GetString(middleware.CtxSubject)
+		signer := c.GetString(middleware.CtxSigner)
+		proposal, err := svc.BuildApproveTx(c.Request.Context(), wallet, signer, req.TokenAddress, req.Spender, req.Amount)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, tx)
+		c.JSON(http.StatusOK, proposal)
 	}
 }
 
 type submitRequest struct {
-	SignedTx string `json:"signedTx" binding:"required"`
+	ActionID  uint   `json:"actionId" binding:"required"`
+	Signature string `json:"signature" binding:"required"`
 }
 
 func submit(svc *services.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req submitRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			apperrors.Abort(c, apperrors.BadRequest("signedTx is required"))
+			apperrors.Abort(c, apperrors.BadRequest("actionId and signature are required"))
 			return
 		}
-		hash, err := svc.SubmitSignedTransaction(c.Request.Context(), req.SignedTx)
+		signer := c.GetString(middleware.CtxSigner)
+		hash, err := svc.SubmitApprove(c.Request.Context(), req.ActionID, signer, req.Signature)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return

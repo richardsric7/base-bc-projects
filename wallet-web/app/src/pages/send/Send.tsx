@@ -5,7 +5,8 @@ import { useAppSelector } from '../../store/hooks';
 import { useIsOnline } from '../../connectivity/useIsOnline';
 import { listCuratedTokens, type CuratedToken } from '../../api/assetsApi';
 import { buildPayment, submitPayment } from '../../api/paymentsApi';
-import { signTransaction } from '../../core/walletCoreClient';
+import { withWalletDeployRetry } from '../../api/usersApi';
+import { signRequestMessage } from '../../core/walletCoreClient';
 
 // PLAN.md §6.4/§6.3: every step of this flow - not just the network
 // calls inside it - is gated on confirmed connectivity. The button is
@@ -14,6 +15,7 @@ import { signTransaction } from '../../core/walletCoreClient';
 export default function Send() {
   const isOnline = useIsOnline();
   const primaryAddress = useAppSelector((s) => s.wallet.primary.address);
+  const signerAddress = useAppSelector((s) => s.wallet.signer.address);
   const signerUnlocked = useAppSelector((s) => s.wallet.signer.isUnlocked);
   const [tokens, setTokens] = useState<CuratedToken[]>([]);
   const [destination, setDestination] = useState('');
@@ -31,7 +33,7 @@ export default function Send() {
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!primaryAddress || !signerUnlocked) {
+    if (!primaryAddress || !signerAddress || !signerUnlocked) {
       setError('Unlock your signer wallet before sending a payment.');
       return;
     }
@@ -39,14 +41,32 @@ export default function Send() {
     setTxHash('');
     try {
       setStatus('building');
-      const unsignedTx = await buildPayment(primaryAddress, destination, amount, tokenAddress || undefined);
+      // Proposes the transfer as a real Safe transaction against the
+      // primary wallet (PLAN.md §17) and returns the digest to approve it.
+      // Wrapped so an undeployed Safe (no shared-access group yet) is
+      // deployed on the spot and the build is retried, rather than failing
+      // outright - see usersApi.ts's withWalletDeployRetry.
+      const proposal = await withWalletDeployRetry(signerAddress, () =>
+        buildPayment(primaryAddress, destination, amount, tokenAddress || undefined),
+      );
 
       setStatus('signing');
-      const signedTx = await signTransaction('primary', JSON.stringify(unsignedTx));
+      // personal_sign over the digest with the signer's own key - never
+      // the (nonexistent) primary wallet key, since the primary wallet is
+      // a Safe with no private key of its own.
+      const signature = await signRequestMessage('signer', proposal.digestToSign);
 
       setStatus('submitting');
       const idempotencyKey = crypto.randomUUID();
-      const record = await submitPayment(primaryAddress, idempotencyKey, signedTx, destination, amount, tokenAddress || undefined);
+      const record = await submitPayment(
+        primaryAddress,
+        idempotencyKey,
+        proposal.actionId,
+        signature,
+        destination,
+        amount,
+        tokenAddress || undefined,
+      );
 
       setTxHash(record.txHash);
       setStatus('done');

@@ -34,6 +34,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 
 	authed := router.Group("/v1/users")
 	authed.Use(middleware.SignatureAuth(gc.DB, gc.SignatureAuthToleranceSeconds))
+	authed.GET("/me", getMe(svc))
 	authed.POST("", register(svc))
 	authed.POST("/wallet/deploy", deployPrimaryWallet(svc))
 	authed.DELETE("/:username", deleteUser(svc))
@@ -127,6 +128,23 @@ func getUser(svc *services.Service, respCache cache.Cache, watcher *network.Addr
 		if body, marshalErr := json.Marshal(user); marshalErr == nil {
 			respCache.Set(cacheKey, string(body), userResponseCacheTTL)
 			watcher.Watch(user.Address, func() { respCache.Delete(cacheKey) })
+		}
+		c.JSON(http.StatusOK, user)
+	}
+}
+
+// getMe looks a profile up by the verified signer's own address rather
+// than a username - onboarding needs this to tell "this signer already
+// has a registered profile" from "this is a brand-new signer" without
+// knowing a username to ask for by name (GET /v1/users/:username can't
+// help there: the client only ever knows the signer's address at this
+// point, never their username).
+func getMe(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, err := svc.GetByAddress(c.GetString(middleware.CtxSubject))
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
 		}
 		c.JSON(http.StatusOK, user)
 	}

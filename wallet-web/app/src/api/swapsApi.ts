@@ -1,6 +1,6 @@
 import { apiRequest } from './httpClient';
 import { assertOnline } from '../connectivity/assertOnline';
-import type { UnsignedTx } from './paymentsApi';
+import type { ActionProposal } from './paymentsApi';
 
 // wallet-backend's swaps component is a generic DEX router-call builder,
 // not an abstracted "swap A for B" - the caller supplies the router
@@ -15,14 +15,17 @@ export interface BuildSwapInput {
   method: string;
   args?: unknown[];
   valueWei?: string;
-  nonce?: number;
 }
 
-export async function buildSwap(walletAddress: string, input: BuildSwapInput): Promise<UnsignedTx> {
+export async function buildSwap(walletAddress: string, input: BuildSwapInput): Promise<ActionProposal> {
   await assertOnline();
-  return apiRequest<UnsignedTx>('/v1/swaps/build', { method: 'POST', walletAddress, body: input });
+  return apiRequest<ActionProposal>('/v1/swaps/build', { method: 'POST', walletAddress, body: input });
 }
 
-export function submitSwap(walletAddress: string, signedTx: string): Promise<{ hash: string }> {
-  return apiRequest<{ hash: string }>('/v1/swaps/submit', { method: 'POST', walletAddress, body: { signedTx } });
+export function submitSwap(walletAddress: string, actionId: number, signature: string): Promise<{ hash: string }> {
+  return apiRequest<{ hash: string }>('/v1/swaps/submit', {
+    method: 'POST',
+    walletAddress,
+    body: { actionId, signature },
+  });
 }

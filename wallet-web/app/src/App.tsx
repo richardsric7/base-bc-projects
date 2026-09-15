@@ -3,6 +3,8 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAppDispatch, useAppSelector } from './store/hooks';
 import { hydrateKnownVaults } from './store/walletSlice';
 import { hasVault, getKnownAddress } from './core/walletCoreClient';
+import { getCacheEntry, setCacheEntry, cacheKeys } from './cache/offlineCache';
+import { getMyUser } from './api/usersApi';
 import { startConnectivityMonitor } from './connectivity/connectivityMonitor';
 import OnboardingWizard from './pages/onboarding/OnboardingWizard';
 import Unlock from './pages/unlock/Unlock';
@@ -12,6 +14,26 @@ import Swap from './pages/swap/Swap';
 import Settings from './pages/settings/Settings';
 import AppLayout from './layout/AppLayout';
 
+// The primary wallet is a Safe with no private key of its own (PLAN.md
+// §13/§17) - there is no local vault for it, so "do we know its address"
+// comes from the offline cache (set at the end of onboarding) rather than
+// hasVault('primary'). Falls back to a live GET /v1/users/me for a device
+// that has a signer vault but never completed onboarding's cache write
+// (e.g. it was cleared) - if that also fails (offline, never synced),
+// primary stays unset and the app correctly falls back to onboarding.
+async function resolvePrimaryWallet(signerAddr: string | null): Promise<string | null> {
+  if (!signerAddr) return null;
+  const cached = await getCacheEntry<string>(cacheKeys.primaryWalletAddress(signerAddr));
+  if (cached) return cached.data;
+  try {
+    const user = await getMyUser(signerAddr);
+    await setCacheEntry(cacheKeys.primaryWalletAddress(signerAddr), user.address);
+    return user.address;
+  } catch {
+    return null;
+  }
+}
+
 function useVaultHydration() {
   const dispatch = useAppDispatch();
   const [ready, setReady] = useState(false);
@@ -19,17 +41,16 @@ function useVaultHydration() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [signerHas, signerAddr, primaryHas, primaryAddr] = await Promise.all([
-        hasVault('signer'),
-        getKnownAddress('signer'),
-        hasVault('primary'),
-        getKnownAddress('primary'),
-      ]);
+      const [signerHas, signerAddr] = await Promise.all([hasVault('signer'), getKnownAddress('signer')]);
+      const primaryAddr = await resolvePrimaryWallet(signerAddr);
       if (cancelled) return;
       dispatch(
         hydrateKnownVaults({
           signer: { address: signerAddr, hasVault: signerHas, isUnlocked: false },
-          primary: { address: primaryAddr, hasVault: primaryHas, isUnlocked: false },
+          // No unlock step exists (or is needed) for a Safe with no key of
+          // its own - see walletSlice.ts's RoleState doc comment - so
+          // knowing its address makes it "unlocked" too, unlike signer.
+          primary: { address: primaryAddr, hasVault: primaryAddr !== null, isUnlocked: primaryAddr !== null },
         }),
       );
       setReady(true);

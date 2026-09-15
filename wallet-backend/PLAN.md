@@ -3822,6 +3822,19 @@ all, just signing a hash string), signature packing, and relayer-submitted
   `signature` fields, proposing with the owned user's `SignerAddress` (a
   partner's own embedded-wallet infrastructure holds that key, per this
   file's pre-existing non-custodial design - never held here).
+- **`assets`' `approve`/`submit` had the identical bug and got the
+  identical fix**, found while wiring the other two: `BuildApproveTx`
+  built a plain EIP-1559 `approve(spender, amount)` call "from" the
+  wallet address the same unsignable way. Added `network.EncodeERC20Approve`
+  (mirroring `EncodeERC20Transfer`) and reworked it exactly like
+  `payments`/`swaps` - `POST /v1/assets/approve/build` returns
+  `{actionId, digestToSign}` via `ProposeContractCall` against the token
+  contract, `POST /v1/assets/approve/submit` takes `{actionId, signature}`
+  and calls `ApproveAction`. New `assets/services_test.go` (this
+  component had none either) covers the same validation/propagation
+  cases plus asserting the real ABI-encoded `approve(address,uint256)`
+  selector (`0x095ea7b3`) shows up in the proposed calldata, not a
+  placeholder.
 - **Tests**: new `payments/services_test.go` and `swaps/services_test.go`
   (neither component had any before) covering validation, group-lookup
   and approval-error propagation, the not-yet-executed rejection, and
@@ -3840,14 +3853,36 @@ all, just signing a hash string), signature packing, and relayer-submitted
   relies on `sharedaccess`'s own already-extensive live-adjacent test
   coverage of the execution path itself, which this change reuses
   unmodified rather than re-implementing.
-- **Not done, and deliberately out of scope here**: `wallet-web`'s
-  client-side counterpart (`Send.tsx`/`Swap.tsx`/`paymentsApi.ts`/
-  `swapsApi.ts`, currently calling `signTransaction('primary', ...)`
-  against the now-removed raw-tx response shape) and its onboarding
-  flow's fictitious "primary wallet has its own local key" model (it
-  never did, once the primary wallet became a Safe - `wallet.primary.address`
-  in Redux was never actually set to the real backend-computed Safe
-  address at all, only to whatever a locally re-entered/imported mnemonic
-  happened to derive). Both are real, necessary follow-ups tracked
-  separately in `wallet-web/PLAN.md`, not silently left broken without a
-  paper trail.
+- **`wallet-web`'s client-side counterpart is now done too** (was left as
+  an explicit follow-up when this section was first written; see
+  `wallet-web/PLAN.md`'s own §14 for the full account). Two small
+  wallet-backend additions were needed to support it, added alongside:
+  - **`GET /v1/users/me`** (new, `authed` group, self-signed): looks a
+    profile up by the verified signer's own address
+    (`GetByAddress(CtxSubject)`), for the one case a client only ever has
+    an address and not a username to ask `GET /v1/users/:username` for -
+    onboarding, right after creating/importing a signer vault, needs to
+    tell "this signer already has a registered profile" from "brand-new
+    signer." `wallet-web`'s onboarding had been calling
+    `GET /v1/users/:username` with an *address* as the `:username` path
+    param (a latent bug predating this fix, since `:username` only ever
+    resolves by the literal `username` column) - every re-import of an
+    already-registered signer silently fell through to the
+    already-registered-address branch of `POST /v1/users` instead of
+    recognizing the existing account. Fixed by adding this endpoint
+    rather than papering over the call site.
+  - **Confirmed `POST /v1/users/wallet/deploy` needed client-side
+    wiring, not just existence**: a fresh registration leaves
+    `PrimaryWalletDeployed = false` by design (§13.11 - "registration
+    never requires activation"), which also means no `ClosedGroup` exists
+    yet (`ensurePrimaryWalletGroup` only runs inside
+    `DeployPrimaryWallet`) - so `payments`/`swaps`/`assets/approve`'s
+    `/build` all correctly 404 with "no shared-access group found for
+    this wallet address" for a wallet nobody ever deployed. Nothing to
+    fix here (this is the documented, intentional deferred-activation
+    design), but it meant `wallet-web` needed to actually call the
+    self-service deploy endpoint somewhere for its own payments/swaps
+    fix to be reachable end-to-end - confirmed live in this sandbox (a
+    real `POST /v1/users/wallet/deploy` round trip, correctly failing
+    with wallet-backend's own honest error since this sandbox's egress
+    policy blocks `sepolia.base.org`, not a code bug).

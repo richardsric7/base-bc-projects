@@ -4,6 +4,10 @@ export interface User {
   id: number;
   username: string;
   email: string;
+  // The primary wallet's Safe smart-contract address (PLAN.md §13),
+  // computed and stored by wallet-backend at registration time - never a
+  // separately-imported mnemonic's own address (PLAN.md §3, corrected -
+  // a Safe has no private key of its own).
   address: string;
   kycStatus: string;
 }
@@ -17,39 +21,41 @@ export function registerUser(signerAddress: string, username: string, email: str
   return apiRequest<User>('/v1/users', { method: 'POST', walletAddress: signerAddress, body: { username, email } });
 }
 
-export function getUser(username: string): Promise<User> {
-  return apiRequest<User>(`/v1/users/${encodeURIComponent(username)}`);
+// GET /v1/users/me (SignatureAuth) - looks a profile up by the verified
+// signer's own address. Used by onboarding (to tell "this signer already
+// has a registered profile" from "brand-new signer") and by App.tsx's
+// reload hydration (to re-resolve the primary wallet address if the
+// offline cache was cleared).
+export function getMyUser(signerAddress: string): Promise<User> {
+  return apiRequest<User>('/v1/users/me', { walletAddress: signerAddress });
 }
 
-export class LinkPrimaryNotSupportedError extends Error {
-  constructor() {
-    super('This wallet-backend deployment does not yet support linking a separate primary wallet.');
-    this.name = 'LinkPrimaryNotSupportedError';
-  }
+// POST /v1/users/wallet/deploy (SignatureAuth, self-signed) - submits the
+// on-chain deployment of the caller's own primary wallet Safe at the
+// address Register already computed (wallet-backend PLAN.md §13/§17).
+// Idempotent and paid for by a platform-operated key, so it's safe to call
+// freely - in particular, right after onboarding, since a Safe that is
+// never deployed has no shared-access group and can't build/submit any
+// payment or swap yet (see PLAN.md §17.4).
+export function deployPrimaryWallet(signerAddress: string): Promise<User> {
+  return apiRequest<User>('/v1/users/wallet/deploy', { method: 'POST', walletAddress: signerAddress });
 }
 
-/**
- * PLAN.md §3's proposed `POST /v1/users/wallets/link-primary` - not yet
- * implemented by wallet-backend. Calls it anyway (a future deployment
- * may have it) and translates a 404 into a distinguishable error so the
- * UI can fall back to "same mnemonic for both" messaging instead of
- * showing a raw network error.
- */
-export async function linkPrimaryWallet(
-  signerAddress: string,
-  address: string,
-  message: string,
-  signature: string,
-): Promise<void> {
+// A payment/swap/approve `build` call 404s with this specific message when
+// the primary wallet's Safe hasn't been deployed yet (services.go's
+// GroupWalletExecutor finds no ClosedGroup for it - see
+// deployPrimaryWallet's doc comment above). Onboarding already attempts
+// deployment once, best-effort; this is the backstop for whenever that
+// attempt didn't stick (device was offline at the time, or a transient RPC
+// failure) - it deploys and retries the same build call once more before
+// giving up.
+export async function withWalletDeployRetry<T>(signerAddress: string, buildCall: () => Promise<T>): Promise<T> {
   try {
-    await apiRequest<void>('/v1/users/wallets/link-primary', {
-      method: 'POST',
-      walletAddress: signerAddress,
-      body: { address, message, signature },
-    });
+    return await buildCall();
   } catch (err) {
-    if (err instanceof ApiError && err.status === 404) {
-      throw new LinkPrimaryNotSupportedError();
+    if (err instanceof ApiError && err.status === 404 && /shared-access group/.test(err.message)) {
+      await deployPrimaryWallet(signerAddress);
+      return buildCall();
     }
     throw err;
   }

@@ -4,7 +4,8 @@ import TextInput from '../../components/TextInput';
 import { useAppSelector } from '../../store/hooks';
 import { useIsOnline } from '../../connectivity/useIsOnline';
 import { buildSwap, submitSwap } from '../../api/swapsApi';
-import { signTransaction } from '../../core/walletCoreClient';
+import { withWalletDeployRetry } from '../../api/usersApi';
+import { signRequestMessage } from '../../core/walletCoreClient';
 
 // wallet-backend's swaps component is a generic DEX router-call builder,
 // not an abstracted "swap A for B" (PLAN.md §2: "the project configures
@@ -15,6 +16,7 @@ import { signTransaction } from '../../core/walletCoreClient';
 export default function Swap() {
   const isOnline = useIsOnline();
   const primaryAddress = useAppSelector((s) => s.wallet.primary.address);
+  const signerAddress = useAppSelector((s) => s.wallet.signer.address);
   const signerUnlocked = useAppSelector((s) => s.wallet.signer.isUnlocked);
 
   const [routerAddress, setRouterAddress] = useState('');
@@ -28,7 +30,7 @@ export default function Swap() {
 
   const handleSwap = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!primaryAddress || !signerUnlocked) {
+    if (!primaryAddress || !signerAddress || !signerUnlocked) {
       setError('Unlock your signer wallet before swapping.');
       return;
     }
@@ -38,13 +40,22 @@ export default function Swap() {
       const args = JSON.parse(argsJson || '[]');
 
       setStatus('building');
-      const unsignedTx = await buildSwap(primaryAddress, { routerAddress, routerAbi, method, args, valueWei });
+      // Proposes the router call as a real Safe transaction against the
+      // primary wallet (PLAN.md §17) and returns the digest to approve it.
+      // Wrapped so an undeployed Safe (no shared-access group yet) is
+      // deployed on the spot and the build is retried - see
+      // usersApi.ts's withWalletDeployRetry.
+      const proposal = await withWalletDeployRetry(signerAddress, () =>
+        buildSwap(primaryAddress, { routerAddress, routerAbi, method, args, valueWei }),
+      );
 
       setStatus('signing');
-      const signedTx = await signTransaction('primary', JSON.stringify(unsignedTx));
+      // personal_sign over the digest with the signer's own key - never
+      // the (nonexistent) primary wallet key.
+      const signature = await signRequestMessage('signer', proposal.digestToSign);
 
       setStatus('submitting');
-      const { hash } = await submitSwap(primaryAddress, signedTx);
+      const { hash } = await submitSwap(primaryAddress, proposal.actionId, signature);
 
       setTxHash(hash);
       setStatus('done');

@@ -289,6 +289,18 @@ func EncodeERC20Transfer(to string, amount *big.Int) ([]byte, error) {
 	return data, nil
 }
 
+// EncodeERC20Approve ABI-encodes an approve(spender, amount) call - for
+// callers (assets.BuildApproveTx, PLAN.md §17) that propose it as a real
+// Safe transaction via sharedaccess rather than building a raw
+// transaction, so they need just the calldata.
+func EncodeERC20Approve(spender string, amount *big.Int) ([]byte, error) {
+	data, err := erc20ABI.Pack("approve", common.HexToAddress(spender), amount)
+	if err != nil {
+		return nil, fmt.Errorf("encode erc20 approve: %w", err)
+	}
+	return data, nil
+}
+
 // EncodeERC20TransferFrom ABI-encodes a transferFrom(from, to, amount) call
 // - used by the market component to settle a matched trade by pulling each
 // side's asset via a prior approve() rather than holding user funds itself,

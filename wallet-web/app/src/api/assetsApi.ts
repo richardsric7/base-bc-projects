@@ -1,6 +1,6 @@
 import { apiRequest } from './httpClient';
 import { assertOnline } from '../connectivity/assertOnline';
-import type { UnsignedTx } from './paymentsApi';
+import type { ActionProposal } from './paymentsApi';
 
 export interface CuratedToken {
   id: number;
@@ -28,19 +28,19 @@ export async function buildApprove(
   tokenAddress: string,
   spender: string,
   amount: string,
-): Promise<UnsignedTx> {
+): Promise<ActionProposal> {
   await assertOnline();
-  return apiRequest<UnsignedTx>('/v1/assets/approve/build', {
+  return apiRequest<ActionProposal>('/v1/assets/approve/build', {
     method: 'POST',
     walletAddress,
     body: { tokenAddress, spender, amount },
   });
 }
 
-export function submitApprove(walletAddress: string, signedTx: string): Promise<{ hash: string }> {
+export function submitApprove(walletAddress: string, actionId: number, signature: string): Promise<{ hash: string }> {
   return apiRequest<{ hash: string }>('/v1/assets/approve/submit', {
     method: 'POST',
     walletAddress,
-    body: { signedTx },
+    body: { actionId, signature },
   });
 }

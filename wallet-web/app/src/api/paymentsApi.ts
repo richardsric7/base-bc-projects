@@ -1,20 +1,16 @@
 import { apiRequest } from './httpClient';
 import { assertOnline } from '../connectivity/assertOnline';
 
-// Mirrors wallet-backend's network.UnsignedTx exactly (PLAN.md §2,
-// internal/network/base.go): chainId/value/data/maxFeePerGas/
-// maxPriorityFeePerGas are 0x-prefixed hex strings, nonce/gas are plain
-// JSON numbers - the same shape wallet-core's sign_transaction expects.
-export interface UnsignedTx {
-  chainId: string;
-  nonce: number;
-  to?: string;
-  value: string;
-  data: string;
-  gas: number;
-  maxFeePerGas: string;
-  maxPriorityFeePerGas: string;
-  type: string;
+// What wallet-backend's /build now returns (PLAN.md §17): every wallet is
+// a Safe smart-contract account with no private key of its own, so there
+// is no "unsigned transaction" for a client to sign directly anymore -
+// /build proposes the transfer as a real Safe transaction and returns the
+// digest the caller's own signer key must personal_sign to approve it
+// (see core/walletCoreClient.ts's signRequestMessage). Shared with
+// swapsApi.ts, which gets the identical shape from /v1/swaps/build.
+export interface ActionProposal {
+  actionId: number;
+  digestToSign: string;
 }
 
 export interface PaymentHistoryRecord {
@@ -32,20 +28,20 @@ export async function buildPayment(
   destination: string,
   amount: string,
   tokenAddress?: string,
-  nonce?: number,
-): Promise<UnsignedTx> {
+): Promise<ActionProposal> {
   await assertOnline(); // PLAN.md §6.4: re-verified here, not just at the UI layer
-  return apiRequest<UnsignedTx>('/v1/payments/build', {
+  return apiRequest<ActionProposal>('/v1/payments/build', {
     method: 'POST',
     walletAddress,
-    body: { destination, tokenAddress: tokenAddress ?? '', amount, nonce },
+    body: { destination, tokenAddress: tokenAddress ?? '', amount },
   });
 }
 
 export function submitPayment(
   walletAddress: string,
   idempotencyKey: string,
-  signedTx: string,
+  actionId: number,
+  signature: string,
   destination: string,
   amount: string,
   tokenAddress?: string,
@@ -53,7 +49,7 @@ export function submitPayment(
   return apiRequest<PaymentHistoryRecord>('/v1/payments/submit', {
     method: 'POST',
     walletAddress,
-    body: { idempotencyKey, signedTx, destination, tokenAddress: tokenAddress ?? '', amount },
+    body: { idempotencyKey, actionId, signature, destination, tokenAddress: tokenAddress ?? '', amount },
   });
 }
 

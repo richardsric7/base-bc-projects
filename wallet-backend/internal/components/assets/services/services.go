@@ -4,17 +4,37 @@ import (
 	"context"
 	"math/big"
 
+	"github.com/ethereum/go-ethereum/common"
 	"gorm.io/gorm"
 
 	"wallet-backend/internal/apperrors"
 	"wallet-backend/internal/components/assets/models"
+	sharedaccessModels "wallet-backend/internal/components/sharedaccess/models"
 	"wallet-backend/internal/network"
 	"wallet-backend/internal/validators"
 )
 
+// GroupWalletExecutor is the slice of sharedaccess.Service this component
+// needs - see payments.GroupWalletExecutor's doc comment for why this
+// exists (this package had the identical bug: building and submitting a
+// plain EIP-1559 approve() transaction "from" a wallet address that, once
+// §13 made every wallet a Safe smart-contract account, has no private key
+// to ever validly sign one with).
+type GroupWalletExecutor interface {
+	GetGroupByAddress(address string) (*sharedaccessModels.ClosedGroup, error)
+	ProposeContractCall(ctx context.Context, proposerAddress string, groupID uint, kind sharedaccessModels.ActionKind, description, contractAddress, valueWei, dataHex, domain, relatedRecordID string) (*sharedaccessModels.PendingAction, error)
+	DigestToSign(actionID uint, memberAddress string) (string, error)
+	ApproveAction(ctx context.Context, actionID uint, memberAddress, signatureHex string) (*sharedaccessModels.PendingAction, error)
+}
+
 type Service struct {
 	DB         *gorm.DB
 	Blockchain *network.Client
+	// SharedAccess resolves a wallet address to its group and actually
+	// executes an approval once approved - nil until main.go wires it
+	// post-construction, in which case BuildApproveTx/SubmitApprove fail
+	// closed with a clear error rather than a nil-pointer panic.
+	SharedAccess GroupWalletExecutor
 }
 
 func New(db *gorm.DB, blockchain *network.Client) *Service {
@@ -54,13 +74,28 @@ func (s *Service) Balance(ctx context.Context, address, tokenAddress string) (st
 	return balance.String(), nil
 }
 
-// BuildApproveTx returns an unsigned ERC-20 approve(spender, amount)
-// transaction for owner to sign client-side - the base template's
-// substitute for Stellar's trustline build/submit, see PLAN.md §5.1. amount
-// is a decimal string (the token's base unit, not a human-readable amount)
-// to avoid floating-point precision loss.
-func (s *Service) BuildApproveTx(ctx context.Context, owner, tokenAddress, spender, amount string, nonce *uint64) (*network.UnsignedTx, error) {
-	if !validators.IsValidAddress(owner) || !validators.IsValidAddress(spender) {
+// ApproveProposal is what BuildApproveTx returns: the real on-chain
+// SafeTxHash digest (see sharedaccess.DigestToSign) the caller must
+// personal_sign with their signer key to approve the token approval, and
+// the PendingAction id that signature approves.
+type ApproveProposal struct {
+	ActionID     uint   `json:"actionId"`
+	DigestToSign string `json:"digestToSign"`
+}
+
+// BuildApproveTx proposes an ERC-20 approve(spender, amount) call as a real
+// Safe transaction against walletAddress - the base template's substitute
+// for Stellar's trustline build/submit, see PLAN.md §5.1 (updated by
+// PLAN.md §17 for the Safe-based primary wallet). amount is a decimal
+// string (the token's base unit, not a human-readable amount) to avoid
+// floating-point precision loss. signerAddress is the caller's own signer
+// key - the group member whose approval this proposal needs - not
+// walletAddress itself, which never has a private key of its own.
+func (s *Service) BuildApproveTx(ctx context.Context, walletAddress, signerAddress, tokenAddress, spender, amount string) (*ApproveProposal, error) {
+	if s.SharedAccess == nil {
+		return nil, apperrors.Internal("approvals are not available: shared-access wiring is missing")
+	}
+	if !validators.IsValidAddress(walletAddress) || !validators.IsValidAddress(spender) {
 		return nil, apperrors.BadRequest("invalid address")
 	}
 	if !validators.IsValidAddress(tokenAddress) {
@@ -70,19 +105,42 @@ func (s *Service) BuildApproveTx(ctx context.Context, owner, tokenAddress, spend
 	if !ok {
 		return nil, apperrors.BadRequest("amount must be a decimal integer string in the token's base unit")
 	}
-	tx, err := s.Blockchain.BuildApproveTx(ctx, owner, tokenAddress, spender, amountWei, nonce)
+
+	data, err := network.EncodeERC20Approve(spender, amountWei)
 	if err != nil {
 		return nil, apperrors.BadRequest(err.Error())
 	}
-	return tx, nil
+
+	group, err := s.SharedAccess.GetGroupByAddress(walletAddress)
+	if err != nil {
+		return nil, err
+	}
+	dataHex := "0x" + common.Bytes2Hex(data)
+	action, err := s.SharedAccess.ProposeContractCall(ctx, signerAddress, group.ID, sharedaccessModels.ActionContractCall, "approve", tokenAddress, "0", dataHex, "", "")
+	if err != nil {
+		return nil, err
+	}
+	digest, err := s.SharedAccess.DigestToSign(action.ID, signerAddress)
+	if err != nil {
+		return nil, err
+	}
+	return &ApproveProposal{ActionID: action.ID, DigestToSign: digest}, nil
 }
 
-// SubmitSignedTransaction submits a client-signed transaction (an approval
-// or any other) to the network and returns its hash.
-func (s *Service) SubmitSignedTransaction(ctx context.Context, rawTxHex string) (string, error) {
-	hash, err := s.Blockchain.SubmitSignedTransaction(ctx, rawTxHex)
-	if err != nil {
-		return "", apperrors.BadRequest("transaction rejected by the network: " + err.Error())
+// SubmitApprove approves actionID (built via BuildApproveTx) with
+// signerAddress's personal_sign signature over its digest, executing it
+// immediately once the group's approval threshold is met, and returns the
+// resulting transaction hash.
+func (s *Service) SubmitApprove(ctx context.Context, actionID uint, signerAddress, signature string) (string, error) {
+	if s.SharedAccess == nil {
+		return "", apperrors.Internal("approvals are not available: shared-access wiring is missing")
 	}
-	return hash, nil
+	action, err := s.SharedAccess.ApproveAction(ctx, actionID, signerAddress, signature)
+	if err != nil {
+		return "", err
+	}
+	if action.Status != sharedaccessModels.ActionExecuted {
+		return "", apperrors.BadRequest("approval is not yet executed (status: " + string(action.Status) + ") - approve again once outstanding approvals are collected")
+	}
+	return action.TxHash, nil
 }

@@ -16,10 +16,10 @@ export interface RoleState {
 
 interface WalletState {
   signer: RoleState;
+  // The primary wallet is a Safe with no private key of its own (PLAN.md
+  // §13) - "vault"/"unlocked" here just means "we know its address," see
+  // OnboardingWizard's finishWithPrimaryWallet.
   primary: RoleState;
-  /** True once the user has explicitly chosen "same mnemonic for both"
-   * (PLAN.md §3 mode 1) rather than importing two separate mnemonics. */
-  primarySameAsSigner: boolean;
 }
 
 const emptyRole: RoleState = { address: null, hasVault: false, isUnlocked: false };
@@ -27,7 +27,6 @@ const emptyRole: RoleState = { address: null, hasVault: false, isUnlocked: false
 const initialState: WalletState = {
   signer: { ...emptyRole },
   primary: { ...emptyRole },
-  primarySameAsSigner: false,
 };
 
 const walletSlice = createSlice({
@@ -51,9 +50,6 @@ const walletSlice = createSlice({
     walletRemoved(state, action: PayloadAction<{ role: WalletRole }>) {
       state[action.payload.role] = { ...emptyRole };
     },
-    setPrimarySameAsSigner(state, action: PayloadAction<boolean>) {
-      state.primarySameAsSigner = action.payload;
-    },
     hydrateKnownVaults(state, action: PayloadAction<{ signer: RoleState; primary: RoleState }>) {
       state.signer = action.payload.signer;
       state.primary = action.payload.primary;
@@ -61,13 +57,5 @@ const walletSlice = createSlice({
   },
 });
 
-export const {
-  vaultCreated,
-  unlocked,
-  locked,
-  lockedAll,
-  walletRemoved,
-  setPrimarySameAsSigner,
-  hydrateKnownVaults,
-} = walletSlice.actions;
+export const { vaultCreated, unlocked, locked, lockedAll, walletRemoved, hydrateKnownVaults } = walletSlice.actions;
 export default walletSlice.reducer;

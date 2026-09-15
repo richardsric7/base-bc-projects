@@ -57,4 +57,10 @@ export const cacheKeys = {
   curatedTokens: () => 'curatedTokens',
   balances: (address: string) => `balances:${address}`,
   paymentHistory: (address: string) => `paymentHistory:${address}`,
+  // The primary wallet's Safe address (PLAN.md §13/§17) is not itself
+  // sensitive (it's public on-chain), and there is no local key to
+  // "unlock" for it - caching it here (rather than treating it as a
+  // vault) is what keeps offline reloads working without needing a live
+  // GET /v1/users/:username round trip on every app start.
+  primaryWalletAddress: (signerAddress: string) => `primaryWalletAddress:${signerAddress}`,
 };
