@@ -27,6 +27,7 @@ func Init(router *gin.Engine, gc *sharedconfig.GlobalConfig) *services.Service {
 
 	group.POST("/groups", createGroup(svc))
 	group.GET("/groups/:groupId", getGroup(svc))
+	group.GET("/groups/:groupId/members", listMembers(svc))
 	group.GET("/balance/:groupId", getBalance(svc))
 	group.GET("/balance/:groupId/curated", getCuratedBalances(svc))
 	group.GET("/wallets", listWallets(svc))
@@ -91,6 +92,22 @@ func getGroup(svc *services.Service) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, group)
+	}
+}
+
+func listMembers(svc *services.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		groupID, err := parseID(c, "groupId")
+		if err != nil {
+			return
+		}
+		caller := c.GetString(middleware.CtxSubject)
+		members, err := svc.ListMembers(groupID, caller)
+		if err != nil {
+			apperrors.AbortAny(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, members)
 	}
 }
 

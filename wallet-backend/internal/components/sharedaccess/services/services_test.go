@@ -1183,6 +1183,60 @@ func TestListWalletsForMember_NoPrimaryWalletJustGroups(t *testing.T) {
 	}
 }
 
+func TestListMembers_ReturnsAllMembersWithRoles(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xdeployed"))
+	initiator, _ := randomAddress(t)
+	approver, _ := randomAddress(t)
+	viewer, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "3-member", 1, []MemberInput{
+		{Address: initiator, Role: models.RoleInitiatorApprover},
+		{Address: approver, Role: models.RoleApprover},
+		{Address: viewer, Role: models.RoleViewOnly},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+
+	members, err := svc.ListMembers(group.ID, viewer)
+	if err != nil {
+		t.Fatalf("ListMembers returned error: %v", err)
+	}
+	if len(members) != 3 {
+		t.Fatalf("expected 3 members, got %d", len(members))
+	}
+	roleByAddress := make(map[string]models.GroupRole, len(members))
+	for _, m := range members {
+		roleByAddress[m.MemberAddress] = m.Role
+	}
+	if roleByAddress[initiator] != models.RoleInitiatorApprover {
+		t.Fatalf("expected initiator role INITIATOR_APPROVER, got %s", roleByAddress[initiator])
+	}
+	if roleByAddress[approver] != models.RoleApprover {
+		t.Fatalf("expected approver role APPROVER, got %s", roleByAddress[approver])
+	}
+	if roleByAddress[viewer] != models.RoleViewOnly {
+		t.Fatalf("expected viewer role VIEW_ONLY, got %s", roleByAddress[viewer])
+	}
+}
+
+func TestListMembers_RejectsNonMember(t *testing.T) {
+	svc := newTestService(t, newFakeBlockchain("0xdeployed"))
+	initiator, _ := randomAddress(t)
+	outsider, _ := randomAddress(t)
+
+	group, err := svc.CreateGroup(context.Background(), "1-of-1", 1, []MemberInput{
+		{Address: initiator, Role: models.RoleInitiatorApprover},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup returned error: %v", err)
+	}
+
+	if _, err := svc.ListMembers(group.ID, outsider); err == nil {
+		t.Fatal("expected a non-member to be rejected")
+	}
+}
+
 func TestCuratedBalances_ReturnsOnlyCuratedTokens(t *testing.T) {
 	chain := newFakeBlockchain("0xdeployed")
 	svc := newTestService(t, chain)

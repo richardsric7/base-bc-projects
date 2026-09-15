@@ -3973,3 +3973,62 @@ group's approval threshold is met and returns the actual on-chain
 `TestBuildWithdrawal_Success`) exercise the full propose → approve →
 executed-txHash path instead of a bare build call, the same upgrade §17
 made to the payments/swaps test suite.
+
+## 19. `sharedaccess.ListMembers` - a small real gap found while building `wallet-web`'s own shared-access UI
+
+Auditing `wallet-web` against the original app's *full* route list
+(`appRouter.tsx` plus `sideBar.tsx`) turned up one substantial, genuine
+gap - the original's `dashboard/sharedAccess/*` pages are a complete,
+working feature (group creation, member management, balance view,
+propose/approve/reject) with a full `wallet-backend` counterpart
+already built (this component) but never ported to `wallet-web`
+(deliberately deferred as its own follow-up, `wallet-web/PLAN.md` §8).
+Building that follow-up surfaced a small real backend gap: no route
+ever exposed a group's `GroupMember` rows at all - only a caller's own
+role (`memberRole`, used internally for access checks). A member
+picking "add member" or "change threshold" needs to see who's
+currently on the group and their roles first; there was no way to get
+that.
+
+Fixed with `Service.ListMembers(groupID, callerAddress)` (gated the same
+way as `Balance`/`CuratedBalances` - any member, including `VIEW_ONLY`,
+may list membership) and `GET /v1/shared-access/groups/:groupId/members`.
+Tests: `TestListMembers_ReturnsAllMembersWithRoles`,
+`TestListMembers_RejectsNonMember`.
+
+Everything else the original's sidebar links to beyond what's already
+ported turned out **not** to be a real gap once checked against the
+original's own router, not just its sidebar (a sidebar `url` with no
+matching `<Route>` is a dead link even in the original itself):
+
+- **"Trovo Patron"** (`/dashboard/trovo-patron`) and **"Market"**
+  (`/dashboard/market-trade`) - no route, no page file, anywhere in the
+  original `web` app. `patron`/`market` are real, fully-built
+  `wallet-backend` components, but the original *web frontend* never
+  had a working page for either (patron membership only ever got a
+  read-only "Current Plan" status widget on the dashboard home; the
+  sidebar links themselves go nowhere). Not a `wallet-web` regression -
+  there's no working original UI to port.
+- **"Closed groups"** (`/dashboard/closed-groups`) - same: dead sidebar
+  link, no route, no page, in the original.
+- **Dividend/Yield** (`dashboard/wallet/yield.tsx`) - a real original
+  page, but its entire data table is hardcoded mock rows ("$100",
+  "N45,000", ...) with a `console.log` stub for its tab handler and a
+  commented-out explorer link - never wired to any real backend. Matches
+  `tokenization/models/payout.go`'s own documented state (§9's resolved
+  policy): the proceed/dividend payout engine is ported-schema-only,
+  no worker ever populates it, upstream's own equivalent engine was
+  never tracked down either. Nothing real to port on either side.
+- **KYC (Sumsub/Doja)** - a real, fully-built `wallet-backend` component
+  (§3), but grepping the *entire* original monorepo (not just `web`)
+  turns up Sumsub/Dojah only in `backend/docs/swagger.json` - no
+  frontend anywhere, web or otherwise, ever called it. Backend-only in
+  the original; a `wallet-web` KYC page would be new scope, not a port.
+- **Security questions** (`setupSecurityQuestions`/
+  `answerSecurityQuestions`) - already covered by `wallet-web`'s own
+  recovery redesign (`RecoveryWizard.tsx`, `RecoverySettings.tsx`,
+  `recoveryApi.ts`), which uses this exact `users` component endpoint
+  set (`ListSecurityQuestions`/`SetSecurityAnswer`/
+  `VerifySecurityAnswer`) already.
+
+See `wallet-web/PLAN.md` §20 for the shared-access UI itself.

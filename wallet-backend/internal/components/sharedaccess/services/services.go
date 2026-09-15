@@ -1379,6 +1379,26 @@ func (s *Service) Balance(ctx context.Context, groupID uint, callerAddress, toke
 	return balance.String(), nil
 }
 
+// ListMembers returns a group's full membership list - the equivalent of
+// the original's per-wallet member listing on its SharedAccessWalletInfo
+// screen. No prior route exposed GroupMember rows at all (only each
+// member's own role via memberRole, used internally for access checks),
+// which is a real gap surfaced while building wallet-web's own
+// shared-access UI: a member needs to see who else is on a group and
+// their roles before proposing an add/remove/threshold change, not just
+// their own role. Gated the same way as Balance/CuratedBalances - any
+// member (including VIEW_ONLY) may list membership.
+func (s *Service) ListMembers(groupID uint, callerAddress string) ([]models.GroupMember, error) {
+	if _, err := s.memberRole(groupID, callerAddress); err != nil {
+		return nil, err
+	}
+	var members []models.GroupMember
+	if err := s.DB.Where("group_id = ?", groupID).Order("created_at").Find(&members).Error; err != nil {
+		return nil, apperrors.Internal("failed to load group members")
+	}
+	return members, nil
+}
+
 // WalletSummary is one entry in ListWalletsForMember's result - either the
 // caller's own primary wallet (Kind "primary", GroupID nil) or a
 // ClosedGroup they're a GroupMember of (Kind "group") - a sub-wallet and a
