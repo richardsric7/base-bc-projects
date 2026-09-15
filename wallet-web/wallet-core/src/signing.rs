@@ -63,8 +63,36 @@ struct UnsignedTx {
 /// EVM signature-verification library, including `siwe-go`'s `Verify`
 /// server-side, expects).
 pub fn sign_personal_message(secret_bytes: &[u8; 32], message: &str) -> Result<String, SigningError> {
-    let hash = personal_message_hash(message);
-    let (signature, recovery_id) = sign_prehash(secret_bytes, &hash)?;
+    let hash = personal_message_hash(message.as_bytes());
+    sign_prehash_to_signature_hex(secret_bytes, &hash)
+}
+
+/// Signs a `0x`-prefixed hex digest (e.g. a Safe transaction hash -
+/// `sharedaccess.DigestToSign`/wallet recovery's `*SafeTxHash` fields,
+/// PLAN.md §13/§15/§17) per EIP-191 `personal_sign`, but over the digest's
+/// **raw decoded bytes**, not the ASCII characters of its hex string -
+/// this must byte-for-byte match `wallet-backend`'s own
+/// `cryptoutil.VerifyPersonalSignBytes(digest.Bytes(), ...)`, which every
+/// approval-signature check in `sharedaccess.ApproveAction` and
+/// `wallet_recovery.go`'s `verifySingleOwnerSignature` uses. Signing the
+/// hex *string* instead (`sign_personal_message`'s behavior, correct for
+/// human-composed messages like SignatureAuth's headers) hashes a
+/// different, longer byte sequence with a different EIP-191 length
+/// prefix (66 ASCII characters vs. 32 raw bytes) and produces a signature
+/// that recovers to the right key but against the wrong hash entirely -
+/// `VerifyPersonalSignBytes` then never matches it. This was found by
+/// cross-checking a real signature from this crate against
+/// `wallet-backend/internal/cryptoutil`'s actual verification functions,
+/// not by inspection alone (see this file's `sign_hex_digest_matches_backends_raw_byte_convention` test).
+pub fn sign_hex_digest(secret_bytes: &[u8; 32], digest_hex: &str) -> Result<String, SigningError> {
+    let trimmed = digest_hex.strip_prefix("0x").unwrap_or(digest_hex);
+    let digest_bytes = hex::decode(trimmed).map_err(|_| SigningError::InvalidHexField("digest"))?;
+    let hash = personal_message_hash(&digest_bytes);
+    sign_prehash_to_signature_hex(secret_bytes, &hash)
+}
+
+fn sign_prehash_to_signature_hex(secret_bytes: &[u8; 32], hash: &[u8; 32]) -> Result<String, SigningError> {
+    let (signature, recovery_id) = sign_prehash(secret_bytes, hash)?;
 
     let mut out = Vec::with_capacity(65);
     out.extend_from_slice(&signature.r().to_bytes());
@@ -73,11 +101,11 @@ pub fn sign_personal_message(secret_bytes: &[u8; 32], message: &str) -> Result<S
     Ok(format!("0x{}", hex::encode(out)))
 }
 
-fn personal_message_hash(message: &str) -> [u8; 32] {
+fn personal_message_hash(message: &[u8]) -> [u8; 32] {
     let prefix = format!("\x19Ethereum Signed Message:\n{}", message.len());
     let mut hasher = Keccak256::new();
     hasher.update(prefix.as_bytes());
-    hasher.update(message.as_bytes());
+    hasher.update(message);
     hasher.finalize().into()
 }
 
@@ -198,7 +226,7 @@ mod tests {
         let sig_hex = sign_personal_message(&TEST_SECRET, message).unwrap();
         let sig_bytes = hex::decode(&sig_hex[2..]).unwrap();
 
-        let hash = personal_message_hash(message);
+        let hash = personal_message_hash(message.as_bytes());
         let signature = Signature::from_slice(&sig_bytes[0..64]).unwrap();
         let recovery_id = RecoveryId::from_byte(sig_bytes[64] - 27).unwrap();
 
@@ -209,6 +237,42 @@ mod tests {
             .verifying_key()
             .clone();
         assert_eq!(recovered_key, expected_key);
+    }
+
+    /// Regression test for a real, previously-shipped bug: this crate's
+    /// only signing primitive at the time (`sign_personal_message`) was
+    /// reused for approval digests too, signing the ASCII hex *string*
+    /// instead of the digest's raw bytes - `wallet-backend`'s
+    /// `cryptoutil.VerifyPersonalSignBytes(digest.Bytes(), ...)` (every
+    /// `sharedaccess.ApproveAction`/wallet-recovery signature check) never
+    /// matched it as a result. Confirmed against the real Go verification
+    /// code directly (not just by inspection) before this fix landed.
+    /// `sign_hex_digest` must recover against the **raw decoded bytes**'
+    /// EIP-191 hash, not the hex string's.
+    #[test]
+    fn sign_hex_digest_matches_backends_raw_byte_convention() {
+        let digest_hex = "0x1122334455667788990011223344556677889900112233445566778899aabb";
+        let sig_hex = sign_hex_digest(&TEST_SECRET, digest_hex).unwrap();
+        let sig_bytes = hex::decode(&sig_hex[2..]).unwrap();
+
+        let raw_bytes = hex::decode(&digest_hex[2..]).unwrap();
+        let hash = personal_message_hash(&raw_bytes);
+        let signature = Signature::from_slice(&sig_bytes[0..64]).unwrap();
+        let recovery_id = RecoveryId::from_byte(sig_bytes[64] - 27).unwrap();
+
+        let recovered_key =
+            k256::ecdsa::VerifyingKey::recover_from_prehash(&hash, &signature, recovery_id).unwrap();
+        let expected_key = SigningKey::from_bytes((&TEST_SECRET).into())
+            .unwrap()
+            .verifying_key()
+            .clone();
+        assert_eq!(recovered_key, expected_key);
+
+        // And must NOT match the (wrong) hex-string hash, proving this
+        // isn't just trivially always true regardless of which bytes get
+        // hashed.
+        let string_hash = personal_message_hash(digest_hex.as_bytes());
+        assert_ne!(hash, string_hash);
     }
 
     #[test]

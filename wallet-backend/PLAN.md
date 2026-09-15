@@ -3773,10 +3773,13 @@ path.
 has the real, tested machinery (real `SafeTxHash` computation, `personal_sign`-based
 approval per `sharedaccess.DigestToSign`'s own doc comment - not full
 EIP-712 typed-data signing, despite earlier planning docs in this and the
-sibling projects assuming that would be needed; the pragmatic choice made
-when §13 was actually built needs no new `wallet-core` signing primitive at
-all, just signing a hash string), signature packing, and relayer-submitted
-`execTransaction`, all exercised by §13's own extensive test suite:
+sibling projects assuming that would be needed), signature packing, and
+relayer-submitted `execTransaction`, all exercised by §13's own extensive
+test suite. (An earlier draft of this section claimed no new
+`wallet-core` signing primitive was needed at all - that was wrong, and
+the mistake shipped: see `wallet-web/PLAN.md` §15, a real digest-signing
+bug found only by cross-checking a live signature against this backend's
+own verification code, not by inspection.)
 
 - **`users.DeployPrimaryWallet` now also creates the missing
   `ClosedGroup`/`GroupMember` row** (`ensurePrimaryWalletGroup`), idempotently -

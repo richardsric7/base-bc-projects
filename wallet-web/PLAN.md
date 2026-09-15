@@ -950,3 +950,75 @@ response-shape update.
   limitation noted throughout this document and `wallet-backend/PLAN.md`
   §17 - not a bug in this fix. `npx tsc -b` and `npm run build:app-only`
   both clean throughout.
+
+## 15. CRITICAL FIX: digest-signing used the wrong EIP-191 byte convention
+
+While starting on §13's wallet-recovery UI (which also needs to
+`personal_sign` a `SafeTxHash` digest, exactly like §14's payments/swaps
+fix), a close read of both sides of the signature check together turned
+up a serious, previously-shipped bug: **every digest-based approval
+signature this app has ever produced was rejected by `wallet-backend`.**
+Payments, swaps, asset-approvals, and (about to be) wallet-recovery
+enable/disable all silently failed at `sharedaccess.ApproveAction`'s
+signature check - never caught, because backend unit tests sign with
+Go-level test helpers matching the backend's own convention, and every
+live E2E test run so far was blocked earlier by this sandbox's RPC
+egress policy before ever reaching an actual `ApproveAction` call.
+
+**The bug, precisely**: `sharedaccess.DigestToSign` (and wallet-recovery's
+`*SafeTxHash` fields) return a `0x`-prefixed hex string representing a
+32-byte hash. `Send.tsx`/`Swap.tsx` signed that hex *string* via
+`signRequestMessage`/`wallet-core`'s `sign_personal_message`, which
+applies EIP-191's `personal_sign` prefix using the string's own
+**66-character ASCII length** and hashes its **ASCII bytes**. But
+`wallet-backend`'s actual verification -
+`cryptoutil.VerifyPersonalSignBytes(digest.Bytes(), ...)`, called by both
+`sharedaccess.ApproveAction` and `wallet_recovery.go`'s
+`verifySingleOwnerSignature` - applies the same EIP-191 prefix using the
+**32-byte raw length** and hashes the **raw decoded bytes**. Same digest,
+two different hashes, two different valid-looking signatures - the
+signature `wallet-core` produced was entirely correctly formed, it just
+never matched the hash the backend actually checked. `sign_request_message`
+itself is *not* wrong - the SignatureAuth header message it's used for
+elsewhere really is a human-composed string, correctly signed as ASCII
+text, and `internal/middleware/signature_auth.go` verifies it the same
+way. The bug was specific to reusing that same function for a
+hex-encoded binary digest.
+
+**Confirmed empirically, not just by code reading**: signed a fixed test
+digest with the actual compiled `wallet-core` wasm running in a real
+Chromium browser (Playwright, driving the real Worker - not a mock), then
+fed that real signature straight into `wallet-backend`'s actual
+`cryptoutil.VerifyPersonalSignBytes`/`VerifyPersonalSign` functions in a
+Go test. Result: the old `sign_request_message`-based signature verifies
+`true` against the (wrong) ASCII-string hash and `false` against the
+(correct) raw-bytes hash `ApproveAction` actually uses - reproducing the
+exact silent failure this fix closes.
+
+**The fix**: added a second `wallet-core` signing primitive,
+`sign_hex_digest` (`signing.rs`) - hex-decodes the digest first, then
+applies the identical EIP-191 `personal_sign` construction to the raw
+bytes, byte-for-byte matching `VerifyPersonalSignBytes`. Exposed via
+`wasm_bindgen` alongside `sign_request_message` (both remain - one for
+real message strings, one for hex-encoded digests, never interchangeable
+again). New Rust test
+`sign_hex_digest_matches_backends_raw_byte_convention` locks in the raw-
+bytes convention and explicitly asserts it differs from the
+string-based hash, so this can't silently regress back to signing the
+wrong bytes. Threaded through `worker/protocol.ts` (`SIGN_HEX_DIGEST`),
+`walletCoreWorker.ts`, and a new `signHexDigest()` in
+`core/walletCoreClient.ts`; `Send.tsx`/`Swap.tsx` now call
+`signHexDigest('signer', proposal.digestToSign)` instead of
+`signRequestMessage`. Re-verified live the same way after the fix: the
+real wasm's `sign_hex_digest` output now verifies `true` against
+`VerifyPersonalSignBytes`.
+
+**Also corrected**: `wallet-backend/PLAN.md` §17 previously claimed "no
+new `wallet-core` signing primitive was needed at all" for the
+sharedaccess-digest approach - that claim was the root cause of this bug
+shipping in the first place (it justified reusing
+`sign_request_message`/`signRequestMessage` for digests too) and has
+been corrected there to point back to this section. Full
+`cargo test` (wallet-core, 22/22), `go build`/`go vet`/`go test ./...`
+(wallet-backend), and `npx tsc -b`/`npm run build:app-only` (this app)
+all pass after the fix.

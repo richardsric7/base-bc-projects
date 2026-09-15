@@ -99,6 +99,19 @@ export function signRequestMessage(role: WalletRole, message: string): Promise<s
   return call({ type: 'SIGN_MESSAGE', role, message }).then((r) => r.signature);
 }
 
+/** Signs a `0x`-prefixed hex digest (a Safe transaction hash returned as
+ * `digestToSign`/`*SafeTxHash` by payments/swaps/asset-approve `/build`
+ * and wallet-recovery's enable/disable challenges) - NOT
+ * `signRequestMessage`, despite both being EIP-191 `personal_sign`: this
+ * one hashes the digest's raw decoded bytes, matching what
+ * wallet-backend's `cryptoutil.VerifyPersonalSignBytes` actually verifies
+ * (see wallet-core's `signing::sign_hex_digest` doc comment for the real
+ * bug this fixes - `signRequestMessage` would instead hash the ASCII hex
+ * string and never verify). */
+export function signHexDigest(role: WalletRole, digestHex: string): Promise<string> {
+  return call({ type: 'SIGN_HEX_DIGEST', role, digestHex }).then((r) => r.signature);
+}
+
 export function signTransaction(role: WalletRole, unsignedTxJson: string): Promise<string> {
   return call({ type: 'SIGN_TRANSACTION', role, unsignedTxJson }).then((r) => r.signedTx);
 }

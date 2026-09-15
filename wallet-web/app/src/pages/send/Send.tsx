@@ -6,7 +6,7 @@ import { useIsOnline } from '../../connectivity/useIsOnline';
 import { listCuratedTokens, type CuratedToken } from '../../api/assetsApi';
 import { buildPayment, submitPayment } from '../../api/paymentsApi';
 import { withWalletDeployRetry } from '../../api/usersApi';
-import { signRequestMessage } from '../../core/walletCoreClient';
+import { signHexDigest } from '../../core/walletCoreClient';
 
 // PLAN.md §6.4/§6.3: every step of this flow - not just the network
 // calls inside it - is gated on confirmed connectivity. The button is
@@ -51,10 +51,11 @@ export default function Send() {
       );
 
       setStatus('signing');
-      // personal_sign over the digest with the signer's own key - never
-      // the (nonexistent) primary wallet key, since the primary wallet is
-      // a Safe with no private key of its own.
-      const signature = await signRequestMessage('signer', proposal.digestToSign);
+      // personal_sign over the digest's raw bytes with the signer's own
+      // key - never the (nonexistent) primary wallet key, since the
+      // primary wallet is a Safe with no private key of its own. Must be
+      // signHexDigest, not signRequestMessage - see its doc comment.
+      const signature = await signHexDigest('signer', proposal.digestToSign);
 
       setStatus('submitting');
       const idempotencyKey = crypto.randomUUID();

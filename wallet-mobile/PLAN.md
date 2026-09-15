@@ -108,7 +108,7 @@ Phase 106-109) with exactly the primitives a mobile client needs:
 (`mnemonic.rs`), `encrypt_vault`/`unlock`/`lock`/`lock_all`/`is_unlocked`
 (`vault.rs`, an encrypted-at-rest vault keyed by password, one unlocked
 role's key ever held in memory, zeroized on lock), and
-`sign_request_message`/`sign_transaction` (`signing.rs`). This is real,
+`sign_request_message`/`sign_hex_digest`/`sign_transaction` (`signing.rs`). This is real,
 working code already exposed via `wasm-bindgen` for the browser - the
 task here is exposing the *same* crate to Dart, not writing a second
 implementation.
@@ -142,9 +142,9 @@ target.
 |---|---|
 | `generate_mnemonic`, `validate_mnemonic`, `derive_preview_address` | Reuse as-is |
 | `encrypt_vault`, `unlock`, `lock`, `lock_all`, `is_unlocked` | Reuse as-is - this becomes mobile's answer to the original's plaintext-sembast problem (§4.3) |
-| `sign_request_message` | Already renamed from `sign_siwe_message` (wallet-core/wallet-web PLAN.md §11 - it was always message-agnostic EIP-191 `personal_sign`, so this was a rename only, no behavior change) and used for the per-request signature scheme in both `wallet-web` and `wallet-backend`'s own approval digests (`sharedaccess.DigestToSign`, `wallet-backend/PLAN.md` §17) - reuse the same shared, already-renamed function here rather than reintroducing the old name |
-| `sign_transaction` (EIP-1559) | Narrower role than originally scoped - kept for any plain-EOA signing need, but no longer how primary-wallet or sub-wallet payments/swaps are authorized (see below) |
-| **New: EIP-712 typed-data signing** (`sign_typed_data`) | Needed for **every** payment or swap this app submits, not just shared-access approvals - once the primary wallet is a Safe (`wallet-backend/PLAN.md` §13.3, extended from sub-wallets-only by §15's recovery design), authorizing any transaction sourced from it means signing that transaction's `SafeTxHash` (EIP-712), not a plain `personal_sign`/raw EIP-1559 signature. This is a `wallet-core` gap on **both** platforms today (`wallet-web` doesn't have it either) - tracked here and in `wallet-web/PLAN.md` §12 as one shared addition to `signing.rs`, not a mobile-only one. |
+| `sign_request_message` | Already renamed from `sign_siwe_message` (wallet-core/wallet-web PLAN.md §11 - it was always message-agnostic EIP-191 `personal_sign`, so this was a rename only, no behavior change). Used **only** for genuinely human-composed string messages - the per-request SignatureAuth header (`path + signer + timestamp`). **Do not** reuse this for a hex-encoded digest (see the next row) - `wallet-web` did exactly that and it shipped a real bug, corrected in `wallet-web/PLAN.md` §15. |
+| `sign_hex_digest` | **New**, added by `wallet-web/PLAN.md` §15's fix. Signs a `0x`-prefixed hex digest (a Safe transaction hash - `sharedaccess.DigestToSign`/wallet-recovery's `*SafeTxHash` fields, `wallet-backend/PLAN.md` §13/§15/§17) by hex-decoding it to raw bytes *first*, then applying EIP-191 `personal_sign` to those raw bytes - required because `wallet-backend`'s actual verification (`cryptoutil.VerifyPersonalSignBytes(digest.Bytes(), ...)`) hashes the raw bytes with their own (32-byte) length prefix, not the hex string's (66-character) one. This is the function every payment, swap, asset-approval, and wallet-recovery enable/disable approval on this app must use - `sign_request_message` would produce a validly-formed but silently wrong signature. |
+| `sign_transaction` (EIP-1559) | Narrower role than originally scoped - kept for any plain-EOA signing need, but no longer how primary-wallet or sub-wallet payments/swaps are authorized (see above) |
 
 ### 4.3 Fixing the original's plaintext-storage gap, not reproducing it
 
@@ -232,8 +232,10 @@ Screens `add_shared_access_details.dart`, `approval_details.dart`,
 role-based logic intact (`VIEW-ONLY`/`INITIATOR`/`APPROVER` -
 `wallet-backend/PLAN.md` §13.8 leaves the option to rename the third
 role to `AUTHORIZER` open, cosmetic either way). What changes underneath:
-approving a pending action signs a `SafeTxHash` via the new EIP-712
-signer (§4.2), not an XDR co-signature via `signBase64Txn`; balance/asset
+approving a pending action signs a `SafeTxHash` via `sign_hex_digest`
+(§4.2 - plain EIP-191 `personal_sign` over the digest's raw bytes, not
+EIP-712 typed-data signing as this section previously assumed), not an
+XDR co-signature via `signBase64Txn`; balance/asset
 views read the new curated-asset-filtered summary endpoint
 (`wallet-backend/PLAN.md` §13.8) instead of an unfiltered Horizon balance
 list.
@@ -314,10 +316,10 @@ might suggest.
 |---|---|---|
 | `TrovoWalletSDK.createAccount`/`generateCredentialsFromPassPhrase` | mnemonic generation/derivation | `wallet-core` (FFI) |
 | `TrovoWalletSDK.signHTTP` | per-request signature (§5) | `wallet-core` (FFI) |
-| `TrovoWalletSDK.signBase64Txn` | EIP-1559 tx signing / EIP-712 typed-data signing (§4.2) | `wallet-core` (FFI) |
+| `TrovoWalletSDK.signBase64Txn` | EIP-1559 tx signing / `sign_hex_digest` for Safe approvals (§4.2) | `wallet-core` (FFI) |
 | Sembast plaintext key storage | encrypted vault + OS Keychain/Keystore (§4.3) | `wallet-core` + `flutter_secure_storage` |
 | Sub-wallet two-phase create+co-sign | single signed create request (§6) | app screen + `wallet-backend` |
-| Shared-access grant/approve screens | same screens, EIP-712 approval signing | app screen + `wallet-core` |
+| Shared-access grant/approve screens | same screens, `sign_hex_digest` approval signing | app screen + `wallet-core` |
 | `processDeepLink` action switch | same switch, `+event` case, new QR source | app (`storage/`) |
 | Theme (`custom_bloc_observer/`) | ported palette/typography, same token names where practical | app (`theme/`) |
 | `screens/account_recovery/` | wallet-signer recovery (§9) | app screen + `wallet-core` + `wallet-backend` §15 |
@@ -329,10 +331,10 @@ might suggest.
   too), §14 (servicelinks QR), and §15 (wallet recovery) implemented and
   stable before this app's networking/sub-wallet/shared-access/
   servicelinks/recovery layers can be built against real endpoints.
-- Needs `wallet-core` to grow: FFI bindings (§4.1), EIP-712 typed-data
-  signing (§4.2 - shared with `wallet-web`, tracked in that project's own
-  `PLAN.md` too so it isn't built twice), and the request-signing
-  function rename if `wallet-backend`/`wallet-web` settle on one.
+- Needs `wallet-core` to grow: FFI bindings (§4.1) exposing the crate's
+  existing `sign_hex_digest` (already added and shipped for `wallet-web`,
+  `wallet-web/PLAN.md` §15 - not a new addition to build here, just a new
+  binding target for an existing function).
 
 ## 12. Open decisions
 
@@ -349,7 +351,7 @@ might suggest.
 
 | Phase | Scope | Depends on |
 |---|---|---|
-| 1 | `wallet-core`: FFI bindings (§4.1), EIP-712 signing addition (§4.2) | `wallet-web/PLAN.md`'s tracked EIP-712 item |
+| 1 | `wallet-core`: FFI bindings (§4.1) for the existing crate, including `sign_hex_digest` (§4.2) | — |
 | 2 | App scaffold: Flutter project, ported theme (§3, colors/fonts/`ColorNotifier`), router port | Phase 1 |
 | 3 | Vault + secure storage (§4.3), onboarding/import screens | Phase 1, 2 |
 | 4 | Networking layer with the finalized signature-auth headers (§5) and the testnet/mainnet environment switch (§5.1) | `wallet-backend` §12 shipped |

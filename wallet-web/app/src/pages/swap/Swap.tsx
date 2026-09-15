@@ -5,7 +5,7 @@ import { useAppSelector } from '../../store/hooks';
 import { useIsOnline } from '../../connectivity/useIsOnline';
 import { buildSwap, submitSwap } from '../../api/swapsApi';
 import { withWalletDeployRetry } from '../../api/usersApi';
-import { signRequestMessage } from '../../core/walletCoreClient';
+import { signHexDigest } from '../../core/walletCoreClient';
 
 // wallet-backend's swaps component is a generic DEX router-call builder,
 // not an abstracted "swap A for B" (PLAN.md §2: "the project configures
@@ -50,9 +50,10 @@ export default function Swap() {
       );
 
       setStatus('signing');
-      // personal_sign over the digest with the signer's own key - never
-      // the (nonexistent) primary wallet key.
-      const signature = await signRequestMessage('signer', proposal.digestToSign);
+      // personal_sign over the digest's raw bytes with the signer's own
+      // key - never the (nonexistent) primary wallet key. Must be
+      // signHexDigest, not signRequestMessage - see its doc comment.
+      const signature = await signHexDigest('signer', proposal.digestToSign);
 
       setStatus('submitting');
       const { hash } = await submitSwap(primaryAddress, proposal.actionId, signature);

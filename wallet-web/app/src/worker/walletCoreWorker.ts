@@ -108,6 +108,10 @@ async function handle(message: WorkerMessage): Promise<WorkerReply> {
         const signature = walletCore.sign_request_message(message.role, message.message);
         return { id: message.id, ok: true, result: { signature } };
       }
+      case 'SIGN_HEX_DIGEST': {
+        const signature = walletCore.sign_hex_digest(message.role, message.digestHex);
+        return { id: message.id, ok: true, result: { signature } };
+      }
       case 'SIGN_TRANSACTION': {
         const signedTx = walletCore.sign_transaction(message.role, message.unsignedTxJson);
         return { id: message.id, ok: true, result: { signedTx } };

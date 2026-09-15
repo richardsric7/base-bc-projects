@@ -19,6 +19,7 @@ export type WorkerRequest =
   | { type: 'HAS_VAULT'; role: WalletRole }
   | { type: 'GET_KNOWN_ADDRESS'; role: WalletRole }
   | { type: 'SIGN_MESSAGE'; role: WalletRole; message: string }
+  | { type: 'SIGN_HEX_DIGEST'; role: WalletRole; digestHex: string }
   | { type: 'SIGN_TRANSACTION'; role: WalletRole; unsignedTxJson: string }
   | { type: 'SIGN_LINK_PRIMARY'; message: string }
   | { type: 'WIPE'; role: WalletRole };
@@ -35,6 +36,7 @@ export interface WorkerResponsePayloads {
   HAS_VAULT: { hasVault: boolean };
   GET_KNOWN_ADDRESS: { address: string | null };
   SIGN_MESSAGE: { signature: string };
+  SIGN_HEX_DIGEST: { signature: string };
   SIGN_TRANSACTION: { signedTx: string };
   SIGN_LINK_PRIMARY: { signature: string };
   WIPE: Record<string, never>;

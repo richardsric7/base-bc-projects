@@ -153,6 +153,24 @@ pub fn sign_request_message(role: &str, message: &str) -> Result<String, JsValue
     signing::sign_personal_message(&secret, message).map_err(to_js_err)
 }
 
+/// Signs a `0x`-prefixed hex digest (a Safe transaction hash - the
+/// `digestToSign` field `wallet-backend`'s payment/swap/asset-approve
+/// `/build` routes and shared-access approvals return, and the
+/// `*SafeTxHash` fields wallet-recovery's enable/disable challenges
+/// return, PLAN.md §13/§15/§17) with `role`'s key. **Not** the same as
+/// `sign_request_message` despite both being EIP-191 `personal_sign`
+/// under the hood - this one hashes the digest's raw decoded bytes, which
+/// is what `wallet-backend`'s `cryptoutil.VerifyPersonalSignBytes`
+/// actually verifies against; `sign_request_message` would instead hash
+/// the ASCII characters of the hex string, silently producing a
+/// signature that never matches (found and fixed as a real, previously
+/// shipped bug - see `signing::sign_hex_digest`'s doc comment).
+#[wasm_bindgen]
+pub fn sign_hex_digest(role: &str, digest_hex: &str) -> Result<String, JsValue> {
+    let secret = require_unlocked(role)?;
+    signing::sign_hex_digest(&secret, digest_hex).map_err(to_js_err)
+}
+
 /// Signs an EIP-1559 unsigned transaction (matching `wallet-backend`'s
 /// `network.UnsignedTx` JSON shape) with `role`'s key, returning the raw
 /// signed transaction hex ready for `/payments/submit` or
