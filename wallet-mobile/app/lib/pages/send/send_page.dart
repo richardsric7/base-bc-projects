@@ -23,6 +23,7 @@ class SendPage extends StatefulWidget {
 class _SendPageState extends State<SendPage> {
   String _destination = '';
   String _amount = '';
+  String _memo = '';
   _Status _status = _Status.idle;
   String _error = '';
   String _txHash = '';
@@ -58,7 +59,7 @@ class _SendPageState extends State<SendPage> {
       // resolved to as resolvedAddress.
       final proposal = await services.users.withWalletDeployRetry(
         signerAddress,
-        () => services.payments.buildPayment(primaryAddress, _destination, _amount),
+        () => services.payments.buildPayment(primaryAddress, _destination, _amount, memo: _memo.isEmpty ? null : _memo),
       );
       if (proposal.resolvedAddress != null) {
         setState(() => _resolvedAddress = proposal.resolvedAddress!);
@@ -83,6 +84,7 @@ class _SendPageState extends State<SendPage> {
         // receipt should show.
         proposal.resolvedAddress ?? _destination,
         _amount,
+        memo: _memo.isEmpty ? null : _memo,
       );
 
       setState(() {
@@ -137,6 +139,13 @@ class _SendPageState extends State<SendPage> {
               value: _amount,
               keyboardType: TextInputType.number,
               onChanged: (v) => _amount = v,
+            ),
+            const SizedBox(height: 12),
+            AppTextInput(
+              label: 'Memo (optional)',
+              value: _memo,
+              hint: 'e.g. invoice #4471',
+              onChanged: (v) => _memo = v,
             ),
             const SizedBox(height: 16),
             if (_error.isNotEmpty) Padding(padding: const EdgeInsets.only(bottom: 12), child: Text(_error, style: const TextStyle(color: Colors.red))),

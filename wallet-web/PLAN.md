@@ -1417,3 +1417,24 @@ the role-model fix, both closed here rather than left as follow-ups:
 restriction as §20/§21) - the fix is a mechanical API-contract
 alignment plus new client code with no server dependency to fake, so
 static typechecking is the meaningful check here.
+
+## 23. Restoring the payment memo field (wallet-backend PLAN.md §23)
+
+A full-port audit for dropped-not-renamed original model fields
+(prompted by wallet-backend PLAN.md §22.4's internal-balance-asset
+fix) found one confirmed gap: the original's payment memo/reference
+field had no home anywhere in this port, despite `servicelinks`
+already threading a `memo` query parameter through its
+payment-request-link generator with nowhere for it to land. Closed on
+the backend (`PaymentHistory.Memo`, threaded through
+`BuildPaymentTx`/`SubmitPayment`) and here:
+
+- `paymentsApi.ts`'s `buildPayment`/`submitPayment` gain an optional
+  `memo` parameter; `PaymentHistoryRecord` gains an optional `memo`
+  field.
+- `Send.tsx` gains a "Memo (optional)" text input, passed through both
+  calls.
+- `Receipt.tsx` shows a Memo row when present; `Dashboard.tsx`'s
+  payment-history rows show it as a small caption under the tx hash.
+
+**Verified**: `tsc --noEmit` and `npm run build:app-only` both clean.

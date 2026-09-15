@@ -38,6 +38,7 @@ export default function Receipt() {
         <Row label="To" value={record.toAddress} />
         <Row label="Amount (base units)" value={record.amount} />
         {record.tokenAddress && <Row label="Token" value={record.tokenAddress} />}
+        {record.memo && <Row label="Memo" value={record.memo} />}
         <Row
           label="Transaction hash"
           value={

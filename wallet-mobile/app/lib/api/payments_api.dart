@@ -31,6 +31,7 @@ class PaymentHistoryRecord {
     required this.toAddress,
     required this.tokenAddress,
     required this.amount,
+    this.memo = '',
     required this.txHash,
     required this.createdAt,
   });
@@ -40,6 +41,10 @@ class PaymentHistoryRecord {
   final String toAddress;
   final String tokenAddress;
   final String amount;
+  // memo is the original's own free-text payment reference (wallet-backend
+  // PLAN.md §23) - optional, purely a display string with nothing on-chain
+  // to attach it to.
+  final String memo;
   final String txHash;
   final String createdAt;
 
@@ -49,6 +54,7 @@ class PaymentHistoryRecord {
         toAddress: json['toAddress'] as String,
         tokenAddress: json['tokenAddress'] as String,
         amount: json['amount'] as String,
+        memo: json['memo'] as String? ?? '',
         txHash: json['txHash'] as String,
         createdAt: json['createdAt'] as String,
       );
@@ -63,12 +69,13 @@ class PaymentsApi {
     String destination,
     String amount, {
     String? tokenAddress,
+    String? memo,
   }) {
     return _client.request(
       '/v1/payments/build',
       method: 'POST',
       walletAddress: walletAddress,
-      body: {'destination': destination, 'tokenAddress': tokenAddress ?? '', 'amount': amount},
+      body: {'destination': destination, 'tokenAddress': tokenAddress ?? '', 'amount': amount, 'memo': memo ?? ''},
       decode: (json) => ActionProposal.fromJson(json as Map<String, dynamic>),
     );
   }
@@ -81,6 +88,7 @@ class PaymentsApi {
     String destination,
     String amount, {
     String? tokenAddress,
+    String? memo,
   }) {
     return _client.request(
       '/v1/payments/submit',
@@ -93,6 +101,7 @@ class PaymentsApi {
         'destination': destination,
         'tokenAddress': tokenAddress ?? '',
         'amount': amount,
+        'memo': memo ?? '',
       },
       decode: (json) => PaymentHistoryRecord.fromJson(json as Map<String, dynamic>),
     );

@@ -52,6 +52,7 @@ class ReceiptPage extends StatelessWidget {
                 _Row(label: 'To', value: record.toAddress),
                 _Row(label: 'Amount (base units)', value: record.amount),
                 if (record.tokenAddress.isNotEmpty) _Row(label: 'Token', value: record.tokenAddress),
+                if (record.memo.isNotEmpty) _Row(label: 'Memo', value: record.memo),
                 _Row(label: 'Transaction hash', value: record.txHash, link: explorerUrl),
                 _Row(label: 'Date', value: record.createdAt),
               ],

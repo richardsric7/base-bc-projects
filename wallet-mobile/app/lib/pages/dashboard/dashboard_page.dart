@@ -92,7 +92,13 @@ class _DashboardPageState extends State<DashboardPage> {
             for (final record in _history)
               ListTile(
                 title: Text('${record.amount} to ${record.toAddress}'),
-                subtitle: Text(record.txHash, style: const TextStyle(fontFamily: 'monospace', fontSize: 11)),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(record.txHash, style: const TextStyle(fontFamily: 'monospace', fontSize: 11)),
+                    if (record.memo.isNotEmpty) Text(record.memo, style: const TextStyle(fontSize: 12)),
+                  ],
+                ),
                 trailing: TextButton(
                   onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => ReceiptPage(record: record))),
                   child: const Text('Receipt'),

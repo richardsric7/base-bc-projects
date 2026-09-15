@@ -25,6 +25,10 @@ export interface PaymentHistoryRecord {
   toAddress: string;
   tokenAddress: string;
   amount: string;
+  // memo is the original's own free-text payment reference (wallet-backend
+  // PLAN.md §23) - optional, purely a display string with nothing on-chain
+  // to attach it to.
+  memo?: string;
   txHash: string;
   createdAt: string;
 }
@@ -34,12 +38,13 @@ export async function buildPayment(
   destination: string,
   amount: string,
   tokenAddress?: string,
+  memo?: string,
 ): Promise<ActionProposal> {
   await assertOnline(); // PLAN.md §6.4: re-verified here, not just at the UI layer
   return apiRequest<ActionProposal>('/v1/payments/build', {
     method: 'POST',
     walletAddress,
-    body: { destination, tokenAddress: tokenAddress ?? '', amount },
+    body: { destination, tokenAddress: tokenAddress ?? '', amount, memo: memo ?? '' },
   });
 }
 
@@ -51,11 +56,12 @@ export function submitPayment(
   destination: string,
   amount: string,
   tokenAddress?: string,
+  memo?: string,
 ): Promise<PaymentHistoryRecord> {
   return apiRequest<PaymentHistoryRecord>('/v1/payments/submit', {
     method: 'POST',
     walletAddress,
-    body: { idempotencyKey, actionId, signature, destination, tokenAddress: tokenAddress ?? '', amount },
+    body: { idempotencyKey, actionId, signature, destination, tokenAddress: tokenAddress ?? '', amount, memo: memo ?? '' },
   });
 }
 

@@ -685,3 +685,24 @@ all mobile tests pass, including 5 new widget tests for the pages
 above and a `dashboard_drawer.png` golden regeneration for each of the
 five new drawer entries added across this pass (Swap, Shared access,
 Tokenize, Fund wallet, My Wallets).
+
+### 14.7 Restoring the payment memo field (wallet-backend PLAN.md §23)
+
+A full-port audit for dropped-not-renamed original model fields found
+one confirmed gap: the original's payment memo/reference field had no
+home anywhere in this port. Closed on the backend
+(`PaymentHistory.Memo`, threaded through `BuildPaymentTx`/
+`SubmitPayment`) and mirrored here:
+
+- `payments_api.dart`'s `buildPayment`/`submitPayment` gain an optional
+  `memo` parameter; `PaymentHistoryRecord` gains a `memo` field
+  (defaulting to `''`).
+- `send_page.dart` gains a "Memo (optional)" text field, passed through
+  both calls.
+- `receipt_page.dart` shows a Memo row when present; the dashboard's
+  payment-history tiles show it as a small caption under the tx hash.
+
+**Verified**: `flutter analyze` clean (the same 4 pre-existing
+`info`-level suggestions, no new warnings); `flutter test` green
+(19/19), including `send_page_idle.png`'s golden regenerated for the
+new field.

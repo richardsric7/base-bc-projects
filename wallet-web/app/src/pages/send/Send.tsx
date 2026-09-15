@@ -21,6 +21,7 @@ export default function Send() {
   const [tokens, setTokens] = useState<CuratedToken[]>([]);
   const [destination, setDestination] = useState('');
   const [amount, setAmount] = useState('');
+  const [memo, setMemo] = useState('');
   const [tokenAddress, setTokenAddress] = useState(''); // '' = native ETH
   const [status, setStatus] = useState<'idle' | 'building' | 'signing' | 'submitting' | 'done'>('idle');
   const [error, setError] = useState('');
@@ -56,7 +57,7 @@ export default function Send() {
       // be an address, username, email, or wallet alias - the backend
       // resolves it and returns what it resolved to as resolvedAddress.
       const proposal = await withWalletDeployRetry(signerAddress, () =>
-        buildPayment(primaryAddress, destination, amount, tokenAddress || undefined),
+        buildPayment(primaryAddress, destination, amount, tokenAddress || undefined, memo || undefined),
       );
       if (proposal.resolvedAddress) setResolvedAddress(proposal.resolvedAddress);
 
@@ -81,6 +82,7 @@ export default function Send() {
         proposal.resolvedAddress || destination,
         amount,
         tokenAddress || undefined,
+        memo || undefined,
       );
 
       setTxHash(submitted.txHash);
@@ -113,6 +115,7 @@ export default function Send() {
           <p className="text-gray-600 text-xs break-all">Sending to: {resolvedAddress}</p>
         )}
         <TextInput label="Amount (base units)" value={amount} onChange={setAmount} placeholder="1000000000000000000" />
+        <TextInput label="Memo (optional)" value={memo} onChange={setMemo} placeholder="e.g. invoice #4471" />
         <div>
           <label className="text-primary-700 font-montserratMedium">Asset</label>
           <select

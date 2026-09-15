@@ -134,6 +134,7 @@ export default function Dashboard() {
                 <span className="text-gray-700">{h.toAddress}</span>
                 <span className="text-primary-800 font-mono">{h.amount}</span>
               </div>
+              {h.memo && <p className="text-gray-500 text-xs">{h.memo}</p>}
               <div className="flex justify-between items-center">
                 <span className="text-gray-400 text-xs">{new Date(h.createdAt).toLocaleString()}</span>
                 <Link to="/receipt" state={h} className="text-primary-700 text-xs underline">
