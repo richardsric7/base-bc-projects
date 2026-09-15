@@ -1095,3 +1095,42 @@ all pass after the fix.
   but the digest-signing convention it depends on was already proven
   correct independently in §15. `go build`/`vet`/`test ./...` and
   `npx tsc -b`/`npm run build:app-only` all clean throughout.
+
+## 17. Theme/artifact audit against the real `trovo-wallet-monorepo/web`
+
+`trovo-wallet-monorepo` is a separate, read-only reference repository -
+never modified by this project, only read from - and its `web/` is the
+actual original production app this rewrite is porting from. Prompted by
+the equivalent audit done for `wallet-mobile` (which found real drift
+against its own original), this pass compared `wallet-web`'s theme and
+artifacts against that source directly rather than assuming the earlier
+port was faithful:
+
+- **Colors and fonts**: `tailwind.config.js`'s `primary`/`trovored` scale
+  and `fontFamily` names are byte-for-byte identical to the real
+  `web/tailwind.config.js` - unlike `wallet-mobile`, where the equivalent
+  comparison caught a drifted `primary800`, this port's values were
+  already correct. No change needed.
+- **Logo**: `public/images/trovoLogo.png`, used by `components/Brand.tsx`,
+  is confirmed byte-identical (`md5sum`) to the real app's own
+  `public/images/trovoLogo.png`. Already correct.
+- **Missing artifact found and added**: the real app's left-panel brand
+  layout (`src/pages/importWallet/importWallet.tsx`) includes a
+  `rafiki.png` illustration (a wallet/money graphic in matching
+  trovoblue tones) below the title, which this port's `AuthLayout.tsx`
+  had never carried over - its left panel was otherwise a faithful
+  match (bg-primary-100, `Brand`, title, subtitle) but ended there. Added
+  `rafiki.png` (copied byte-for-byte from the real app, confirmed by
+  `file`/PNG-chunk inspection to carry no problematic embedded profile)
+  to `public/images/` and rendered it in `AuthLayout.tsx`'s left panel,
+  which is shared by onboarding, unlock, and recovery - all three now
+  show it. The `hidden md:flex` collapse (this panel doesn't render
+  below the `md` breakpoint) is unaffected.
+- **Verified visually, not just by build**: `npm run build` (which
+  chains `wasm-pack build` for `wallet-core` and `tsc -b && vite build`)
+  is clean, and the built app was served with `vite preview` and driven
+  with the pre-installed headless Chromium (`playwright-core`, installed
+  with `--no-save` for this one-off check and removed again afterward -
+  `package.json`/`package-lock.json` are unchanged) to screenshot the
+  onboarding screen at both desktop (1280x800, illustration visible) and
+  mobile (390x844, panel correctly hidden) viewports.
