@@ -34,6 +34,7 @@ type buildPaymentRequest struct {
 	Destination  string `json:"destination" binding:"required"`
 	TokenAddress string `json:"tokenAddress"` // empty = native ETH
 	Amount       string `json:"amount" binding:"required"`
+	Memo         string `json:"memo"` // optional free-text payment reference, PLAN.md §23
 }
 
 // buildPayment proposes the payment as a real Safe transaction on the
@@ -49,7 +50,7 @@ func buildPayment(svc *services.Service) gin.HandlerFunc {
 		}
 		wallet := c.GetString(middleware.CtxSubject)
 		signer := c.GetString(middleware.CtxSigner)
-		proposal, err := svc.BuildPaymentTx(c.Request.Context(), wallet, signer, req.Destination, req.TokenAddress, req.Amount)
+		proposal, err := svc.BuildPaymentTx(c.Request.Context(), wallet, signer, req.Destination, req.TokenAddress, req.Amount, req.Memo)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return
@@ -65,6 +66,7 @@ type submitPaymentRequest struct {
 	Destination    string `json:"destination" binding:"required"`
 	TokenAddress   string `json:"tokenAddress"`
 	Amount         string `json:"amount" binding:"required"`
+	Memo           string `json:"memo"` // optional free-text payment reference, PLAN.md §23
 }
 
 func submitPayment(svc *services.Service) gin.HandlerFunc {
@@ -76,7 +78,7 @@ func submitPayment(svc *services.Service) gin.HandlerFunc {
 		}
 		wallet := c.GetString(middleware.CtxSubject)
 		signer := c.GetString(middleware.CtxSigner)
-		record, err := svc.SubmitPayment(c.Request.Context(), req.IdempotencyKey, req.ActionID, signer, req.Signature, wallet, req.Destination, req.TokenAddress, req.Amount)
+		record, err := svc.SubmitPayment(c.Request.Context(), req.IdempotencyKey, req.ActionID, signer, req.Signature, wallet, req.Destination, req.TokenAddress, req.Amount, req.Memo)
 		if err != nil {
 			apperrors.AbortAny(c, err)
 			return

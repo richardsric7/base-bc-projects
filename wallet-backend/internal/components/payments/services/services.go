@@ -98,8 +98,11 @@ type PaymentProposal struct {
 // sharedaccess's group-membership model (PLAN.md §13.4) - not
 // walletAddress itself, which never has a private key of its own. to is
 // resolved through RecipientResolver before validation, so it may be an
-// address, username, email, or wallet alias.
-func (s *Service) BuildPaymentTx(ctx context.Context, walletAddress, signerAddress, to, tokenAddress, amount string) (*PaymentProposal, error) {
+// address, username, email, or wallet alias. memo is the original's own
+// optional free-text payment reference (PLAN.md §23) - used as the
+// sharedaccess proposal's own description (what an approver sees) when
+// non-empty, falling back to the literal "payment" otherwise.
+func (s *Service) BuildPaymentTx(ctx context.Context, walletAddress, signerAddress, to, tokenAddress, amount, memo string) (*PaymentProposal, error) {
 	if s.SharedAccess == nil {
 		return nil, apperrors.Internal("payments are not available: shared-access wiring is missing")
 	}
@@ -117,11 +120,15 @@ func (s *Service) BuildPaymentTx(ctx context.Context, walletAddress, signerAddre
 		return nil, apperrors.BadRequest("amount must be a decimal integer string in the asset's smallest unit")
 	}
 
+	description := "payment"
+	if memo != "" {
+		description = memo
+	}
 	group, err := s.SharedAccess.GetGroupByAddress(walletAddress)
 	if err != nil {
 		return nil, err
 	}
-	action, err := s.SharedAccess.ProposePayment(ctx, signerAddress, group.ID, "payment", resolvedTo, tokenAddress, amount, "", "")
+	action, err := s.SharedAccess.ProposePayment(ctx, signerAddress, group.ID, description, resolvedTo, tokenAddress, amount, "", "")
 	if err != nil {
 		return nil, err
 	}
@@ -143,11 +150,11 @@ func (s *Service) BuildPaymentTx(ctx context.Context, walletAddress, signerAddre
 // signing), an app's natural retry-on-reconnect behavior means the same
 // approval may be submitted here more than once; resubmitting the same
 // idempotencyKey returns the original record rather than erroring or
-// creating a duplicate history entry. destination/tokenAddress/amount are
-// carried through from the original Build call purely to populate the
+// creating a duplicate history entry. destination/tokenAddress/amount/memo
+// are carried through from the original Build call purely to populate the
 // history record's display fields - the actual transfer these authorize
 // was already fixed at proposal time and cannot be changed here.
-func (s *Service) SubmitPayment(ctx context.Context, idempotencyKey string, actionID uint, signerAddress, signature, fromAddress, toAddress, tokenAddress, amount string) (*models.PaymentHistory, error) {
+func (s *Service) SubmitPayment(ctx context.Context, idempotencyKey string, actionID uint, signerAddress, signature, fromAddress, toAddress, tokenAddress, amount, memo string) (*models.PaymentHistory, error) {
 	var existing models.PaymentHistory
 	err := s.DB.Where("idempotency_key = ?", idempotencyKey).First(&existing).Error
 	if err == nil {
@@ -175,6 +182,7 @@ func (s *Service) SubmitPayment(ctx context.Context, idempotencyKey string, acti
 		ToAddress:      toAddress,
 		TokenAddress:   tokenAddress,
 		Amount:         amount,
+		Memo:           memo,
 		TxHash:         action.TxHash,
 	}
 	if err := s.DB.Create(&record).Error; err != nil {

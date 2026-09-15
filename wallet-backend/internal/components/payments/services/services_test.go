@@ -26,11 +26,12 @@ type fakeGroupWalletExecutor struct {
 	group    *sharedaccessModels.ClosedGroup
 	groupErr error
 
-	proposedAction *sharedaccessModels.PendingAction
-	proposeErr     error
-	lastProposer   string
-	lastGroupID    uint
-	lastRecipient  string
+	proposedAction  *sharedaccessModels.PendingAction
+	proposeErr      error
+	lastProposer    string
+	lastGroupID     uint
+	lastRecipient   string
+	lastDescription string
 
 	digest    string
 	digestErr error
@@ -51,6 +52,7 @@ func (f *fakeGroupWalletExecutor) ProposePayment(ctx context.Context, proposerAd
 	f.lastProposer = proposerAddress
 	f.lastGroupID = groupID
 	f.lastRecipient = recipient
+	f.lastDescription = description
 	if f.proposeErr != nil {
 		return nil, f.proposeErr
 	}
@@ -95,7 +97,7 @@ func newTestDB(t *testing.T) *gorm.DB {
 
 func TestBuildPaymentTx_FailsClosedWhenSharedAccessMissing(t *testing.T) {
 	svc := New(newTestDB(t))
-	_, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, testTo, "", "1000")
+	_, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, testTo, "", "1000", "")
 	if err == nil {
 		t.Fatal("expected an error when SharedAccess is unwired")
 	}
@@ -104,7 +106,7 @@ func TestBuildPaymentTx_FailsClosedWhenSharedAccessMissing(t *testing.T) {
 func TestBuildPaymentTx_FailsClosedWhenRecipientsMissing(t *testing.T) {
 	svc := New(newTestDB(t))
 	svc.SharedAccess = &fakeGroupWalletExecutor{}
-	_, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, testTo, "", "1000")
+	_, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, testTo, "", "1000", "")
 	if err == nil {
 		t.Fatal("expected an error when Recipients is unwired")
 	}
@@ -130,7 +132,7 @@ func TestBuildPaymentTx_PropagatesRecipientResolutionError(t *testing.T) {
 	svc := New(newTestDB(t))
 	svc.SharedAccess = &fakeGroupWalletExecutor{}
 	svc.Recipients = aliasRecipientResolver{}
-	if _, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, "not-alice-or-an-address", "", "1000"); err == nil {
+	if _, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, "not-alice-or-an-address", "", "1000", ""); err == nil {
 		t.Fatal("expected the recipient resolution error to propagate")
 	}
 }
@@ -145,7 +147,7 @@ func TestBuildPaymentTx_ResolvesRecipientBeforeValidating(t *testing.T) {
 	svc.SharedAccess = fake
 	svc.Recipients = aliasRecipientResolver{}
 
-	proposal, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, "alice", "", "1000")
+	proposal, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, "alice", "", "1000", "")
 	if err != nil {
 		t.Fatalf("unexpected error resolving a username/alias recipient: %v", err)
 	}
@@ -161,10 +163,10 @@ func TestBuildPaymentTx_RejectsInvalidAddress(t *testing.T) {
 	svc := New(newTestDB(t))
 	svc.SharedAccess = &fakeGroupWalletExecutor{}
 	svc.Recipients = fakeRecipientResolver{}
-	if _, err := svc.BuildPaymentTx(context.Background(), "not-an-address", testSigner, testTo, "", "1000"); err == nil {
+	if _, err := svc.BuildPaymentTx(context.Background(), "not-an-address", testSigner, testTo, "", "1000", ""); err == nil {
 		t.Fatal("expected an error for an invalid wallet address")
 	}
-	if _, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, "not-an-address", "", "1000"); err == nil {
+	if _, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, "not-an-address", "", "1000", ""); err == nil {
 		t.Fatal("expected an error for an invalid recipient address")
 	}
 }
@@ -173,7 +175,7 @@ func TestBuildPaymentTx_RejectsNonDecimalAmount(t *testing.T) {
 	svc := New(newTestDB(t))
 	svc.SharedAccess = &fakeGroupWalletExecutor{}
 	svc.Recipients = fakeRecipientResolver{}
-	if _, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, testTo, "", "not-a-number"); err == nil {
+	if _, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, testTo, "", "not-a-number", ""); err == nil {
 		t.Fatal("expected an error for a non-decimal amount")
 	}
 }
@@ -183,7 +185,7 @@ func TestBuildPaymentTx_PropagatesGroupLookupError(t *testing.T) {
 	fake := &fakeGroupWalletExecutor{groupErr: apperrors.NotFound("no group")}
 	svc.SharedAccess = fake
 	svc.Recipients = fakeRecipientResolver{}
-	if _, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, testTo, "", "1000"); err == nil {
+	if _, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, testTo, "", "1000", ""); err == nil {
 		t.Fatal("expected the group lookup error to propagate")
 	}
 }
@@ -198,7 +200,7 @@ func TestBuildPaymentTx_Success(t *testing.T) {
 	svc.SharedAccess = fake
 	svc.Recipients = fakeRecipientResolver{}
 
-	proposal, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, testTo, "", "1000")
+	proposal, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, testTo, "", "1000", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -217,11 +219,36 @@ func TestBuildPaymentTx_Success(t *testing.T) {
 	if fake.lastRecipient != testTo {
 		t.Fatalf("expected recipient %s, got %s", testTo, fake.lastRecipient)
 	}
+	if fake.lastDescription != "payment" {
+		t.Fatalf("expected the default description \"payment\" when no memo is given, got %q", fake.lastDescription)
+	}
+}
+
+// TestBuildPaymentTx_MemoBecomesProposalDescription verifies PLAN.md
+// §23's restored memo field: a non-empty memo becomes the sharedaccess
+// proposal's own description (what an approver sees), replacing the
+// default "payment" literal.
+func TestBuildPaymentTx_MemoBecomesProposalDescription(t *testing.T) {
+	svc := New(newTestDB(t))
+	fake := &fakeGroupWalletExecutor{
+		group:          &sharedaccessModels.ClosedGroup{ID: 7},
+		proposedAction: &sharedaccessModels.PendingAction{ID: 42},
+		digest:         "0xdeadbeef",
+	}
+	svc.SharedAccess = fake
+	svc.Recipients = fakeRecipientResolver{}
+
+	if _, err := svc.BuildPaymentTx(context.Background(), testWallet, testSigner, testTo, "", "1000", "invoice #4471"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fake.lastDescription != "invoice #4471" {
+		t.Fatalf("expected the memo to become the proposal description, got %q", fake.lastDescription)
+	}
 }
 
 func TestSubmitPayment_FailsClosedWhenSharedAccessMissing(t *testing.T) {
 	svc := New(newTestDB(t))
-	_, err := svc.SubmitPayment(context.Background(), "idem-1", 42, testSigner, "0xsig", testWallet, testTo, "", "1000")
+	_, err := svc.SubmitPayment(context.Background(), "idem-1", 42, testSigner, "0xsig", testWallet, testTo, "", "1000", "")
 	if err == nil {
 		t.Fatal("expected an error when SharedAccess is unwired")
 	}
@@ -234,15 +261,37 @@ func TestSubmitPayment_Success(t *testing.T) {
 	}
 	svc.SharedAccess = fake
 
-	record, err := svc.SubmitPayment(context.Background(), "idem-1", 42, testSigner, "0xsig", testWallet, testTo, "", "1000")
+	record, err := svc.SubmitPayment(context.Background(), "idem-1", 42, testSigner, "0xsig", testWallet, testTo, "", "1000", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if record.TxHash != "0xhash" || record.FromAddress != testWallet || record.ToAddress != testTo {
 		t.Fatalf("unexpected record: %+v", record)
 	}
+	if record.Memo != "" {
+		t.Fatalf("expected an empty memo when none was given, got %q", record.Memo)
+	}
 	if !fake.approveCalled {
 		t.Fatal("expected ApproveAction to be called")
+	}
+}
+
+// TestSubmitPayment_PersistsMemo verifies PLAN.md §23's restored memo
+// field is actually written to the PaymentHistory record, not just
+// accepted and discarded.
+func TestSubmitPayment_PersistsMemo(t *testing.T) {
+	svc := New(newTestDB(t))
+	fake := &fakeGroupWalletExecutor{
+		approvedAction: &sharedaccessModels.PendingAction{ID: 42, Status: sharedaccessModels.ActionExecuted, TxHash: "0xhash"},
+	}
+	svc.SharedAccess = fake
+
+	record, err := svc.SubmitPayment(context.Background(), "idem-1", 42, testSigner, "0xsig", testWallet, testTo, "", "1000", "invoice #4471")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if record.Memo != "invoice #4471" {
+		t.Fatalf("expected the memo to be persisted on the history record, got %q", record.Memo)
 	}
 }
 
@@ -251,7 +300,7 @@ func TestSubmitPayment_RejectsWhenNotYetExecuted(t *testing.T) {
 	svc.SharedAccess = &fakeGroupWalletExecutor{
 		approvedAction: &sharedaccessModels.PendingAction{ID: 42, Status: sharedaccessModels.ActionPending},
 	}
-	if _, err := svc.SubmitPayment(context.Background(), "idem-1", 42, testSigner, "0xsig", testWallet, testTo, "", "1000"); err == nil {
+	if _, err := svc.SubmitPayment(context.Background(), "idem-1", 42, testSigner, "0xsig", testWallet, testTo, "", "1000", ""); err == nil {
 		t.Fatal("expected an error when the action has not reached EXECUTED")
 	}
 }
@@ -259,7 +308,7 @@ func TestSubmitPayment_RejectsWhenNotYetExecuted(t *testing.T) {
 func TestSubmitPayment_PropagatesApprovalError(t *testing.T) {
 	svc := New(newTestDB(t))
 	svc.SharedAccess = &fakeGroupWalletExecutor{approveErr: apperrors.Unauthorized("bad signature")}
-	if _, err := svc.SubmitPayment(context.Background(), "idem-1", 42, testSigner, "0xsig", testWallet, testTo, "", "1000"); err == nil {
+	if _, err := svc.SubmitPayment(context.Background(), "idem-1", 42, testSigner, "0xsig", testWallet, testTo, "", "1000", ""); err == nil {
 		t.Fatal("expected the approval error to propagate")
 	}
 }
@@ -271,13 +320,13 @@ func TestSubmitPayment_IdempotentRetryReturnsOriginalRecordWithoutReapproving(t 
 	}
 	svc.SharedAccess = fake
 
-	first, err := svc.SubmitPayment(context.Background(), "idem-1", 42, testSigner, "0xsig", testWallet, testTo, "", "1000")
+	first, err := svc.SubmitPayment(context.Background(), "idem-1", 42, testSigner, "0xsig", testWallet, testTo, "", "1000", "")
 	if err != nil {
 		t.Fatalf("unexpected error on first submit: %v", err)
 	}
 	fake.approveCalled = false
 
-	second, err := svc.SubmitPayment(context.Background(), "idem-1", 42, testSigner, "0xsig", testWallet, testTo, "", "1000")
+	second, err := svc.SubmitPayment(context.Background(), "idem-1", 42, testSigner, "0xsig", testWallet, testTo, "", "1000", "")
 	if err != nil {
 		t.Fatalf("unexpected error on retry: %v", err)
 	}

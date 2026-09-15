@@ -54,6 +54,7 @@ type buildPartnerPaymentRequest struct {
 	To           string `json:"to" binding:"required"`
 	TokenAddress string `json:"tokenAddress"`
 	Amount       string `json:"amount" binding:"required"`
+	Memo         string `json:"memo"` // optional free-text payment reference, PLAN.md §23
 }
 
 func buildPartnerPayment(svc *services.Service) gin.HandlerFunc {
@@ -71,7 +72,7 @@ func buildPartnerPayment(svc *services.Service) gin.HandlerFunc {
 			apperrors.Abort(c, apperrors.BadRequest("to and amount are required"))
 			return
 		}
-		proposal, err := svc.BuildPartnerPayment(c.Request.Context(), link.ID, userID, req.To, req.TokenAddress, req.Amount)
+		proposal, err := svc.BuildPartnerPayment(c.Request.Context(), link.ID, userID, req.To, req.TokenAddress, req.Amount, req.Memo)
 		if err != nil {
 			writeError(c, err)
 			return
@@ -87,6 +88,7 @@ type submitPartnerPaymentRequest struct {
 	To             string `json:"to" binding:"required"`
 	TokenAddress   string `json:"tokenAddress"`
 	Amount         string `json:"amount" binding:"required"`
+	Memo           string `json:"memo"` // optional free-text payment reference, PLAN.md §23
 }
 
 func submitPartnerPayment(svc *services.Service) gin.HandlerFunc {
@@ -104,7 +106,7 @@ func submitPartnerPayment(svc *services.Service) gin.HandlerFunc {
 			apperrors.Abort(c, apperrors.BadRequest("idempotencyKey, actionId, signature, to and amount are required"))
 			return
 		}
-		record, err := svc.SubmitPartnerPayment(c.Request.Context(), link.ID, userID, req.IdempotencyKey, req.ActionID, req.Signature, req.To, req.TokenAddress, req.Amount)
+		record, err := svc.SubmitPartnerPayment(c.Request.Context(), link.ID, userID, req.IdempotencyKey, req.ActionID, req.Signature, req.To, req.TokenAddress, req.Amount, req.Memo)
 		if err != nil {
 			writeError(c, err)
 			return

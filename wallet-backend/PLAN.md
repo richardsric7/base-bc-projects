@@ -4346,3 +4346,83 @@ IdempotentOnceDeployed,UnknownCountry}`,
 (asserting exactly 2, resp. 3, signed on-chain calls once an
 internal-balance asset is deployed for the purchase's country), and
 `TestMintFlow_AuthorizesDistributionWalletOnInternalBalanceAssetWhenDeployed`.
+
+## 23. Payment memo - a full-port audit's one confirmed dropped field
+
+§22's internal-balance correction prompted a direct instruction from the
+person driving this port, restated explicitly: every original model field
+must be preserved or renamed, never silently dropped, and this needed a
+real audit rather than a spot-fix. A full pass across every
+`internal/components/*/models/*.go` file and this entire PLAN.md,
+cross-checking every "dropped/simplified/no equivalent" claim against the
+actual current code, found: the `TokenizationCountryConfig` case already
+fixed in §22.4; roughly 18 other "dropped" items that all held up as
+genuine `no Base equivalent`/dead-upstream-code decisions on inspection
+(market-making's hardcoded-to-zero fee fields, the SMS recovery factor
+with no provider wired, `RoleInitiatorApprover`'s collapse back to the
+original's exact 3-role model, and similar - none of these lost real
+information, they're architecture decisions); and exactly one confirmed,
+undocumented `DROPPED_FIELD`: the payment memo.
+
+**The gap.** `payments.PaymentHistory` had no memo/reference column at
+all. `BuildPaymentTx` hardcoded the sharedaccess proposal's own
+description to the literal string `"payment"` - never a caller-supplied
+value. Meanwhile this port's own `servicelinks` payment-request-link
+generator (`services/payment_requests.go`, §14.1a) already threads a
+`memo` query parameter through a generated deep link "mirroring the
+original's own `paymentDestination`/`assetCode`/`assetIssuer`/`amount`/
+`memo` query parameters" - so the intent to preserve memo was recorded
+elsewhere in this port, but the field the memo was meant to end up in,
+on an ordinary payment, was simply never built. Unlike every other drop
+found in the audit, there was no comment or PLAN.md note anywhere
+explaining a decision to cut it - it just wasn't there.
+
+**The fix.** `PaymentHistory.Memo string` (`gorm:"size:200"`, optional) -
+purely a display/reference string with nothing on-chain to attach it to
+(a Base ERC-20 transfer or native send has no memo field the way a
+Stellar transaction did, so unlike the transfer amount/recipient this
+was never going to be encoded on-chain either upstream or here; it lives
+only in this off-chain record, exactly as upstream's own memo was never
+part of Stellar's SEP-anything asset logic, just a transaction-level
+annotation). Threaded through end-to-end:
+- `payments.Service.BuildPaymentTx`/`SubmitPayment` both gain a `memo`
+  parameter. `BuildPaymentTx` uses a non-empty memo as the sharedaccess
+  proposal's own description (what an approver sees when reviewing a
+  shared-wallet payment) in place of the literal `"payment"`;
+  `SubmitPayment` persists it onto the `PaymentHistory` row.
+- `payments/controllers`' `buildPaymentRequest`/`submitPaymentRequest`
+  gain an optional `memo` JSON field.
+- `servicelinks.Service.BuildPartnerPayment`/`SubmitPartnerPayment` and
+  their controller request structs gain the same, so a partner-initiated
+  payment (and the payment-request-link flow that already generated a
+  memo-carrying deep link) can actually deliver it end-to-end instead of
+  the memo being read back out of the link and having nowhere to go.
+
+**New tests** in `payments/services`:
+`TestBuildPaymentTx_Success` now also asserts the *default* description
+is still `"payment"` when no memo is given;
+`TestBuildPaymentTx_MemoBecomesProposalDescription` and
+`TestSubmitPayment_PersistsMemo` assert the memo actually flows through
+both paths, not just that the parameter compiles.
+
+Verified: `go build ./...`, `go vet ./...`, `gofmt -l .` all clean;
+`go test ./...` green.
+
+**Explicitly not pursued from the same audit** (bigger than a field, no
+documented drop, but a real design decision to make rather than a quick
+fix) - flagged to the user rather than built silently:
+- A per-user "watched tokens" opt-in/opt-out table, committed to in §2's
+  own design ("Preserves the original's user-facing feature - curate
+  which tokens show in your wallet") but never implemented - what exists
+  today (`assets.CuratedToken`) is a global admin-curated catalog, not a
+  per-user personalization signal.
+- Claimable balances (`PendingClaim`, §2) - delivering an asset to a
+  recipient with no wallet/trustline yet - also designed in §2 but never
+  built.
+- `UserWallet.WalletType`'s per-type Stellar flags
+  (`AuthRequired`/`Clawback`/`Revocable`) - explicitly noted as having
+  "no direct Base/Safe equivalent" when `WalletType` itself was restored
+  (§21.4), and unlike `LinkedWalletAddress` not even kept as a
+  schema-only column. Low urgency today since no caller currently
+  assigns anything but `WalletTypeNormal`, but worth a decision before
+  `WalletTypeAssetIssuing` gets a real one.

@@ -19,22 +19,22 @@ import (
 // wallets are non-custodial, so signing happens wherever the partner's
 // own embedded-wallet infrastructure holds the user's signer key, never
 // on this server.
-func (s *Service) BuildPartnerPayment(ctx context.Context, serviceLinkID, userID uint, to, tokenAddress, amount string) (*services.PaymentProposal, error) {
+func (s *Service) BuildPartnerPayment(ctx context.Context, serviceLinkID, userID uint, to, tokenAddress, amount, memo string) (*services.PaymentProposal, error) {
 	user, err := s.requireOwnedUser(serviceLinkID, userID)
 	if err != nil {
 		return nil, err
 	}
-	return s.Payments.BuildPaymentTx(ctx, user.Address, user.SignerAddress, to, tokenAddress, amount)
+	return s.Payments.BuildPaymentTx(ctx, user.Address, user.SignerAddress, to, tokenAddress, amount, memo)
 }
 
 // SubmitPartnerPayment approves the proposal from BuildPartnerPayment with
 // the partner-held signature and records it in payment history.
-func (s *Service) SubmitPartnerPayment(ctx context.Context, serviceLinkID, userID uint, idempotencyKey string, actionID uint, signature, to, tokenAddress, amount string) (*models.PaymentHistory, error) {
+func (s *Service) SubmitPartnerPayment(ctx context.Context, serviceLinkID, userID uint, idempotencyKey string, actionID uint, signature, to, tokenAddress, amount, memo string) (*models.PaymentHistory, error) {
 	user, err := s.requireOwnedUser(serviceLinkID, userID)
 	if err != nil {
 		return nil, err
 	}
-	return s.Payments.SubmitPayment(ctx, idempotencyKey, actionID, user.SignerAddress, signature, user.Address, to, tokenAddress, amount)
+	return s.Payments.SubmitPayment(ctx, idempotencyKey, actionID, user.SignerAddress, signature, user.Address, to, tokenAddress, amount, memo)
 }
 
 // Balance returns an owned user's balance of native ETH (empty
