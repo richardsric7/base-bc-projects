@@ -70,6 +70,7 @@ func (s *Service) DeployInternalBalanceAsset(ctx context.Context, countryCode, n
 	if err != nil {
 		return nil, apperrors.Internal("failed to deploy internal balance asset: " + err.Error())
 	}
+	cfg.InternalBalanceAssetCode = symbol
 	cfg.InternalBalanceContractAddress = &contractAddr
 	if err := s.DB.Save(cfg).Error; err != nil {
 		return nil, apperrors.Internal("failed to record deployed internal balance asset")

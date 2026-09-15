@@ -19,6 +19,9 @@ func TestDeployInternalBalanceAsset_DeploysAndRecordsContract(t *testing.T) {
 	if cfg.InternalBalanceContractAddress == nil {
 		t.Fatal("expected InternalBalanceContractAddress to be set")
 	}
+	if cfg.InternalBalanceAssetCode != "iNGN" {
+		t.Fatalf("expected InternalBalanceAssetCode to be recorded as iNGN, got %q", cfg.InternalBalanceAssetCode)
+	}
 	if blockchain.deployCount != 1 {
 		t.Fatalf("expected exactly 1 contract deployment, got %d", blockchain.deployCount)
 	}
@@ -26,6 +29,9 @@ func TestDeployInternalBalanceAsset_DeploysAndRecordsContract(t *testing.T) {
 	var stored models.TokenizationCountryConfig
 	if err := db.Where("country_code = ?", "NG").First(&stored).Error; err != nil {
 		t.Fatalf("reload country config: %v", err)
+	}
+	if stored.InternalBalanceAssetCode != "iNGN" {
+		t.Fatalf("expected the persisted InternalBalanceAssetCode to be iNGN, got %q", stored.InternalBalanceAssetCode)
 	}
 	if stored.InternalBalanceContractAddress == nil || *stored.InternalBalanceContractAddress != *cfg.InternalBalanceContractAddress {
 		t.Fatal("expected the deployed contract address to be persisted")

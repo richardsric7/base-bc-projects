@@ -127,7 +127,9 @@ type TokenizationPublicAssetAllowedCountry struct {
 // already do the job in one hop). What IS restored, per PLAN.md §22.4:
 // the restricted-holding requirement upstream enforced on that asset
 // (`checkDistributionWalletHasQuoteCurrencyAuthorization`) - see
-// InternalBalanceContractAddress below.
+// InternalBalanceAssetCode/InternalBalanceContractAddress below, the
+// direct replacements for upstream's TokenCode/TokenIssuer pair (a code +
+// a deployed contract address standing in for a code + issuer account).
 type TokenizationCountryConfig struct {
 	CountryCode                              string `gorm:"primaryKey;size:2" json:"countryCode"`
 	SECTokenizationFeePercent                string `json:"secTokenizationFeePercent"`
@@ -140,15 +142,24 @@ type TokenizationCountryConfig struct {
 	TokenizationApplicationFee               string `json:"tokenizationApplicationFee"`
 	TokenizationApplicationFeeAsset          string `gorm:"default:TROV" json:"tokenizationApplicationFeeAsset"` // a CuratedToken symbol
 	VATPercent                               string `json:"vatPercent"`
+	// InternalBalanceAssetCode is this country's internal-balance asset's
+	// symbol (e.g. "iNGN"), set once at deployment time - the direct
+	// counterpart of upstream's InternalBalanceTokenCode column. Unlike a
+	// CuratedToken symbol, this is never used to look up a curated_tokens
+	// row (the internal-balance asset is intentionally not curated/
+	// tradeable); it exists purely so this config can say what its
+	// restricted asset is called without an RPC call to read the deployed
+	// contract's own name()/symbol().
+	InternalBalanceAssetCode string `json:"internalBalanceAssetCode,omitempty"`
 	// InternalBalanceContractAddress is this country's deployed internal-
 	// balance restricted asset - the same TokenizedAsset.sol contract
 	// tokenized assets themselves use (PLAN.md §22.1's isAuthorized
-	// allow-list), replacing upstream's InternalBalanceTokenCode/
-	// InternalTokenIssuer pair. Nil until DeployInternalBalanceAsset is
-	// called for this country (services/internal_balance.go); a country
-	// with no deployed internal-balance asset simply carries no
-	// restriction on it yet, the same posture an un-minted TokenizedAsset
-	// has toward its own authorization gate.
+	// allow-list), replacing upstream's InternalTokenIssuer. Nil until
+	// DeployInternalBalanceAsset is called for this country
+	// (services/internal_balance.go); a country with no deployed
+	// internal-balance asset simply carries no restriction on it yet, the
+	// same posture an un-minted TokenizedAsset has toward its own
+	// authorization gate.
 	InternalBalanceContractAddress *string `json:"internalBalanceContractAddress,omitempty"`
 }
 

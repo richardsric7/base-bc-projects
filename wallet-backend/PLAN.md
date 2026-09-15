@@ -4287,10 +4287,20 @@ gate - the requirement that a wallet be authorized before it may hold this
 asset at all, "the logic of allowing it to be held and disabling it from
 being held," in the requester's own words.
 
-- **Model**: `TokenizationCountryConfig.InternalBalanceContractAddress
-  *string` (`tokenization/models/reference_data.go`) - nil until deployed
-  for that country, the same "nothing to authorize against yet" posture
-  an un-minted `TokenizedAsset` has toward its own gate.
+- **Model**: `TokenizationCountryConfig` gains `InternalBalanceAssetCode
+  string` and `InternalBalanceContractAddress *string`
+  (`tokenization/models/reference_data.go`) - the direct replacements for
+  upstream's `InternalBalanceTokenCode`/`InternalTokenIssuer` pair (a code
+  and a deployed contract standing in for a code and an issuer account).
+  `InternalBalanceContractAddress` is nil until deployed for that
+  country, the same "nothing to authorize against yet" posture an
+  un-minted `TokenizedAsset` has toward its own gate. An earlier revision
+  of this pass added only the contract address and left the code
+  untracked - a real gap the person driving this port caught (a
+  restricted asset's on-chain `name()`/`symbol()` were readable by RPC
+  but nowhere in the DB, unlike every other asset in this system), fixed
+  by having `DeployInternalBalanceAsset` persist `symbol` into
+  `InternalBalanceAssetCode` alongside the contract address.
 - **New file `tokenization/services/internal_balance.go`**:
   `deriveInternalBalanceIssuerKey(countryCode)` (a country-scoped sibling
   of `deriveIssuerKey`); `DeployInternalBalanceAsset(ctx, countryCode,
