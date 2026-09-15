@@ -33,7 +33,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Send'), findsWidgets);
-    expect(find.text('Recipient address'), findsOneWidget);
+    expect(find.text('Recipient'), findsOneWidget);
     expect(find.text('Amount (base units)'), findsOneWidget);
     expect(find.text('Send payment'), findsOneWidget);
 

@@ -40,6 +40,69 @@ class User {
       );
 }
 
+/// One entry in the caller's own wallet directory - their primary wallet,
+/// and every additional wallet they've registered or created. Mirrors
+/// wallet-backend's users.UserWallet.
+class UserWallet {
+  UserWallet({
+    required this.id,
+    required this.userId,
+    required this.address,
+    required this.tag,
+    required this.description,
+    required this.walletType,
+    required this.alias,
+    this.linkedWalletAddress,
+    required this.isPrimary,
+    required this.createdAt,
+  });
+
+  final int id;
+  final int userId;
+  final String address;
+  final String tag;
+  final String description;
+  final int walletType;
+  // alias is unique across every wallet on the platform - what a payment
+  // or lookup can name this wallet by, alongside address/username/email.
+  final String alias;
+  final String? linkedWalletAddress;
+  final bool isPrimary;
+  final String createdAt;
+
+  factory UserWallet.fromJson(Map<String, dynamic> json) => UserWallet(
+        id: json['id'] as int,
+        userId: json['userId'] as int,
+        address: json['address'] as String,
+        tag: json['tag'] as String? ?? '',
+        description: json['description'] as String? ?? '',
+        walletType: json['walletType'] as int? ?? 0,
+        alias: json['alias'] as String? ?? '',
+        linkedWalletAddress: json['linkedWalletAddress'] as String?,
+        isPrimary: json['isPrimary'] as bool? ?? false,
+        createdAt: json['createdAt'] as String? ?? '',
+      );
+}
+
+/// Previews what a payment recipient identifier (address, username,
+/// email, or wallet alias) actually names - the same lookup
+/// payments.BuildPaymentTx uses server-side.
+class WalletDirectoryEntry {
+  WalletDirectoryEntry({required this.address, required this.alias, required this.tag, required this.isPrimary});
+
+  final String address;
+  final String alias;
+  final String tag;
+  final bool isPrimary;
+
+  factory WalletDirectoryEntry.fromJson(Map<String, dynamic> json) => WalletDirectoryEntry(
+        address: json['address'] as String,
+        alias: json['alias'] as String? ?? '',
+        tag: json['tag'] as String? ?? '',
+        isPrimary: json['isPrimary'] as bool? ?? false,
+      );
+}
+
 class UsersApi {
   UsersApi(this._client);
   final ApiClient _client;
@@ -88,6 +151,49 @@ class UsersApi {
       method: 'POST',
       walletAddress: signerAddress,
       decode: (json) => User.fromJson(json as Map<String, dynamic>),
+    );
+  }
+
+  /// GET /v1/users/wallets (SignatureAuth, self-signed) - the caller's
+  /// own wallet directory, for a "my wallets" management screen where a
+  /// Tag/Description/Alias can be edited (see updateWalletMetadata).
+  Future<List<UserWallet>> listMyWallets(String signerAddress) {
+    return _client.request(
+      '/v1/users/wallets',
+      walletAddress: signerAddress,
+      decode: (json) => (json as List).map((e) => UserWallet.fromJson(e as Map<String, dynamic>)).toList(),
+    );
+  }
+
+  /// PUT /v1/users/wallets/:address (SignatureAuth, self-signed) - only
+  /// the wallet's own owner may edit it (enforced server-side against
+  /// the verified caller). Pass only the fields to change.
+  Future<UserWallet> updateWalletMetadata(
+    String signerAddress,
+    String address, {
+    String? tag,
+    String? description,
+    String? alias,
+  }) {
+    return _client.request(
+      '/v1/users/wallets/$address',
+      method: 'PUT',
+      walletAddress: signerAddress,
+      body: {
+        if (tag != null) 'tag': tag,
+        if (description != null) 'description': description,
+        if (alias != null) 'alias': alias,
+      },
+      decode: (json) => UserWallet.fromJson(json as Map<String, dynamic>),
+    );
+  }
+
+  /// GET /v1/users/resolve/:identifier (public - a lookup, not an
+  /// action, usable before any wallet exists to authenticate as).
+  Future<WalletDirectoryEntry> resolveRecipient(String identifier) {
+    return _client.request(
+      '/v1/users/resolve/${Uri.encodeComponent(identifier)}',
+      decode: (json) => WalletDirectoryEntry.fromJson(json as Map<String, dynamic>),
     );
   }
 

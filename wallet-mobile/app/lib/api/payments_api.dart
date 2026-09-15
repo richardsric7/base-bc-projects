@@ -6,12 +6,22 @@
 import 'http_client.dart';
 
 class ActionProposal {
-  ActionProposal({required this.actionId, required this.digestToSign});
+  ActionProposal({required this.actionId, required this.digestToSign, this.resolvedAddress});
   final int actionId;
   final String digestToSign;
 
-  factory ActionProposal.fromJson(Map<String, dynamic> json) =>
-      ActionProposal(actionId: json['actionId'] as int, digestToSign: json['digestToSign'] as String);
+  /// Only present on a payment proposal (wallet-backend's
+  /// payments.PaymentProposal) - what `destination` actually resolved to,
+  /// since it may be an address, username, email, or wallet alias
+  /// (users.UserWallet's own doc comment). A swap proposal has no
+  /// recipient to resolve, so this is always null there.
+  final String? resolvedAddress;
+
+  factory ActionProposal.fromJson(Map<String, dynamic> json) => ActionProposal(
+        actionId: json['actionId'] as int,
+        digestToSign: json['digestToSign'] as String,
+        resolvedAddress: json['resolvedAddress'] as String?,
+      );
 }
 
 class PaymentHistoryRecord {

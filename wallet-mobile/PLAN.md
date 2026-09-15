@@ -542,3 +542,32 @@ source of truth for the brand, so this pass reconciled the two:
 (10 from §14.4 plus the new dashboard drawer test); the two pre-existing
 goldens (`onboarding_choose_signer.png`, `send_page_idle.png`) were
 regenerated to reflect the corrected `primary800` and the real logo.
+
+### 14.5 Alias/username-aware Send, mirroring `wallet-web`
+
+`wallet-backend`'s `/v1/payments/build` resolves its recipient through
+address/username/email/wallet alias (`users.UserWallet`'s own doc
+comment) and returns what it resolved to as `resolvedAddress` -
+`send_page.dart` only ever asked for a raw "Recipient address" and
+never surfaced that field. Fixed to match `wallet-web`'s own §22 fix:
+`payments_api.dart`'s `ActionProposal` gains `resolvedAddress`;
+`send_page.dart`'s field is now "Recipient" with a hint describing all
+four accepted forms, shows a "Sending to: X" confirmation once `/build`
+responds, and passes the resolved address (not the raw identifier) to
+`submitPayment` so a payment history record's `toAddress` is always a
+real address. `app_text_input.dart` gained a `hint` parameter
+(`InputDecoration.hintText`) to support this - it had none before.
+`users_api.dart` also gains `UserWallet`/`listMyWallets`/
+`updateWalletMetadata`/`WalletDirectoryEntry`/`resolveRecipient`,
+mirroring `wallet-web`'s `usersApi.ts` additions, ready for a future
+wallet-directory management screen - not built in this pass, since
+mobile's own port is still intentionally partial (§14.2/§14.4: no
+swap/shared-access/tokenize screens exist yet either) and a directory
+screen with nothing else at parity around it would be scope creep
+beyond what this correction pass needs.
+
+**Verified**: `flutter analyze` clean (3 pre-existing-style `info`
+suggestions on the new API methods, no warnings/errors); all 11 tests
+pass, including `send_page_test.dart` after updating its "Recipient
+address" text assertion to "Recipient" and regenerating
+`send_page_idle.png`.

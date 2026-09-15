@@ -9,6 +9,7 @@ class AppTextInput extends StatefulWidget {
     required this.onChanged,
     this.obscureText = false,
     this.keyboardType,
+    this.hint,
   });
 
   final String label;
@@ -16,6 +17,7 @@ class AppTextInput extends StatefulWidget {
   final ValueChanged<String> onChanged;
   final bool obscureText;
   final TextInputType? keyboardType;
+  final String? hint;
 
   @override
   State<AppTextInput> createState() => _AppTextInputState();
@@ -35,6 +37,7 @@ class _AppTextInputState extends State<AppTextInput> {
       onChanged: widget.onChanged,
       decoration: InputDecoration(
         labelText: widget.label,
+        hintText: widget.hint,
         suffixIcon: isPassword
             ? TextButton(
                 onPressed: () => setState(() => _showPlainText = !_showPlainText),
