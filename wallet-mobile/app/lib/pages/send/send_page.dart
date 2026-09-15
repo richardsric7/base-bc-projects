@@ -8,6 +8,8 @@ import '../../app_services.dart';
 import '../../store/wallet_state.dart';
 import '../../widgets/app_button.dart';
 import '../../widgets/app_text_input.dart';
+import '../../api/payments_api.dart';
+import '../receipt/receipt_page.dart';
 
 enum _Status { idle, building, signing, submitting, done }
 
@@ -24,6 +26,7 @@ class _SendPageState extends State<SendPage> {
   _Status _status = _Status.idle;
   String _error = '';
   String _txHash = '';
+  PaymentHistoryRecord? _record;
   // What `_destination` actually resolved to (it may be an address,
   // username, email, or wallet alias) - shown once /build responds so
   // the sender can confirm who they're paying before signing.
@@ -84,6 +87,7 @@ class _SendPageState extends State<SendPage> {
 
       setState(() {
         _txHash = record.txHash;
+        _record = record;
         _status = _Status.done;
       });
     } catch (err) {
@@ -139,7 +143,17 @@ class _SendPageState extends State<SendPage> {
             if (_status == _Status.done)
               Padding(
                 padding: const EdgeInsets.only(bottom: 12),
-                child: Text('Payment submitted. Tx hash: $_txHash', style: const TextStyle(color: Colors.green)),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Payment submitted. Tx hash: $_txHash', style: const TextStyle(color: Colors.green)),
+                    if (_record != null)
+                      TextButton(
+                        onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => ReceiptPage(record: _record!))),
+                        child: const Text('View receipt'),
+                      ),
+                  ],
+                ),
               ),
             AppButton(label: _busy ? _statusLabel() : 'Send payment', onPressed: _busy ? null : _handleSend),
           ],

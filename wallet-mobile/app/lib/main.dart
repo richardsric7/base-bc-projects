@@ -14,7 +14,17 @@ import 'pages/onboarding/onboarding_wizard.dart';
 import 'pages/unlock/unlock_page.dart';
 import 'pages/dashboard/dashboard_page.dart';
 import 'pages/send/send_page.dart';
+import 'pages/swap/swap_page.dart';
 import 'pages/settings/settings_page.dart';
+import 'pages/sharedaccess/shared_access_home_page.dart';
+import 'pages/sharedaccess/group_detail_page.dart';
+import 'pages/sharedaccess/approvals_page.dart';
+import 'pages/sharedaccess/approval_detail_page.dart';
+import 'pages/tokenize/tokenize_home_page.dart';
+import 'pages/tokenize/asset_detail_page.dart';
+import 'pages/fund/fund_wallet_page.dart';
+import 'pages/wallets/my_wallets_page.dart';
+import 'pages/recovery/recovery_wizard_page.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -92,7 +102,34 @@ class TrovoWalletApp extends StatelessWidget {
         '/unlock': (_) => const UnlockPage(),
         '/dashboard': (_) => const DashboardPage(),
         '/send': (_) => const SendPage(),
+        '/swap': (_) => const SwapPage(),
         '/settings': (_) => const SettingsPage(),
+        '/shared-access': (_) => const SharedAccessHomePage(),
+        '/shared-access/approvals': (_) => const ApprovalsPage(),
+        '/tokenize': (_) => const TokenizeHomePage(),
+        '/fund': (_) => const FundWalletPage(),
+        '/wallets': (_) => const MyWalletsPage(),
+        '/recovery': (_) => const RecoveryWizardPage(),
+      },
+      // Parameterized routes (/shared-access/groups/:id,
+      // /shared-access/approvals/:id, /tokenize/:id) - an id can't be a
+      // fixed key in the static `routes` map above.
+      onGenerateRoute: (settings) {
+        final uri = Uri.parse(settings.name ?? '');
+        final segments = uri.pathSegments;
+        if (segments.length == 3 && segments[0] == 'shared-access' && segments[1] == 'groups') {
+          final id = int.tryParse(segments[2]);
+          if (id != null) return MaterialPageRoute(builder: (_) => GroupDetailPage(groupId: id));
+        }
+        if (segments.length == 3 && segments[0] == 'shared-access' && segments[1] == 'approvals') {
+          final id = int.tryParse(segments[2]);
+          if (id != null) return MaterialPageRoute(builder: (_) => ApprovalDetailPage(actionId: id));
+        }
+        if (segments.length == 2 && segments[0] == 'tokenize') {
+          final id = int.tryParse(segments[1]);
+          if (id != null) return MaterialPageRoute(builder: (_) => AssetDetailPage(assetId: id));
+        }
+        return null;
       },
     );
   }

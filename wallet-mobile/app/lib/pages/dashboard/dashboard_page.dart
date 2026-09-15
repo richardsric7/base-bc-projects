@@ -12,6 +12,7 @@ import '../../store/wallet_state.dart';
 import '../../api/assets_api.dart';
 import '../../api/payments_api.dart';
 import '../../theme/app_theme.dart';
+import '../receipt/receipt_page.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -92,6 +93,10 @@ class _DashboardPageState extends State<DashboardPage> {
               ListTile(
                 title: Text('${record.amount} to ${record.toAddress}'),
                 subtitle: Text(record.txHash, style: const TextStyle(fontFamily: 'monospace', fontSize: 11)),
+                trailing: TextButton(
+                  onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => ReceiptPage(record: record))),
+                  child: const Text('Receipt'),
+                ),
               ),
           ],
         ),
@@ -120,6 +125,46 @@ class _AppDrawer extends StatelessWidget {
             onTap: () {
               Navigator.of(context).pop();
               Navigator.of(context).pushNamed('/send');
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.add_card),
+            title: const Text('Fund wallet'),
+            onTap: () {
+              Navigator.of(context).pop();
+              Navigator.of(context).pushNamed('/fund');
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.swap_horiz),
+            title: const Text('Swap'),
+            onTap: () {
+              Navigator.of(context).pop();
+              Navigator.of(context).pushNamed('/swap');
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.group),
+            title: const Text('Shared access'),
+            onTap: () {
+              Navigator.of(context).pop();
+              Navigator.of(context).pushNamed('/shared-access');
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.token),
+            title: const Text('Tokenize'),
+            onTap: () {
+              Navigator.of(context).pop();
+              Navigator.of(context).pushNamed('/tokenize');
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.account_balance_wallet),
+            title: const Text('My Wallets'),
+            onTap: () {
+              Navigator.of(context).pop();
+              Navigator.of(context).pushNamed('/wallets');
             },
           ),
           ListTile(

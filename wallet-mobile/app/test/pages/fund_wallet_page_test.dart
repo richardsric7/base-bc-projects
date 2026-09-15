@@ -1,0 +1,40 @@
+// Widget test for FundWalletPage in its idle state.
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:provider/provider.dart';
+import 'package:wallet_mobile/app_services.dart';
+import 'package:wallet_mobile/store/wallet_state.dart';
+import 'package:wallet_mobile/theme/app_theme.dart';
+import 'package:wallet_mobile/pages/fund/fund_wallet_page.dart';
+
+import '../test_helpers.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  testWidgets('renders the fund wallet tabs', (tester) async {
+    final services = await buildTestServices();
+    final wallet = WalletState();
+    wallet.hydrate(
+      signer: const RoleState(address: '0x1111111111111111111111111111111111111111', hasVault: true, isUnlocked: true),
+      primary: const RoleState(address: '0x2222222222222222222222222222222222222222', hasVault: true, isUnlocked: true),
+    );
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          Provider<AppServices>.value(value: services),
+          ChangeNotifierProvider<WalletState>.value(value: wallet),
+        ],
+        child: MaterialApp(theme: buildAppTheme(), home: const FundWalletPage()),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Fund wallet'), findsOneWidget);
+    expect(find.text('Card / Bank (Flutterwave)'), findsOneWidget);
+    expect(find.text('Naira (Stablerail)'), findsOneWidget);
+    expect(find.text('Crypto'), findsOneWidget);
+    expect(find.text('Create invoice'), findsOneWidget);
+  });
+}

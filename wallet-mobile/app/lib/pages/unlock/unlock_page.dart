@@ -9,6 +9,7 @@ import 'package:provider/provider.dart';
 import '../../app_services.dart';
 import '../../store/wallet_state.dart';
 import '../../widgets/app_button.dart';
+import '../../widgets/app_button_secondary.dart';
 import '../../widgets/app_text_input.dart';
 import '../../widgets/auth_layout.dart';
 
@@ -57,10 +58,8 @@ class _UnlockPageState extends State<UnlockPage> {
           if (_error.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_error, style: const TextStyle(color: Colors.red))),
           const SizedBox(height: 12),
           AppButton(label: 'Unlock', onPressed: _busy || !needsUnlock ? null : _handleUnlock),
-          // TODO(wallet-mobile): a "lost your key?" recovery entry point,
-          // mirroring wallet-web's RecoveryWizard (wallet-web PLAN.md
-          // §16) - not yet ported here, see wallet-mobile/PLAN.md's
-          // updated roadmap for status.
+          const SizedBox(height: 8),
+          AppButtonSecondary(label: 'Lost access to your key?', onPressed: () => Navigator.of(context).pushNamed('/recovery')),
         ],
       ),
     );

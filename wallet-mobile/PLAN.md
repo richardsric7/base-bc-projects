@@ -571,3 +571,117 @@ suggestions on the new API methods, no warnings/errors); all 11 tests
 pass, including `send_page_test.dart` after updating its "Recipient
 address" text assertion to "Recipient" and regenerating
 `send_page_idle.png`.
+
+### 14.6 Full feature-parity close-out: swap, shared access, tokenization,
+fund/receipt/wallets/recovery
+
+§14.2's "not ported this pass" list is now closed out. Every remaining
+`wallet-web` page (per its own `App.tsx` route table) has a mobile
+counterpart, each following the same pattern used throughout this
+port: read the `wallet-web` source in full, write a matching Dart API
+client in `lib/api/`, write matching Dart page(s) under `lib/pages/`,
+register any new API client on `AppServices`, wire routes into
+`main.dart` (a static `routes` map entry for a fixed path, or an
+`onGenerateRoute` branch for a parameterized one, since Flutter's named-
+route map can't hold a dynamic segment), add a drawer entry where
+`wallet-web` has an equivalent nav entry, `flutter analyze`, add a
+widget test, `flutter test`, and regenerate any golden that shifted.
+
+- **Swap** (`api/swaps_api.dart`, `pages/swap/swap_page.dart`): a
+  generic router-call form (router address/ABI/method/args/value),
+  mirroring `Swap.tsx`'s build -> `signHexDigest` -> submit flow
+  exactly (same shape as Send's own approval flow, §13/§17).
+- **Shared access** (`api/sharedaccess_api.dart`,
+  `pages/sharedaccess/`): wallet listing (mine/shared-with-me, an
+  owner-and-shared badge), group creation, group detail (balance,
+  curated balances, propose payment, add/remove member by username,
+  change threshold, disable group), an approvals inbox, and an
+  approval detail screen (approve/reject with a signed digest) -
+  the mobile counterpart of `sharedAccessApi.ts` and its five
+  `pages/sharedaccess/*.tsx` screens (§7).
+- **Tokenization** (`api/tokenization_api.dart`,
+  `pages/tokenize/`): a 3-tab hub (my applications / new application /
+  my investments) plus an asset detail screen handling both the
+  issuer side (confirm application, confirm fee payment) and the
+  investor side (subscribe with crypto, express interest, early
+  exit), mirroring `tokenizationApi.ts`/`TokenizeHome.tsx`/
+  `AssetDetail.tsx`. This lands in the same pass as the backend's own
+  restricted-asset correction below, so the mobile subscribe flow
+  already goes through the corrected buyer-KYC-gated, on-chain-
+  authorized purchase path - no separate mobile-side change was
+  needed for that fix, since authorization and KYC are enforced
+  server-side in `BuildCryptoPurchase`/`BuildFiatPurchase`, not
+  client-side.
+- **Fund wallet** (`api/fiat_api.dart`, `api/stablerail_api.dart`,
+  `api/crypto_api.dart`, `pages/fund/fund_wallet_page.dart`): the
+  three funding rails as tabs (Flutterwave card/bank invoice, NGN/
+  Stablerail BVN-onboarding-and-onramp, crypto deposit-address-and-
+  withdrawal), mirroring `fiatApi.ts`/`stablerailApi.ts`/
+  `cryptoApi.ts`/`FundWallet.tsx`. Withdrawal is the one path here
+  that moves the user's own on-chain funds, so it alone follows
+  build -> `signHexDigest` -> confirm; fiat/stablerail top-ups and
+  crypto deposits never touch the signer key.
+- **Receipt** (`pages/receipt/receipt_page.dart`): renders a
+  `PaymentHistoryRecord`'s from/to/amount/tx-hash-with-explorer-link/
+  date, mirroring `Receipt.tsx`. `wallet-web` reaches it via router
+  state from `Send.tsx`'s success view or a `Dashboard.tsx` history
+  row; there being no router-state layer on mobile, the record is
+  simply passed as a constructor argument through a direct
+  `Navigator.push` from the equivalent spot in `send_page.dart`
+  (a new "View receipt" link after a successful send) and
+  `dashboard_page.dart` (a new "Receipt" button per history row).
+  `wallet-web`'s own browser-print-to-PDF button has no mobile
+  equivalent and was not ported - a deliberate simplification (there
+  is no comparable OS-level "print to PDF" affordance to invoke from
+  within a Flutter app without adding a new dependency for one static
+  document), not a missing feature; the fields shown are identical.
+- **My Wallets** (`pages/wallets/my_wallets_page.dart`): lists the
+  caller's own wallet directory and lets Tag/Description/Alias be
+  edited in place, using `users_api.dart`'s already-ported
+  `listMyWallets`/`updateWalletMetadata` (added back in §14.5 ahead of
+  a screen to use them, exactly as anticipated there) - mirrors
+  `MyWallets.tsx`.
+- **Recovery** (`api/recovery_api.dart`,
+  `pages/settings/recovery_settings_page.dart`,
+  `pages/recovery/recovery_wizard_page.dart`): the owner-side settings
+  screen (security-question answers, Branch A/B enable-disable, both
+  gated behind the OTP-plus-security-answer factors wallet-backend
+  PLAN.md §15 requires) is now linked from `settings_page.dart`
+  (previously a bare stub with only wallet addresses/network/wipe);
+  the wizard (username -> branch choice -> generate-and-confirm a new
+  signer mnemonic -> OTP + security answers -> recover) replaces
+  `unlock_page.dart`'s `TODO(wallet-mobile)` with a real "Lost access
+  to your key?" entry point, reachable with no existing signer at all
+  - the whole point of recovery. Mirrors `RecoverySettings.tsx`/
+  `RecoveryWizard.tsx`/`recoveryApi.ts` exactly, including the
+  signRequestMessage-vs-signHexDigest distinction each branch depends
+  on (a human-composed `RecoveryMessage` for the new address's own
+  proof-of-control signature; raw-digest signing for the Safe
+  owner-swap SafeTxHashes in Branch B).
+
+**Restricted tokenized-asset correction (backend, same pass, not a
+mobile change)**: the user flagged that every tokenized asset is a
+restricted asset - on Base this means an allow-list on the ERC-20
+itself, the equivalent of Stellar's issuer `AUTH_REQUIRED` trustline
+flag the original app relied on, which `TokenizedAsset.sol` had never
+carried (a prior deliberate "plain ERC-20" simplification, now
+overridden). Fixed in `wallet-backend`: the contract gained
+`isAuthorized`/`authorize`/`deauthorize`, enforced in
+`_beforeTokenTransfer`, with `mint` auto-authorizing its own recipient
+(so the three existing mint call sites needed no changes); the two
+buyer-facing purchase paths (`BuildCryptoPurchase`/`BuildFiatPurchase`)
+now call `authorizeHolder` on the buyer's wallet and `requireBuyerKYC`
+(`buyer.KYCVerifiedLevel == 0` -> `apperrors.Forbidden`, matching the
+original's own `walletOwner.KYCVerified == 0` check) before building
+the purchase - closing a real gap where neither path had ever checked
+KYC. Full detail in `wallet-backend/PLAN.md` §22, including what's
+deliberately not covered yet (secondary-market authorization for a
+non-purchasing counterparty - flagged as real future work, not
+silently skipped).
+
+**Verified**: `flutter analyze` clean (the same 4 pre-existing
+`info`-level suggestions as before this pass, no new warnings/errors);
+all mobile tests pass, including 5 new widget tests for the pages
+above and a `dashboard_drawer.png` golden regeneration for each of the
+five new drawer entries added across this pass (Swap, Shared access,
+Tokenize, Fund wallet, My Wallets).
